@@ -1,0 +1,54 @@
+# @package pileup
+image_width: 300
+image_height: 100
+image_channels: [0, 1, 2, 3, 4, 5, 6, 7]
+
+variant_padding: 100
+graph_flank: 1000
+fetch_flank: 1000
+realigner_flank: 1000
+
+insert_bases: false
+
+aligned_base_pixel: 255
+soft_clip_base_pixel: 128
+match_base_pixel: ${pileup.aligned_base_pixel}
+mismatch_base_pixel: ${pileup.aligned_base_pixel}
+insert_base_pixel: 64
+
+insert_size_mean_pixel: 128
+insert_size_sd_pixel: 24
+
+binary_allele: false
+ref_allele_pixel: 50
+amb_allele_pixel: 150
+alt_allele_pixel: 250
+allele_pixel_range: 100
+min_normalized_allele_score: -.inf
+max_alleleq: 40
+
+discrete_mapq: false
+mapq0_pixel: 64
+
+max_mapq: 60
+
+max_baseq: 40
+
+positive_strand_pixel: 70
+negative_strand_pixel: 240
+
+phase_tag: "HP"
+haplotag_reads: false
+haplotag_sim: false
+
+
+anchor_min_aligned: 3
+assign_delta: 1.0
+
+save_realignment_bam_dir: null
+
+# Downsample reads to this fraction of the total reads
+downsample: 1.0
+aligner: "bwa"
+
+max_exhaustive_records: 2

@@ -1,0 +1,20 @@
+app_name: npsv3
+
+# Help header, customize to describe your app to your users
+header: |-
+  == ${hydra.help.app_name} ==
+  Deep-learning based SV genotyper for short read sequencing data
+
+footer: |-
+  Configuration managed by Hydra (https://hydra.cc)
+  Use --hydra-help to view Hydra specific help
+
+template: |-
+  ${hydra.help.header}
+
+  This application is under active development
+  -------
+  $CONFIG
+  -------
+
+  ${hydra.help.footer}

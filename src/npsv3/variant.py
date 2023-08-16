@@ -1,0 +1,198 @@
+import hashlib
+import logging
+import os
+import re
+import typing
+
+import pysam
+
+from npsv3.util.range import Range
+
+_VALID_BASES_RE = re.compile(r"[ACGTN]+")
+
+
+def vg_variant_id(record: pysam.VariantRecord) -> str:
+    # https://github.com/vgteam/vg/blob/da34f4e54b0e64d1b741da102217c97d5333fabc/src/utility.cpp#L505
+    assert record.ref is not None and record.alts is not None
+    variant_string = f"{record.contig}\n{record.pos}\n{record.ref.upper()}\n"
+    for alt in record.alts:
+        variant_string += f"{alt.upper()}\n"
+    return hashlib.sha1(bytes(variant_string, "ascii")).hexdigest()  # noqa: S324
+
+
+# Adapted from nucleus:
+# https://github.com/google/nucleus/blob/3bd27ac076a6f3f93e49a27ed60661858e727dda/nucleus/util/variant_utils.py#L718
+def generate_allele_indices(num_alleles: int, ploidy: int) -> typing.Generator[typing.Tuple[int, ...], None, None]:
+    """Generate VCF allele indices (genotype) in order of the VCF genotype likelihood (or other 'G') field
+
+    Args:
+        num_alt (int): Number of alternate alleles
+        ploidy (int, optional): Ploidy. Defaults to 2.
+
+    Raises:
+        NotImplementedError: Specified ploidy is not supported
+
+    Yields:
+        Tuple[int,...]: Tuple of genotypes for each index in genotypes field, e.g. (0,0), (0,1)...
+    """
+    if ploidy == 1:
+        for i in range(num_alleles):
+            yield (i,)
+    elif ploidy == 2:
+        for j in range(num_alleles):
+            for i in range(j + 1):
+                yield (i, j)
+    else:
+        msg = "Only ploidy <= 2 is currently supported"
+        raise NotImplementedError(msg)
+
+
+# Adapted from nucleus:
+# https://github.com/google/nucleus/blob/3bd27ac076a6f3f93e49a27ed60661858e727dda/nucleus/util/variant_utils.py#L793
+def genotype_field_index(allele_indices: typing.Sequence[int]) -> int:
+    """Determine index in VCF genotype likelihood (or other 'G') field for genotype
+
+    Args:
+        allele_indices (Sequence[int]): Genotype, e.g. (0,1)
+
+    Raises:
+        NotImplementedError: Specified ploidy is not supported
+
+    Returns:
+        int: Index in genotype field
+    """
+    if len(allele_indices) == 1:
+        return allele_indices[0]
+    elif len(allele_indices) == 2:
+        a1, a2 = sorted(allele_indices)
+        return a1 + (a2 * (a2 + 1) // 2)
+    else:
+        msg = "Only ploidy <= 2 is currently supported"
+        raise NotImplementedError(msg)
+
+
+def genotype_count(num_alleles: int, ploidy: int):
+    if ploidy <= 2:
+        return (num_alleles * (num_alleles + 1)) // ploidy
+    else:
+        msg = "Only ploidy <= 2 is currently supported"
+        raise NotImplementedError(msg)
+
+
+def _has_symbolic_allele(record):
+    for alt in record.alts:
+        if alt.startswith("<") or alt.endswith(">"):
+            return True
+    return False
+
+
+class Variant:
+    def __init__(self, record: pysam.VariantRecord):
+        """Initialize Variant object from pysam.VariantRecord
+
+        Args:
+            record (pysam.VariantRecord): Underlying VariantRecord
+        """
+        self._record = record
+
+        self._sequence_resolved = not _has_symbolic_allele(record)
+        if self._sequence_resolved:
+            self._padding = len(os.path.commonprefix(record.alleles))
+            self._right_padding = [
+                len(os.path.commonprefix([record.ref[self._padding :][::-1], a[self._padding :][::-1]]))
+                for a in record.alts
+            ]
+        else:
+            assert len(record.alts) == 1, "Multiallelic symbolic variants not currently supported"
+            self._padding = 1
+            self._right_padding = [0] * len(record.alts)
+
+        if self._padding > 1:
+            logging.info("Variant has more than expected number of padding bases, is the VCF normalized?")
+
+    @property
+    def contig(self):
+        return self._record.contig
+
+    @property
+    def start(self):
+        return self._record.start
+
+    @property
+    def end(self):
+        return self._record.stop
+
+    @property
+    def num_alt(self):
+        # TODO: Exclude alleles?
+        return len(self._record.alts)
+
+    @property
+    def allele_indices(self):
+        return range(1 + self.num_alt)
+
+    @property
+    def alt_allele_indices(self):
+        return range(1, 1 + self.num_alt)
+
+    @property
+    def reference_region(self) -> Range:
+        """Returns changed region of the reference genome, excluding any padding bases"""
+        return Range(self.contig, self.start + self._padding, self.end)
+
+    @classmethod
+    def from_pysam(cls, record: pysam.VariantRecord) -> "Variant":
+        """Factory method for creating appropriate Variant objects"""
+        if not _has_symbolic_allele(record):
+            return _SequenceResolvedVariant(record)
+        else:
+            msg = "Symbolic variants not currently supported"
+            raise NotImplementedError(msg)
+
+
+class _SequenceResolvedVariant(Variant):
+    def __init__(self, record):
+        Variant.__init__(self, record)
+        assert self._sequence_resolved
+
+    @property
+    def ref_length(self):
+        return len(self._record.alleles[0])
+
+    def alt_length(self, allele=1):
+        assert allele >= 1
+        alt_allele = self._record.alleles[allele]
+        return len(alt_allele)
+
+    def _alt_seq(self, ref_seq, flank, allele=1):
+        assert allele >= 1
+
+        alt_allele = self._record.alleles[allele].upper()
+        assert _VALID_BASES_RE.fullmatch(alt_allele), "Unexpected base in sequence resolved allele"
+        return ref_seq[:flank] + alt_allele[self._padding :] + ref_seq[-flank:]
+
+
+def overlapping_records(vcf_path: str, flank=0):
+    # We assume VCF is in sorted order
+    current_range = None
+    current_records = []
+
+    with pysam.VariantFile(vcf_path) as vcf_file:
+        for record in vcf_file:
+            variant = Variant.from_pysam(record)
+            variant_range = variant.reference_region.expand(flank)
+            if current_range is None:
+                current_range = variant_range
+                current_records = [record]
+            elif current_range.overlaps(variant_range):
+                current_range = current_range.union(variant_range)
+                current_records.append(record)
+            else:
+                # Next variant doesn't overlap, so yield current records and then reset
+                yield current_range, current_records
+                current_range = variant_range
+                current_records = [record]
+
+        # yield any remaining records
+        if current_records:
+            yield current_range, current_records

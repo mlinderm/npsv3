@@ -1,0 +1,6 @@
+# @package simulation
+replicates: 1
+augment: false
+chrom_norm_covg: false
+gc_norm_covg: false
+save_sim_bam_dir: ???

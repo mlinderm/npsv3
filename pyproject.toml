@@ -1,0 +1,191 @@
+[build-system]
+requires = [
+  "setuptools>=61",
+  "wheel",
+  "cmake>=3.12",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npsv3"
+dynamic = ["version"]
+description = ''
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text ="MIT"}
+keywords = []
+authors = [
+  { name = "Michael Linderman", email = "mlinderman@middlebury.edu" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "hydra-core>=1.2",
+  "portalocker",
+  "ray>=1.2.0",
+  "tqdm",
+  "numpy>=1.14",
+  "pandas>=1.3",
+  "scipy>=1.2.0",
+  "intervaltree",
+  "pysam>=0.16",
+  "pybedtools",
+  "whatshap==1.4",
+  "Pillow",
+  "tensorflow>=2.13"
+]
+
+[project.urls]
+Documentation = "https://github.com/mlinderm/npsv3#readme"
+Issues = "https://github.com/mlinderm/npsv3/issues"
+Source = "https://github.com/mlinderm/npsv3"
+
+[project.scripts]
+npsv3 = "npsv3.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"npsv3.conf" = ["**/*.yaml"]
+
+[tool.hatch.version]
+path = "src/npsv3/__about__.py"
+
+[tool.hatch.envs.default]
+dependencies = [
+  "coverage[toml]>=6.5",
+  "pytest",
+]
+[tool.hatch.envs.default.scripts]
+test = "pytest tests {args:tests}"
+test-cov = "coverage run -m pytest {args:tests}"
+cov-report = [
+  "- coverage combine",
+  "coverage report",
+]
+cov = [
+  "test-cov",
+  "cov-report",
+]
+[tool.hatch.envs.default.env-vars]
+TF_CPP_MIN_LOG_LEVEL = "1"
+
+
+[[tool.hatch.envs.all.matrix]]
+python = ["3.8", "3.9", "3.10", "3.11"]
+
+[tool.hatch.envs.lint]
+dependencies = [
+  "black>=23.1.0",
+  "mypy>=1.0.0",
+  "ruff>=0.0.243",
+]
+[tool.hatch.envs.lint.scripts]
+typing = "mypy --exclude lib/ --install-types --non-interactive {args:src/npsv3 tests}"
+style = [
+  "ruff {args:.}",
+  "black --check --diff {args:.}",
+]
+fmt = [
+  "black {args:.}",
+  "ruff --fix {args:.}",
+  "style",
+]
+all = [
+  "style",
+  "typing",
+]
+
+[tool.black]
+target-version = ["py38"]
+line-length = 120
+skip-string-normalization = true
+extend-exclude = "lib"
+
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+select = [
+  "A",
+  "ARG",
+  "B",
+  "C",
+  "DTZ",
+  "E",
+  "EM",
+  "F",
+  "FBT",
+  "I",
+  "ICN",
+  "ISC",
+  "N",
+  "PLC",
+  "PLE",
+  "PLR",
+  "PLW",
+  "Q",
+  "RUF",
+  "S",
+  "T",
+  "TID",
+  "UP",
+  "W",
+  "YTT",
+]
+ignore = [
+  # Allow non-abstract empty methods in abstract base classes
+  "B027",
+  # Allow boolean positional values in function calls, like `dict.get(... True)`
+  "FBT003",
+  # Ignore checks for possible passwords
+  "S105", "S106", "S107",
+  # Ignore complexity
+  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+  # Allow assertions
+  "S101",
+  # Allow subprocess calls
+  "S602", "S603",
+]
+unfixable = [
+  # Don't touch unused imports
+  "F401",
+]
+extend-exclude = ["lib"]
+
+[tool.ruff.isort]
+known-first-party = ["npsv3"]
+
+[tool.ruff.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.per-file-ignores]
+# Tests can use magic values, assertions, and relative imports
+"tests/**/*" = ["PLR2004", "S101", "TID252"]
+
+[tool.coverage.run]
+source_pkgs = ["npsv3", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/npsv3/__about__.py",
+]
+
+[tool.coverage.paths]
+npsv3 = ["src/npsv3", "*/npsv3/src/npsv3"]
+tests = ["tests", "*/npsv3/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
