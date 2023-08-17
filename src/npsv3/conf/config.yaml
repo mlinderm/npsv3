@@ -6,6 +6,10 @@ defaults:
   - _self_
   - override hydra/help: custom_help
 
+# Mimic Hydra <= 1.1 by changing the working directory to the output directory
+hydra:
+  job:
+    chdir: true
 
 # Threads to use for multi-threaded commands
 threads: 1

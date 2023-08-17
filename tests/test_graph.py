@@ -28,7 +28,7 @@ class TestGraphConstructionFromVCF:
             ), "VCF should translate to a single path for each haplotype"
 
         # Use exhaustive generation
-        haplotypes = graph.generate_possible_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12#0")
+        haplotypes = graph.generate_possible_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12#0", region)
         assert len(haplotypes) == 2, "A single isolated variant should only have two haplotypes"
         for i in range(2):
             assert haplotypes[i].paths == {f"_alt_553e586e2a8e7c2fd70661fec7b529c5453a9b45_{i}"}
@@ -40,7 +40,7 @@ class TestGraphConstructionFromVCF:
         # Variant path should match the background
         assert graph.nodes_on_path("HG002#0#12#0") == haplotypes[1].nodes
 
-        variant_haplotypes = graph.generate_possible_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "12")
+        variant_haplotypes = graph.generate_possible_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "12", region)
         assert len(variant_haplotypes) == 2, "The reference background should generate the same number of haplotypes"
 
         assert len(variant_haplotypes[0].sequence()) == region.length
@@ -53,17 +53,31 @@ class TestGraphConstructionFromVCF:
         assert len(query_haplotypes[0].sequence()) == region.length
         assert len(query_haplotypes[1].sequence()) == region.length - 822
 
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    def test_insertion_haplotype_generation(self):
+        region = Range("chrY", 56880140, 56880241)
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            data_path("chrY_56879191_56881191.vcf.gz"),
+            region,
+            inference_vcf=data_path("chrY_56879191_56881191.sv.vcf.gz"),
+        )    
+
+        # Use exhaustive generation
+        haplotypes = graph.generate_possible_haplotypes(data_path("chrY_56879191_56881191.sv.vcf.gz"), "chrY", region)
+
     @pytest.mark.skip()
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
     def test_complex_haplotype_generation(self):
+        region = Range("chr13", 29557413, 29560096)
         graph = Graph.from_vcf(
-            HG38_REF_FASTA, data_path("chr13_29557414_29560096.vcf.gz"), Range("chr13", 29557413, 29560096)
+            HG38_REF_FASTA, data_path("chr13_29557414_29560096.vcf.gz"), region,
         )
         for path in ("chr13", "NA12878#0#chr13#0", "NA12878#1#chr13#0"):
             assert graph.has_path(path)
 
         haplotypes = graph.generate_possible_haplotypes(
-            data_path("chr13_29557414_29560096.inference.vcf.gz"), "NA12878#0#chr13#0"
+            data_path("chr13_29557414_29560096.inference.vcf.gz"), "NA12878#0#chr13#0", region,
         )
         assert len(haplotypes) == 15608
 

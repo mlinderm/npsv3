@@ -438,7 +438,7 @@ def make_example_from_region(
 
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
-        realign_haplotypes = graph.generate_possible_haplotypes(inference_vcf, region.contig)
+        realign_haplotypes = graph.generate_possible_haplotypes(inference_vcf, region.contig, example_region)
 
         realign_fasta_path = os.path.join(tempdir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
@@ -501,7 +501,7 @@ def make_example_from_region(
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Checked if the backgrounds are identical, if so, we can generate the haplotypes once
     backgrounds = [
-        graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}#0") for i in range(ploidy)
+        graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}#0", example_region) for i in range(ploidy)
     ]
     assert (
         len({len(background) for background in backgrounds}) == 1
@@ -657,6 +657,7 @@ def vcf_to_tfrecords(
         running_total += count
         running_max = max(running_max, count)
 
+        # TODO: Strip the padding bases from the region
         (exhaustive_regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region)
 
     logging.info(

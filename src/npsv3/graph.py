@@ -107,11 +107,11 @@ class Graph:
                 seq += node_seq
         return seq
 
-    def generate_possible_haplotypes(self, inference_vcf: str, base_path_name: str) -> List["InferenceHaplotype"]:
+    def generate_possible_haplotypes(self, inference_vcf: str, base_path_name: str, region: Range) -> List["InferenceHaplotype"]:
         # Extract variant paths from the inference VCF
         inference_paths_ordered = []
         with pysam.VariantFile(inference_vcf, drop_samples=True) as vcf_file:
-            for record in vcf_file:
+            for record in vcf_file.fetch(**region.pysam_fetch):
                 variant_id = variant.vg_variant_id(record)
                 assert record.alts is not None
                 for allele_idx in range(len(record.alts) + 1):
