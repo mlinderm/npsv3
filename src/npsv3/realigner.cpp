@@ -340,6 +340,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
 
   // The remaining sequences at the alternate sequences
   if (kwargs && kwargs.contains("num_alts")) {
+    // TODO: Prevent memory corruption errors if number of sequences not provided
     alt_indexes_.reserve(py::cast<int>(kwargs["num_alts"]));
   }
   while (contigs.GetNextSequence(next_sequence)) {

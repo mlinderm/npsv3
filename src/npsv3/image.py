@@ -1,8 +1,10 @@
+import itertools
 import logging
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import typing
 from collections import defaultdict
@@ -24,7 +26,7 @@ from npsv3.realigner import AlleleRealignment, FragmentRealigner, realign_fragme
 from npsv3.simulation import augment_sample, simulate_variant_sequencing
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
-from npsv3.variant import generate_allele_indices, genotype_field_index, overlapping_records
+from npsv3.variant import generate_allele_indices, genotype_field_index, overlapping_records, vg_variant_id
 
 MAX_PIXEL_VALUE = 254.0  # Adapted from DeepVariant
 
@@ -425,6 +427,7 @@ def make_example_from_region(
     generator: ImageGenerator = None,
     addl_features: typing.Optional[dict] = None,
 ):
+    print(region, file=sys.stderr)
     # Create generator if not provided
     generator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
 
@@ -433,12 +436,17 @@ def make_example_from_region(
         cfg.reference, background_vcf, region.expand(cfg.pileup.graph_flank), inference_vcf=inference_vcf
     )
 
-    # Set up flanks to minimize the image compression
+    # Set up image flanks to minimize compression
     example_region = generator.image_region(region)
 
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
+        assert graph.is_bubble_path(region.contig), "Graph over region must form bubble for reference background"
         realign_haplotypes = graph.generate_possible_haplotypes(inference_vcf, region.contig, example_region)
+        assert len(realign_haplotypes) >= 1
+        assert realign_haplotypes[0].nodes == graph.nodes_on_path(
+            region.contig
+        ), "First haplotype must be the reference"
 
         realign_fasta_path = os.path.join(tempdir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
@@ -448,14 +456,14 @@ def make_example_from_region(
 
         # Construct realigner once for all images for this variant,
         # TODO: Incorporate IUPAC FASTA for scoring?
-        addl_args = {}
+        addl_args = {"num_alts": len(realign_haplotypes) - 1}  # This is needed to prevent C++ errors
         realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
 
         # Extract the reference sequence from the first haplotype
         ref_seq = realign_haplotypes[0].sequence()[
             example_region.start - graph.region.start : example_region.end - graph.region.end
         ]
-        assert len(ref_seq) == example_region.length
+        assert len(ref_seq) == example_region.length, "Reference sequence length does not match the region size"
 
     # Construct image for "real" data
     with tempfile.TemporaryDirectory() as tempdir:
@@ -499,34 +507,32 @@ def make_example_from_region(
         repl_samples = [sample] * cfg.simulation.replicates
 
     # Generate the possible haplotypes for this region on the possible backgrounds
-    # TODO: Checked if the backgrounds are identical, if so, we can generate the haplotypes once
+    # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
+    assert all(graph.is_bubble_path(f"{sample.name}#{i}#{region.contig}#0") for i in range(ploidy)), "Graph must form bubble for haplotype paths"
     backgrounds = [
-        graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}#0", example_region) for i in range(ploidy)
+        graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}#0", example_region)
+        for i in range(ploidy)
     ]
-    assert (
-        len({len(background) for background in backgrounds}) == 1
-    ), "All backgrounds must have the same number of potential haplotypes"
-    num_alleles = len(backgrounds[0])
-
-    # For each background, one of the haplotypes must be the true haplotype
-    labels = []
-    for i in range(ploidy):
-        haplotypes = backgrounds[i]
-        base_path_nodes = graph.nodes_on_path(f"{sample.name}#{i}#{region.contig}#0")
-        for allele_index in range(len(haplotypes)):
-            if haplotypes[allele_index].nodes == base_path_nodes:
-                labels.append(allele_index)
-                break
-
-    if len(labels) == ploidy:
-        feature["label"] = _int_feature([genotype_field_index(labels)])
 
     # Generate the relevant sequences once, which are then combined to create the fasta for simulation.
     # TODO?: Do we need pad out the shorter sequences?
     sequences = [[haplotype.sequence() for haplotype in background] for background in backgrounds]
 
+    # For fully labeled data, one of the haplotypes should be the true haplotype
+    labels = []
+    for allele, haplotypes in enumerate(backgrounds):
+        base_path_nodes = graph.nodes_on_path(f"{sample.name}#{allele}#{region.contig}#0")
+        for allele_index, haplotype in enumerate(haplotypes):
+            if haplotype.nodes == base_path_nodes:
+                labels.append(allele_index)
+                break
+
+    if len(labels) == ploidy:
+        feature["label"] = _int_feature(np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)))
+
+    # TODO?: Do we want to only have one of 0/1, 1/0?
     alleles_encoded_images = []
-    for allele_indices in generate_allele_indices(num_alleles, ploidy):
+    for allele_indices in itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds)):
         # Get the sequences for this haplotype combination
         gt_sequences = [sequences[i][allele_index] for i, allele_index in enumerate(allele_indices)]
         with tempfile.TemporaryDirectory() as tempdir:
@@ -651,14 +657,22 @@ def vcf_to_tfrecords(
     # Idenitify regions in the inference with overlapping SVs (i.e., identify bubbles)
     exhaustive_regions, search_regions = [], []
     running_total = running_max = 0
-    for region, records in overlapping_records(inference_vcf, flank=cfg.pileup.variant_padding // 2):
+    group_padding = cfg.pileup.variant_padding // 2
+    for region, records in overlapping_records(inference_vcf, flank=group_padding):
         count = len(records)
+
+        # TODO: Filter out Ns
+        # for record in records:
+        #     if vg_variant_id(record) == "cd8536300a04f95e268065d36bb58150081a8f65":
+        #         print(region, record)
+        #print(region.expand(-group_padding))        
 
         running_total += count
         running_max = max(running_max, count)
 
-        # TODO: Strip the padding bases from the region
-        (exhaustive_regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region)
+        (exhaustive_regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region.expand(-group_padding))
+
+    #assert False
 
     logging.info(
         "Identified %d regions with mean %f and max %d records",
@@ -782,7 +796,7 @@ def example_to_image(cfg, example: tf.train.Example, out_path: str, with_simulat
 
 
 def load_example_dataset(
-    filenames, with_label=False, with_simulations=False, num_parallel_reads=None, pileup_image_channels=None
+    filenames, with_label=False, with_simulations=False, num_parallel_reads=None, pileup_image_channels=None, ploidy=2,
 ) -> tf.data.Dataset:
     if isinstance(filenames, str):
         filenames = [filenames]

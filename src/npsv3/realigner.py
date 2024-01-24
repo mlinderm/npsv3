@@ -36,7 +36,7 @@ def realign_fragment(realigner: FragmentRealigner, fragment: Fragment, assign_de
     if fragment.read2:
         kw["read2_seq"] = fragment.read2.query_sequence
         kw["read2_qual"] = _quality_string(fragment.read2)
-
+    # print(name, read1_seq, kw["read2_seq"])
     ref_quality, _, alt_quality, _, read_scores = realigner.realign_read_pair(name, read1_seq, read1_qual, **kw)
     assign = _realignment_assignment(ref_quality, alt_quality, assign_delta=assign_delta)
 

@@ -107,12 +107,16 @@ class Graph:
                 seq += node_seq
         return seq
 
-    def generate_possible_haplotypes(self, inference_vcf: str, base_path_name: str, region: Range) -> List["InferenceHaplotype"]:
+    def generate_possible_haplotypes(
+        self, inference_vcf: str, base_path_name: str, region: Range
+    ) -> List["InferenceHaplotype"]:
         # Extract variant paths from the inference VCF
         inference_paths_ordered = []
         with pysam.VariantFile(inference_vcf, drop_samples=True) as vcf_file:
             for record in vcf_file.fetch(**region.pysam_fetch):
                 variant_id = variant.vg_variant_id(record)
+                if variant_path_name(variant_id, 0) not in self.path_nodes:
+                    continue # Variant "fell outside the graph"             
                 assert record.alts is not None
                 for allele_idx in range(len(record.alts) + 1):
                     inference_paths_ordered.append(variant_path_name(variant_id, allele_idx))
@@ -132,7 +136,7 @@ class Graph:
         excluded_paths: Set[str] = set()
         for _, paths_iter in itertools.groupby(sorted(removable_paths, key=extract_variant_id), extract_variant_id):
             paths = list(paths_iter)
-            assert len(paths) >= 2  # noqa: PLR2004
+            
             # fmt: off
             retain_path = next(
                 (path for path in paths if self.path_nodes[path] & base_path_nodes), None
@@ -152,23 +156,30 @@ class Graph:
         def _generate_all_paths(node, path):
             path = [*path, self._graph.get_id(node)]
 
-            next_nodes = []
-            self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))
-            if len(next_nodes) == 0:
-                # Reached a tip/terminus
-                haplotypes.append(
-                    InferenceHaplotype(
-                        self,
-                        path,
-                        set(itertools.chain.from_iterable(self.node_paths[node] for node in path)) & inference_paths,
+            while True:
+                next_nodes = []
+                self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))
+                if len(next_nodes) == 0:
+                    # Reached a tip/terminus
+                    haplotypes.append(
+                        InferenceHaplotype(
+                            self,
+                            path,
+                            set(itertools.chain.from_iterable(self.node_paths[node] for node in path)) & inference_paths,
+                        )
                     )
-                )
-                return
+                    return
 
-            for next_node in next_nodes:
-                next_node_id = self._graph.get_id(next_node)
-                if next_node_id not in excluded_nodes:
-                    _generate_all_paths(next_node, path)
+                recurse_nodes = [n for n in next_nodes if self._graph.get_id(n) not in excluded_nodes]
+                if len(recurse_nodes) == 1:
+                    # Optimize for the common case with no branching
+                    node = recurse_nodes[0]
+                    path.append(self._graph.get_id(node))
+                else:
+                    break
+            for next_node in recurse_nodes:
+                _generate_all_paths(next_node, path)
+               
 
         _generate_all_paths(self.first_handle(base_path_name), [])
 
@@ -218,7 +229,11 @@ class Graph:
             else:
                 node_id = next(iter(base_path_next_nodes))
 
-    def _get_source_and_sink(self, path_name: str):
+    def is_bubble_path(self, path_name: str) -> bool:
+        source_nodes, _, _, sink_nodes = self._get_source_and_sink(path_name)
+        return len(source_nodes) == 0 and len(sink_nodes) == 0
+
+    def _get_source_and_sink(self, path_name: str, added_nodes: Set[int] = None):
         path = self._graph.get_path_handle(path_name)
 
         # True to traverse "left" or  "upstream" edges to find source nodes
@@ -226,22 +241,49 @@ class Graph:
         start_node = self._graph.get_handle_of_step(self._graph.path_begin(path))
         self._graph.follow_edges(start_node, True, lambda n: source_nodes.append(n))
 
+        # If one of the source nodes is an added "empty" sequence node, then traverse to its sources
+        while added_nodes is not None:
+            for i, source in enumerate(source_nodes):
+                if self._graph.get_id(source) in added_nodes:
+                    source_nodes = source_nodes[:i] + source_nodes[i + 1 :]
+                    self._graph.follow_edges(source, True, lambda n: source_nodes.append(n))
+                    break
+            else:
+                break  # No added nodes found
+
         # False to traverse "right" or "downstream" edges to find sink nodes
         sink_nodes = []
         end_node = self._graph.get_handle_of_step(self._graph.path_back(path))
         self._graph.follow_edges(end_node, False, lambda n: sink_nodes.append(n))
+
+        # If one of the sink nodes is an added "empty" sequence node, then traverse to its sinks
+        while added_nodes is not None:
+            for i, sink in enumerate(sink_nodes):
+                if self._graph.get_id(sink) in added_nodes:
+                    sink_nodes = sink_nodes[:i] + sink_nodes[i + 1 :]
+                    self._graph.follow_edges(sink, False, lambda n: sink_nodes.append(n))
+                    break
+            else:
+                break  # No added nodes found
 
         return source_nodes, start_node, end_node, sink_nodes
 
     def _rewrite_edge_with_alt_path(
         self, source_nodes: Iterable[odgi.handle], sink_nodes: Iterable[odgi.handle], new_path_name: str
     ):
-        new_node = self._graph.create_handle("*")
-        for source in source_nodes:
-            self._graph.create_edge(source, new_node)
-        for sink in sink_nodes:
-            self._graph.create_edge(new_node, sink)
+        # Identify node pairs that are actually connected by an edge
+        filtered_edges = [edge for edge in itertools.product(source_nodes, sink_nodes) if self._graph.has_edge(*edge)]
+        assert len(filtered_edges) > 0
 
+        # Create a new node to represent the edge
+        new_node = self._graph.create_handle("*")
+        for source, sink in filtered_edges:
+            if not self._graph.has_edge(source, new_node):
+                self._graph.create_edge(source, new_node)
+            if not self._graph.has_edge(new_node, new_node):
+                self._graph.create_edge(new_node, sink)
+
+        # Create a new path for variant allele
         new_path = self._graph.create_path_handle(new_path_name)
         self._graph.append_step(new_path, new_node)
 
@@ -261,9 +303,10 @@ class Graph:
                         self._graph.rewrite_segment(step, next_step, [source, new_node, sink])
 
         # Remove the original edge(s)
-        for source, sink in itertools.product(source_nodes, sink_nodes):
-            if self._graph.has_edge(source, sink):
-                self._graph.destroy_edge(source, sink)
+        for source, sink in filtered_edges:
+            self._graph.destroy_edge(source, sink)
+
+        return new_node
 
     @classmethod
     def from_vcf(cls, reference_fasta: str, background_vcf: str, region: Range, inference_vcf: Optional[str] = None):
@@ -355,6 +398,19 @@ class Graph:
             else:
                 merged_graph_vcf = background_vcf
 
+            # Do we start or end on a variant (such that the graph does not form a bubble)? If so, we we want to extend the flanks
+            # to ensure valid and starting ending nodes.
+            new_start, new_end = region.start, region.end
+            with pysam.VariantFile(merged_graph_vcf, drop_samples=True) as vcf_file:
+                for record in vcf_file.fetch(contig=region.contig, start=new_start, end=new_start+1):
+                    if record.start == new_start:
+                        new_start = record.start - 1
+                for record in vcf_file.fetch(contig=region.contig, start=new_end-1, end=new_end):
+                    if record.stop == new_end:
+                        new_end = record.stop + 1
+            if new_start != region.start or new_end != region.end:
+                return cls.from_vcf(reference_fasta, background_vcf, Range(region.contig, new_start, new_end), inference_vcf)
+                
             # Use VG to convert VCF to GFA with paths from haplotype VCF
 
             # 1. Construct vg graph from haplotype VCF, including all alt paths
@@ -362,7 +418,6 @@ class Graph:
             gbwt_path = os.path.join(temp_dir, "graph.gbwt")
             gfa_path = os.path.join(temp_dir, "graph.gfa")
 
-            # --no-trim-indels \
             # This side effect of keeping of the leading indel bases is the potential for broken haplotypes
             # so instead we add "empty" nodes back into the graph after initial construction
 
@@ -417,10 +472,13 @@ class Graph:
             # 4. Construct graph object from GFA file
             graph = cls(gfa_path, region)
 
-            # 5. Add additional nodes to the graph for otherwise "empty" deletion and insertion alleles
+            # 5. Add additional nodes to the graph for otherwise "empty" deletion and insertion alleles, detecting
+            # co-located variants (where we have already made modifications)
             with pysam.VariantFile(merged_graph_vcf, drop_samples=True) as vcf_file:
+                added_edges = {}
+                added_nodes = set()
                 for record in vcf_file.fetch(**region.pysam_fetch):
-                    assert record.ref is not None and record.alts is not None
+                    assert record.ref is not None and record.alts is not None and len(record.alts) >= 1
                     ref_allele = record.ref
                     if all(
                         len(alt_allele) > len(ref_allele) and alt_allele.startswith(ref_allele)
@@ -428,25 +486,56 @@ class Graph:
                     ):
                         # Insertions
                         variant_id = variant.vg_variant_id(record)
-
+                        
+                        if not graph.has_path(variant_path_name(variant_id, 1)):
+                            continue  # Variant "fell off the end of the graph"
                         assert not graph.has_path(f"_alt_{variant_id}_{0}")
-                        assert len(record.alts) >= 1
 
-                        source_nodes, _, _, sink_nodes = graph._get_source_and_sink(f"_alt_{variant_id}_{1}")
+                        source_nodes, _, _, sink_nodes = graph._get_source_and_sink(
+                            f"_alt_{variant_id}_{1}", added_nodes
+                        )
+                        if len(source_nodes) == 0 or len(sink_nodes) == 0:
+                            continue # Variant likely at the end of the graph, such that we can't rewrite
 
-                        graph._rewrite_edge_with_alt_path(source_nodes, sink_nodes, f"_alt_{variant_id}_{0}")
+                        key = (
+                            frozenset([graph._graph.get_id(n) for n in source_nodes]),
+                            frozenset([graph._graph.get_id(n) for n in sink_nodes]),
+                        )
+
+                        if new_node := added_edges.get(key):
+                            # Node already added (i.e., multiple insertions starting at same position), just add the path to
+                            # the already inserted node
+                            new_path = graph._graph.create_path_handle(f"_alt_{variant_id}_{0}")
+                            graph._graph.append_step(new_path, new_node)
+                        else:
+                            # Create new node along "reference" path for insertion
+                            new_node = graph._rewrite_edge_with_alt_path(
+                                source_nodes, sink_nodes, f"_alt_{variant_id}_{0}"
+                            )
+                            added_edges[key] = new_node
+                            added_nodes.add(graph._graph.get_id(new_node))
                     else:
                         for allele_idx, alt_allele in enumerate(record.alts, 1):
                             if len(ref_allele) > len(alt_allele) and ref_allele.startswith(alt_allele):
                                 # Deletion
                                 variant_id = variant.vg_variant_id(record)
-
+                                
+                                if not graph.has_path(variant_path_name(variant_id, 0)):
+                                    continue  # Variant "fell off the end of the graph"
                                 assert not graph.has_path(f"_alt_{variant_id}_{allele_idx}")
 
-                                source_nodes, _, _, sink_nodes = graph._get_source_and_sink(f"_alt_{variant_id}_{0}")
-                                graph._rewrite_edge_with_alt_path(
+                                source_nodes, _, _, sink_nodes = graph._get_source_and_sink(
+                                    f"_alt_{variant_id}_{0}", added_nodes
+                                )
+                                if len(source_nodes) == 0 or len(sink_nodes) == 0:
+                                    continue # Variant likely at the end of the graph, such that we can't rewrite
+
+                                # We want to rewrite edges that directly connect the source and sink nodes
+                                new_node = graph._rewrite_edge_with_alt_path(
                                     source_nodes, sink_nodes, f"_alt_{variant_id}_{allele_idx}"
                                 )
+                                added_nodes.add(graph._graph.get_id(new_node))
+                                # We should not encounter multiple "pure" deletions with the same source and sink sets
 
             return graph
 
