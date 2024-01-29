@@ -7,6 +7,7 @@ from npsv3.util.range import Range
 
 from . import B37_REF_FASTA, HG38_REF_FASTA, data_path
 
+
 def image_region(cfg, region) -> Range:
     # Try to minimize compression by setting right padding to exact width...
     to_pad = cfg.pileup.image_width - region.length
@@ -14,10 +15,9 @@ def image_region(cfg, region) -> Range:
     right_padding = max(to_pad // 2, cfg.pileup.variant_padding)
     return region.expand(left_padding, right_padding)
 
+
 class TestGraphConstructionFromVCF:
-    @pytest.mark.skipif(
-        not os.path.exists(B37_REF_FASTA), reason="B37 reference required"
-    )
+    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
     def test_simple_haplotype_generator(self):
         # Presentation example
         region = Range("12", 22127564, 22132387)
@@ -136,7 +136,7 @@ class TestGraphConstructionFromVCF:
             # Range("chr1", 1978993, 1979167),
             # Range("chr1", 2689931, 2689931),
             Range("chr1", 6012136, 6012135),
-            # Range("chr1", 12858834, 12858933),   
+            # Range("chr1", 12858834, 12858933),
             # Range("chr1", 29553648, 29553842), # Region overlaps N's, should generally be excluded
             # Range("chr1", 38618549, 38620153),
         ],
@@ -151,7 +151,9 @@ class TestGraphConstructionFromVCF:
 
         graph._graph.to_gfa()
         assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
-        assert all(graph.is_bubble_path(f"HG00731#{i}#{region.contig}#0") for i in range(2)), "Graph must form bubble for haplotype paths"
+        assert all(
+            graph.is_bubble_path(f"HG00731#{i}#{region.contig}#0") for i in range(2)
+        ), "Graph must form bubble for haplotype paths"
 
         haplotypes = graph.generate_possible_haplotypes(
             "/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
@@ -163,7 +165,6 @@ class TestGraphConstructionFromVCF:
             len(haplotypes[0].sequence()) == graph.region.length
         ), "With reference background, first haplotype should match reference length"
         assert haplotypes[0].nodes == graph.nodes_on_path("chr1")
-    
 
 
 class TestGraphQuery:

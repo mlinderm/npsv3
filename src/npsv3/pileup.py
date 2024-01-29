@@ -1,5 +1,6 @@
 import random
 import sys
+import typing
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -396,10 +397,22 @@ class ReadPileup:
         **attributes,
     ):
         if fragment.read1:
-            read1 = self.add_read(fragment.read1, phase_tag=phase_tag, read_allele=read1_realignment, **attributes)
+            read1 = self.add_read(fragment.read1, phase_tag=phase_tag, allele=read1_realignment, **attributes)
         if fragment.read2:
-            read2 = self.add_read(fragment.read2, phase_tag=phase_tag, read_allele=read2_realignment, **attributes)
+            read2 = self.add_read(fragment.read2, phase_tag=phase_tag, allele=read2_realignment, **attributes)
         if add_insert and fragment.is_properly_paired:
             # Phasing information passes through to insert bases
             assert read1.phase == read2.phase, "Phasing specification doesn't match between reads in pair"
             self.add_insert(fragment.insert_region, phase=read1.phase, **attributes)
+
+
+def fetch_reads(read_path: str, fetch_region: Range, reference: typing.Optional[str] = None) -> FragmentTracker:
+    fragments = FragmentTracker()
+    with pysam.AlignmentFile(read_path, reference_filename=reference) as alignment_file:
+        for read in alignment_file.fetch(**fetch_region.pysam_fetch):
+            if read.is_duplicate or read.is_qcfail or read.is_unmapped or read.is_secondary or read.is_supplementary:
+                # TODO: Potentially recover secondary/supplementary alignments if primary is outside pileup region
+                continue
+
+            fragments.add_read(read)
+    return fragments

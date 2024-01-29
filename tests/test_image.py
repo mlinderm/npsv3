@@ -30,12 +30,12 @@ class TestGraphToExample:
             cfg.pileup.image_width,
             len(cfg.pileup.image_channels),
         )
-        assert image._example_label(example) == 3 # 1/1 genotype
+        assert image._example_label(example) == 3  # 1/1 genotype
         assert image._example_addl_attribute(example, "fisher_strand") is not None
         assert image._example_addl_attribute(example, "strand_orientation_bias") is not None
 
         assert image._example_sim_images_shape(example) == (
-            4, # 4 genotypes possible: 0/0, 0|1, 1|0, 1/1
+            4,  # 4 genotypes possible: 0/0, 0|1, 1|0, 1/1
             cfg.simulation.replicates,
             cfg.pileup.image_height,
             cfg.pileup.image_width,
@@ -45,6 +45,7 @@ class TestGraphToExample:
         png_path = str(tmp_path / "test.png")
         image.example_to_image(cfg, example, png_path, with_simulations=True)
         assert os.path.exists(png_path)
+
 
 class TestVCFToExamples:
     @pytest.mark.cfg_overrides(f"reference={B37_REF_FASTA}", "simulation.replicates=1")

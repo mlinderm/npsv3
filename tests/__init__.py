@@ -8,9 +8,9 @@ for alt_ref in (
     "/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta",
     "/storage/mlinderman/projects/sv/npsv2-experiments/resources/human_g1k_v37.fasta",
 ):
-        if not os.path.exists(B37_REF_FASTA) and os.path.exists(alt_ref):
-            B37_REF_FASTA = alt_ref
-            break
+    if not os.path.exists(B37_REF_FASTA) and os.path.exists(alt_ref):
+        B37_REF_FASTA = alt_ref
+        break
 
 HG38_REF_FASTA = "/data/Homo_sapiens_assembly38.fasta"
 for alt_ref in (

@@ -163,7 +163,7 @@ def simulate_variant_sequencing(
         {quote(fasta_path)} \
         {quote(replicate_bam.name)}"
 
-    synth_result = subprocess.run(synth_commandline, shell=True, stderr=subprocess.PIPE)
+    synth_result = subprocess.run(synth_commandline, shell=True, stderr=subprocess.PIPE, check=False)
     if synth_result.returncode != 0 or not os.path.exists(replicate_bam.name):
         print(synth_result.stderr)
         msg = "Synthesis script failed to generate BAM"

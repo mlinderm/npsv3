@@ -64,6 +64,20 @@ python3 -m pip install hatch hydra-submitit-launcher
 
 You can then test with `hatch run test` or create a shell environment with `npsv3` available via `hatch shell`.
 
+hatch shell
+change to experiments
+python3 -m pip install hydra-submitit-launcher
+
+
+conda create -n npsv3-pytorch python=3.8
+//conda install pytorch-cuda=11.8 -c pytorch -c nvidia
+
+conda install cudatoolkit=11.8.0
+
+https://download.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl
+https://download.pytorch.org/whl/cu118/torchvision-0.16.2%2Bcu118-cp38-cp38-linux_x86_64.whl
+https://download.pytorch.org/whl/cu118/torchaudio-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl
+
 ## License
 
 `npsv3` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.

@@ -126,12 +126,16 @@ class ImageGenerator:
         # Helper dictionaries to map to pixel values
         self._aligned_to_pixel = {
             BaseAlignment.ALIGNED: self._cfg.pileup.aligned_base_pixel,
-            BaseAlignment.MATCH: self._cfg.pileup.match_base_pixel
-            if self._cfg.pileup.render_snv
-            else self._cfg.pileup.aligned_base_pixel,
-            BaseAlignment.MISMATCH: self._cfg.pileup.mismatch_base_pixel
-            if self._cfg.pileup.render_snv
-            else self._cfg.pileup.aligned_base_pixel,
+            BaseAlignment.MATCH: (
+                self._cfg.pileup.match_base_pixel
+                if self._cfg.pileup.render_snv
+                else self._cfg.pileup.aligned_base_pixel
+            ),
+            BaseAlignment.MISMATCH: (
+                self._cfg.pileup.mismatch_base_pixel
+                if self._cfg.pileup.render_snv
+                else self._cfg.pileup.aligned_base_pixel
+            ),
             BaseAlignment.SOFT_CLIP: self._cfg.pileup.soft_clip_base_pixel,
             BaseAlignment.INSERT: self._cfg.pileup.insert_base_pixel,
         }
@@ -372,7 +376,7 @@ def _haplotag_reads(reference: str, sample: Sample, read_path: str, vcf_path: st
         {quote(vcf_path)} \
         {quote(read_path)}"
 
-    haplotag_result = subprocess.run(whatshap_commandline, shell=True, stderr=subprocess.PIPE)
+    haplotag_result = subprocess.run(whatshap_commandline, shell=True, stderr=subprocess.PIPE, check=False)
     if haplotag_result.returncode != 0 or not os.path.exists(tagged_bam.name):
         print(haplotag_result.stderr)
         print(region)
@@ -389,7 +393,7 @@ def _downsample_reads(read_path: str, region: Range, dir, downsample: float = 1.
     samtools_commandline = (
         f"samtools view -b -o {quote(downsampled_bam.name)} -s {downsample} {quote(read_path)} {region}"
     )
-    samtools_result = subprocess.run(samtools_commandline, shell=True, stderr=subprocess.PIPE)
+    samtools_result = subprocess.run(samtools_commandline, shell=True, stderr=subprocess.PIPE, check=False)
     if samtools_result.returncode != 0 or not os.path.exists(downsampled_bam.name):
         print(samtools_result.stderr)
         msg = "Failed to downsample read file"
@@ -508,7 +512,9 @@ def make_example_from_region(
 
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
-    assert all(graph.is_bubble_path(f"{sample.name}#{i}#{region.contig}#0") for i in range(ploidy)), "Graph must form bubble for haplotype paths"
+    assert all(
+        graph.is_bubble_path(f"{sample.name}#{i}#{region.contig}#0") for i in range(ploidy)
+    ), "Graph must form bubble for haplotype paths"
     backgrounds = [
         graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}#0", example_region)
         for i in range(ploidy)
@@ -528,7 +534,9 @@ def make_example_from_region(
                 break
 
     if len(labels) == ploidy:
-        feature["label"] = _int_feature(np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)))
+        feature["label"] = _int_feature(
+            np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds))
+        )
 
     # TODO?: Do we want to only have one of 0/1, 1/0?
     alleles_encoded_images = []
@@ -665,14 +673,16 @@ def vcf_to_tfrecords(
         # for record in records:
         #     if vg_variant_id(record) == "cd8536300a04f95e268065d36bb58150081a8f65":
         #         print(region, record)
-        #print(region.expand(-group_padding))        
+        # print(region.expand(-group_padding))
 
         running_total += count
         running_max = max(running_max, count)
 
-        (exhaustive_regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region.expand(-group_padding))
+        (exhaustive_regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(
+            region.expand(-group_padding)
+        )
 
-    #assert False
+    # assert False
 
     logging.info(
         "Identified %d regions with mean %f and max %d records",
@@ -796,7 +806,12 @@ def example_to_image(cfg, example: tf.train.Example, out_path: str, with_simulat
 
 
 def load_example_dataset(
-    filenames, with_label=False, with_simulations=False, num_parallel_reads=None, pileup_image_channels=None, ploidy=2,
+    filenames,
+    with_label=False,
+    with_simulations=False,
+    num_parallel_reads=None,
+    pileup_image_channels=None,
+    ploidy=2,
 ) -> tf.data.Dataset:
     if isinstance(filenames, str):
         filenames = [filenames]

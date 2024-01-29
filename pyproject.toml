@@ -40,7 +40,9 @@ dependencies = [
   "pybedtools",
   "whatshap==1.4",
   "Pillow",
-  "tensorflow>=2.13"
+  "tensorflow>=2.13",
+  "torch @ https://download.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl",
+  "mosaicml-streaming",
 ]
 
 [project.urls]
@@ -56,6 +58,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "npsv3.conf" = ["**/*.yaml"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.version]
 path = "src/npsv3/__about__.py"

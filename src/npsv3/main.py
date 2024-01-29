@@ -1,28 +1,11 @@
 import os
+import logging
 import sys
 
 import hydra
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from npsv3.simulation import bwa_index_loaded
-
-
-def _configure_gpu():
-    """
-    Configure GPU options (seems to be required for RTX GPUs)
-    """
-    try:
-        import tensorflow as tf
-
-        gpus = tf.config.experimental.list_physical_devices("GPU")
-        if gpus:
-            # Currently, memory growth needs to be the same across GPUs
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print("Memory growth error:", e, file=sys.stderr)
-        pass
-
 
 def _check_shared_reference(cfg: DictConfig):
     """Check if BWA shared index is loaded, loading it if specified configuration"""
@@ -38,7 +21,7 @@ def _check_shared_reference(cfg: DictConfig):
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     if cfg.command == "images":
-        from npsv3.image import vcf_to_tfrecords
+        from npsv3.images.example import vcf_to_region_examples
         from npsv3.util.sample import Sample
 
         _check_shared_reference(cfg)
@@ -51,15 +34,20 @@ def main(cfg: DictConfig) -> None:
         else:
             output = hydra.utils.to_absolute_path(cfg.output)
 
-        vcf_to_tfrecords(
+        vcf_to_region_examples(
             cfg,
-            hydra.utils.to_absolute_path(cfg.background),
-            hydra.utils.to_absolute_path(cfg.input),
             hydra.utils.to_absolute_path(cfg.reads),
             sample,
+            hydra.utils.to_absolute_path(cfg.input),
             output,
+            background_vcf=hydra.utils.to_absolute_path(cfg.background),
             progress_bar=True,
         )
+    elif cfg.command == "train_vae":
+        import torch
+        for i in range(torch.cuda.device_count()):
+            print(torch.cuda.get_device_properties(i).name)
+
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

@@ -85,7 +85,7 @@ class SeqLibCMakeBuild(CMakeBuild):
                 "-i",
                 os.path.join(root_path, "seqlib.patch"),
             ],
-            cwd=seqlib_path,
+            cwd=seqlib_path, check=False,
         )
         if patched.returncode != 0:
             subprocess.check_call(
