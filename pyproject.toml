@@ -20,9 +20,6 @@ authors = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
@@ -38,11 +35,11 @@ dependencies = [
   "intervaltree",
   "pysam>=0.16",
   "pybedtools",
-  "whatshap==1.4",
+  "whatshap",
   "Pillow",
-  "tensorflow>=2.13",
-  "torch @ https://download.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl",
-  "mosaicml-streaming",
+  "torch",
+  "torchvision",
+  "webdataset",
 ]
 
 [project.urls]
@@ -70,6 +67,8 @@ dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
 ]
+system-site-packages = true
+
 [tool.hatch.envs.default.scripts]
 test = "pytest tests {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"

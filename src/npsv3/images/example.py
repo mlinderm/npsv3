@@ -9,9 +9,8 @@ import hydra
 import numpy as np
 import pysam
 import ray
+import webdataset as wds
 from PIL import Image
-from streaming import MDSWriter
-from streaming.base.util import merge_index
 from tqdm import tqdm
 
 from npsv3.images.generator import ImageGenerator
@@ -111,25 +110,21 @@ columns = {
 @ray.remote
 class ExhaustiveExampleActor:
     def __init__(self, index: int, output_dir: str, cfg, *args):
-        self.output_path = os.path.join(output_dir, f"{index:03}")
+        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar")
         self.cfg = cfg
         self.args = args
 
-        # MDSWriter requires the output directory to not exist
-        shutil.rmtree(self.output_path, ignore_errors=True)
-        self._writer = MDSWriter(out=self.output_path, columns=columns, compression=MDS_COMPRESSION, hashes=MDS_HASHES)
+        self._writer = wds.TarWriter(self.output_path)
 
     def from_region(self, region: Range):
-        try:
-            example = make_example_from_region(self.cfg, region, *self.args)
-            self._writer.write(example)
-        except:
-            # Mimic the behavior of the with statement
-            if not self._writer.__exit__(*sys.exc_info()):
-                raise
+        example = make_example_from_region(self.cfg, region, *self.args)
+        self._writer.write({
+            "__key__": region.slug,
+            "image.npy.gz": example["image"],
+        })
 
     def cleanup(self):
-        self._writer.__exit__(None, None, None)
+        self._writer.close()
 
 
 def vcf_to_region_examples(
@@ -167,6 +162,4 @@ def vcf_to_region_examples(
         # Make sure all the writers are cleaned up
         ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))
 
-    # Combine the streaming MDS files into a single dataset
-    pathlib.Path(output_dir, "index.json").unlink(missing_ok=True)
-    merge_index(output_dir, keep_local=True)
+

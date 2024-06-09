@@ -2,10 +2,11 @@ import itertools
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from shlex import quote
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import odgi
 import pysam
@@ -133,7 +134,7 @@ class Graph:
         # Identify nodes on the base path so we can follow those if not specifically exploring an inference variant
         base_path_nodes = self.path_nodes[base_path_name]
 
-        excluded_paths: Set[str] = set()
+        excluded_paths: set[str] = set()
         for _, paths_iter in itertools.groupby(sorted(removable_paths, key=extract_variant_id), extract_variant_id):
             paths = list(paths_iter)
 
@@ -309,7 +310,7 @@ class Graph:
         return new_node
 
     @classmethod
-    def from_vcf(cls, reference_fasta: str, background_vcf: str, region: Range, inference_vcf: Optional[str] = None):
+    def from_vcf(cls, reference_fasta: str, background_vcf: str, region: Range, inference_vcf: str | None = None):
         with tempfile.TemporaryDirectory() as temp_dir:
             # Merge a separate inference VCF into the haplotype VCF, matching the samples if needed
             if inference_vcf and inference_vcf != background_vcf:

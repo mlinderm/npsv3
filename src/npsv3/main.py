@@ -1,11 +1,12 @@
-import os
 import logging
+import os
 import sys
 
 import hydra
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from npsv3.simulation import bwa_index_loaded
+
 
 def _check_shared_reference(cfg: DictConfig):
     """Check if BWA shared index is loaded, loading it if specified configuration"""

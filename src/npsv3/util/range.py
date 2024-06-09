@@ -17,6 +17,11 @@ class Range:
         contig, start, end = parse_region(region=region)
         return Range(contig, start, end)
 
+    @classmethod
+    def parse_slug(cls, slug):
+        contig, start, end = slug.split("_")
+        return Range(contig, int(start), int(end))
+
     def __eq__(self, rhs):
         return isinstance(rhs, Range) and self.contig == rhs.contig and self.start == rhs.start and self.end == rhs.end
 
@@ -28,6 +33,10 @@ class Range:
 
     def __hash__(self):
         return hash((self.contig, self.start, self.end))
+
+    @property
+    def slug(self):
+        return f"{self.contig}_{self.start}_{self.end}"
 
     @property
     def length(self):

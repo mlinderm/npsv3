@@ -24,8 +24,6 @@ docker run --rm --entrypoint /bin/bash \
     npsv3
 ```
 
-https://www.tensorflow.org/install/pip
-
 
 We need to make sure that conda base environment is does not impact compilation or use of hatch environments. To that end, make sure the base environment is not automatically activated,
 ```
@@ -36,6 +34,18 @@ and clear any vestige of the base environment
 conda deactivate
 unset LDFLAGS
 ```
+
+
+conda create -n npsv3 python=3.11
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+
+python3 -m pip install hatch hydra-submitit-launcher
+
+
+https://www.tensorflow.org/install/pip
+
+
+
 
 Create a conda environment to build npsv3 on Middlebury infrastructure. The update to `xz`` resolves this [issue](https://stackoverflow.com/questions/47633870/rpm-lib64-liblzma-so-5-version-xz-5-1-2alpha-not-found-required-by-lib-li).
 

@@ -1,7 +1,7 @@
 import os
 
 import pytest
-from streaming import StreamingDataset
+import webdataset as wds
 
 from npsv3.images.example import example_to_image, make_example_from_region, vcf_to_region_examples
 from npsv3.util.range import Range
@@ -32,8 +32,8 @@ class TestRegionToExample:
         example_to_image(cfg, example, png_path)
         assert os.path.exists(png_path)
 
-    def test_vcf_to_mds(self, tmp_path, cfg, hg002_sample):
-        output_dir = str(tmp_path / "mds")
+    def test_vcf_to_shards(self, tmp_path, cfg, hg002_sample):
+        output_dir = str(tmp_path / "shards")
         vcf_to_region_examples(
             cfg,
             data_path("12_22127565_22132387.bam"),
@@ -41,9 +41,10 @@ class TestRegionToExample:
             data_path("12_22129565_22130387.vcf.gz"),
             output_dir,
         )
+        assert os.path.exists(output_dir)
 
-        dataset = StreamingDataset(local=output_dir, remote=None, shuffle=False)
+        dataset = wds.WebDataset(os.path.join(output_dir, "images-0000.tar")).decode()
         for i, sample in enumerate(dataset):
-            region = Range.parse_literal(sample["region"])
-            assert sample["image"].shape == (cfg.pileup.image_height, region.length, 6)
+            region = Range.parse_slug(sample["__key__"])
+            assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, region.length, 6)
         assert i == 0, "Only one sample in dataset"
