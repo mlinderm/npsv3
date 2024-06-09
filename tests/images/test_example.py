@@ -6,7 +6,7 @@ import webdataset as wds
 from npsv3.images.example import example_to_image, make_example_from_region, vcf_to_region_examples
 from npsv3.util.range import Range
 
-from .. import B37_REF_FASTA, RESULT_DIR, data_path, result_path
+from .. import B37_REF_FASTA, data_path
 
 
 @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
@@ -44,7 +44,7 @@ class TestRegionToExample:
         assert os.path.exists(output_dir)
 
         dataset = wds.WebDataset(os.path.join(output_dir, "images-0000.tar")).decode()
-        for i, sample in enumerate(dataset):
+        for _i, sample in enumerate(dataset):
             region = Range.parse_slug(sample["__key__"])
             assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, region.length, 6)
-        assert i == 0, "Only one sample in dataset"
+        assert _i == 0, "Only one sample in dataset"

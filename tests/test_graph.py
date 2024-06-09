@@ -166,6 +166,21 @@ class TestGraphConstructionFromVCF:
         ), "With reference background, first haplotype should match reference length"
         assert haplotypes[0].nodes == graph.nodes_on_path("chr1")
 
+class TestGraphKmers:
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    def test_generate_kmers(self, cfg):
+        region = Range("chr1", 6012136, 6012135)
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            data_path("chr1_6011136_6013135.vcf.gz"),
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf=data_path("chr1_6011136_6013135.vcf.gz"),
+        )
+        graph._graph.to_gfa()
+        assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
+
+        graph.test_kmers(31)
+
 
 class TestGraphQuery:
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")

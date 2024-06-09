@@ -9,84 +9,78 @@
 
 ## Installation
 
+When cloning `npsv3`, make sure to recursively clone all of the submodules, i.e. `git clone --recursive git@github.com:mlinderm/npsv3.git`.
+
+`npsv3` requires Python 3.8+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
+
+```
 docker build -t npsv3 .
+```
 
-docker run --rm --entrypoint /bin/bash --shm-size=8g -v ~/Research/Data:/data -v `pwd`:/opt/npsv3 -v `pwd`/../odgi:/opt/odgi -w /opt/npsv3 -it npsv3
+### Manual installation
 
+To manually install and run NPSV-deep from the source, you will need the following dependencies:
+
+* ART (NGS simulator)
+* bwa
+* bedtools
+* bcftools
+* goleft
+* htslib (i.e., tabix and bgzip)
+* jellyfish (with Python bindings)
+* ODGI
+* samblaster
+* sambamba
+* samtools
+
+along with standard command-line utilities, CMake and a C++14 compiler.
+
+We have installed `npsv3` with conda, e.g.,
+
+```
+conda create -n npsv3 python=3.11
+conda activate npsv3
+conda install mkl==2024.0
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+```
+
+## Running
+
+Given the multi-step workflow, the typical approach when using the Docker image is to run `npsv3` from a shell. The following command will start a Bash session in the Docker container (replace `/path/to/reference/`directory with the path to directory containing the reference genome and associated BWA indices). `npsv3` is most efficient when the BWA indices are loaded into shared memory. To load BWA indices into shared memory you will need to configure the Docker container with at least 12G of memory and set the shared memory size to 8G or more.
 
 ```
 docker run --rm --entrypoint /bin/bash \
     --shm-size=8g \
     -v /path/to/reference/directory:/data \
-    -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
     -it \
     npsv3
 ```
 
+During development we are manually building a fork of ODGI and manually installing the `npsv3` package. When launching the container, mount the directory containing odgi into the container, e.g.,
 
-We need to make sure that conda base environment is does not impact compilation or use of hatch environments. To that end, make sure the base environment is not automatically activated,
 ```
-conda config --set auto_activate_base false
-```
-and clear any vestige of the base environment
-```
-conda deactivate
-unset LDFLAGS
-```
-
-
-conda create -n npsv3 python=3.11
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-
-python3 -m pip install hatch hydra-submitit-launcher
-
-
-https://www.tensorflow.org/install/pip
-
-
-
-
-Create a conda environment to build npsv3 on Middlebury infrastructure. The update to `xz`` resolves this [issue](https://stackoverflow.com/questions/47633870/rpm-lib64-liblzma-so-5-version-xz-5-1-2alpha-not-found-required-by-lib-li).
-
-```plaintext
-module load npsv3
-
-conda create -n npsv3 python=3.8
-conda install -c conda-forge cudatoolkit=11.8.0
-conda install -c conda-forge 'xz>=5.2.7'
-
-python3 -m pip install nvidia-cudnn-cu11==8.6.0.163 tensorflow==2.13.*
-
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-echo 'CUDNN_PATH=$(dirname $(python -c "import nvidia.cudnn;print(nvidia.cudnn.__file__)"))' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
-echo 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/:$CUDNN_PATH/lib:$LD_LIBRARY_PATH' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
-source $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
-
-export CC=gcc
-export CXX=g++
-
-cmake3 -S $ODGI_HOME -B $ODGI_HOME/build
-cmake3 --build $ODGI_HOME/build -- -j 4
-
-python3 -m pip install hatch hydra-submitit-launcher
+docker run --rm --entrypoint /bin/bash \
+    --shm-size=8g \
+    -v ~/Research/Data:/data \
+    -v `pwd`/../odgi:/opt/odgi \
+    -v `pwd`:/opt/npsv3 \
+    -w /opt/npsv3 \
+    -it \
+     npsv3
 ```
 
-You can then test with `hatch run test` or create a shell environment with `npsv3` available via `hatch shell`.
+And then from within the container, build odgi
+```
+cmake -S /opt/odgi -B /opt/odgi/build \
+    && cmake --build /opt/odgi/build -- -j 2
+```
+and finally the npsv3 package
+```
+python -m pip install -e .
+```
 
-hatch shell
-change to experiments
-python3 -m pip install hydra-submitit-launcher
-
-
-conda create -n npsv3-pytorch python=3.8
-//conda install pytorch-cuda=11.8 -c pytorch -c nvidia
-
-conda install cudatoolkit=11.8.0
-
-https://download.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl
-https://download.pytorch.org/whl/cu118/torchvision-0.16.2%2Bcu118-cp38-cp38-linux_x86_64.whl
-https://download.pytorch.org/whl/cu118/torchaudio-2.1.2%2Bcu118-cp38-cp38-linux_x86_64.whl
+You can run the unit tests with `hatch run test`.
 
 ## License
 

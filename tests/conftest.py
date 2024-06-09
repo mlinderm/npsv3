@@ -1,5 +1,3 @@
-import os
-
 import hydra
 import pytest
 import ray
@@ -22,7 +20,7 @@ def ray_setup():
 
 
 @pytest.fixture(scope="function")
-def cfg(request, hydra_setup, ray_setup):
+def cfg(request, hydra_setup, ray_setup): #noqa: ARG001
     marker = request.node.get_closest_marker("cfg_overrides")
     _cfg = hydra.compose(
         config_name="config",

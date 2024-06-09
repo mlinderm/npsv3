@@ -25,7 +25,7 @@ add_subdirectory(lib/pybind11)
 set(SOURCE_DIR "src/npsv3")
 
 include_directories(${SOURCE_DIR} ${SEQLIB_INCLUDE_DIRS})
-set(SOURCES "${SOURCE_DIR}/bindings.cpp" "${SOURCE_DIR}/realigner.cpp") # "${SOURCE_DIR}/simulation.cpp")
+set(SOURCES "${SOURCE_DIR}/bindings.cpp" "${SOURCE_DIR}/realigner.cpp")
 
 # Add bindings here
 pybind11_add_module(_native ${SOURCES})

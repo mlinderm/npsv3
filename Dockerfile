@@ -1,4 +1,4 @@
-FROM tensorflow/tensorflow:2.13.0-gpu
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
 
 RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   art-nextgen-simulation-tools \
@@ -13,9 +13,11 @@ RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   libbz2-dev \
   libjemalloc-dev \
   liblzma-dev \
+  pkg-config \
   protobuf-compiler \
   python3-dev \
   python3-distutils \
+  sambamba=0.8.2+dfsg-2 \
   samtools \
   tabix \
   && \
@@ -23,7 +25,7 @@ RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   rm -rf /var/lib/apt/lists/*
 
 # Install vg
-RUN curl -SL https://github.com/vgteam/vg/releases/download/v1.49.0/vg \
+RUN curl -SL https://github.com/vgteam/vg/releases/download/v1.54.0/vg \
     -o /usr/local/bin/vg \
     && chmod +x /usr/local/bin/vg
 
@@ -47,13 +49,15 @@ RUN mkdir -p /opt/samblaster \
     && make -C /opt/samblaster \
     && cp /opt/samblaster/samblaster /usr/local/bin/.
 
-RUN curl -SL https://github.com/biod/sambamba/releases/download/v0.8.2/sambamba-0.8.2-linux-amd64-static.gz \
-    | gzip -dc > /usr/local/bin/sambamba \
-    && chmod +x /usr/local/bin/sambamba
+# RUN curl -SL https://github.com/biod/sambamba/releases/download/v0.8.2/sambamba-0.8.2-linux-amd64-static.gz \
+#     | gzip -dc > /usr/local/bin/sambamba \
+#     && chmod +x /usr/local/bin/sambamba
 
-RUN curl -SL https://github.com/brentp/goleft/releases/download/v0.2.4/goleft_linux64 \
-    -o /usr/local/bin/goleft \
-    && chmod +x /usr/local/bin/goleft
+RUN case ${TARGETPLATFORM} in \
+      "linux/arm64") curl -SL https://github.com/brentp/goleft/releases/download/v0.2.6/goleft_linux_aarch64 -o /usr/local/bin/goleft ;; \
+      *) curl -SL https://github.com/brentp/goleft/releases/download/v0.2.6/goleft_linux64 -o /usr/local/bin/goleft ;; \
+    esac && \
+    chmod +x /usr/local/bin/goleft
 
 ADD . /opt/npsv3
 

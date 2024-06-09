@@ -2,6 +2,7 @@ import itertools
 import os
 import subprocess
 import tempfile
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
@@ -542,6 +543,50 @@ class Graph:
 
             return graph
 
+    def test_kmers(self, k: int):
+        kmers = []
+        partial_kmers = defaultdict(list)
+
+        def kmerize_node(h):
+            seq = self._graph.get_sequence(h)
+            if seq == "*":
+                return
+
+            curr_id = self._graph.get_id(h)
+            for i in range(len(seq) - k + 1):
+                kmers.append(GraphKmer(self._graph, seq[i : i + k], [curr_id]))
+
+            next_nodes = []
+            self._graph.follow_edges(h, False, lambda n: next_nodes.append(n))
+            for next_node in next_nodes:
+                next_id = self._graph.get_id(next_node)
+                partial_kmers[next_id].extend(GraphKmer(self._graph, seq[i:], [curr_id]) for i in range(-min(k-1,len(seq)),0))
+
+
+        self._graph.for_each_handle(kmerize_node)
+
+        # Extend partial kmers until we reach specified length, or a tip
+        print(len(kmers), len(partial_kmers))
+
+        #print(partial_kmers)
+        next_id, kmers_to_extend = partial_kmers.popitem()
+        seq = self._graph.get_sequence(self._graph.get_handle(next_id))
+        print(next_id, kmers_to_extend, seq)
+
+        for kmer in kmers_to_extend:
+            kmer.sequence += seq[:k-len(kmer.sequence)]
+            if len(kmer.sequence) == k:
+                kmers.append(kmer)
+            else:
+                # Need to extend further, find follow-on nodes
+                pass
+        print(kmers_to_extend)
+
+        #     print(kmer.sequence)
+
+
+        return kmers
+
 
 @dataclass
 class InferenceHaplotype:
@@ -551,3 +596,9 @@ class InferenceHaplotype:
 
     def sequence(self) -> str:
         return self.graph.sequence(self.nodes)
+
+@dataclass
+class GraphKmer:
+    graph: Graph
+    sequence: str
+    node_ids: List[int]
