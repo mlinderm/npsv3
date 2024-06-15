@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 import sys
+import typing
 
 import hydra
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -19,9 +21,31 @@ def _check_shared_reference(cfg: DictConfig):
             )
 
 
+def _make_paths_absolute(cfg: DictConfig, keys: typing.Iterable[str]):
+    """Make list of hydra configuration keys, e.g. 'pileup.snv_vcf_input' absolute paths"""
+    for key in keys:
+        if not OmegaConf.is_missing(cfg, key) and OmegaConf.select(cfg, key) is not None:
+            OmegaConf.update(cfg, key, hydra.utils.to_absolute_path(OmegaConf.select(cfg, key)))
+
+
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    if cfg.command == "images":
+    if cfg.command == "preprocess":
+        from npsv3.util.sample import compute_read_stats
+
+        # If no output file is specified, create a fixed file in the Hydra output directory
+        if OmegaConf.is_missing(cfg, "output"):
+            output = "stats.json"
+        else:
+            output = hydra.utils.to_absolute_path(cfg.output)
+
+        _make_paths_absolute(cfg, ["reference"])
+
+        stats = compute_read_stats(cfg, hydra.utils.to_absolute_path(cfg.reads))
+        with open(output, "w") as file:
+            json.dump(stats, file)
+
+    elif cfg.command == "images":
         from npsv3.images.example import vcf_to_region_examples
         from npsv3.util.sample import Sample
 
