@@ -40,8 +40,6 @@ dependencies = [
   "pybedtools",
   "whatshap",
   "Pillow",
-  "torch",
-  "torchvision",
   "webdataset",
 ]
 
