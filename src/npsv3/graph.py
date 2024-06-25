@@ -1,8 +1,10 @@
 import itertools
 import os
+import re
 import subprocess
+import sys
 import tempfile
-from collections import defaultdict
+from collections import defaultdict, Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
@@ -23,6 +25,8 @@ VARIANT_ID_LENGTH = 40
 VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG"])
 VCF_INFO_FIELDS_TO_COPY = frozenset(["SVTYPE", "SVLEN", "END", "CIPOS", "CIEND"])
 
+SAMPLE_PATH_REGEX = re.compile(r"^(?P<sample>[^#]+)#(?P<allele>\d)#(?P<contig>[^#]+)#(?P<count>\d+)$")
+
 
 def variant_path_name(variant_id: str, allele: int) -> str:
     return f"_alt_{variant_id}_{allele}"
@@ -40,12 +44,21 @@ def _alt_path_key(path_name: str) -> Tuple[str, int]:
     return (extract_variant_id(path_name), extract_variant_allele(path_name))
 
 
+def _get_genotype(vcf_path: str, region: Range, variant_id: str, sample: str) -> Tuple[int, ...]:
+    with pysam.VariantFile(vcf_path) as vcf_file:
+        vcf_file.subset_samples([sample])
+        for record in vcf_file.fetch(**region.pysam_fetch):
+            if variant.vg_variant_id(record) == variant_id:
+                return record.samples[sample]["GT"]
+    raise ValueError("Variant not found in VCF")
+
+
 class Graph:
     def __init__(self, gfa_path: str, region: Range):
         with tempfile.TemporaryDirectory() as temp_dir:
             og_path = os.path.join(temp_dir, "graph.og")
             # Build graph with odgi executable
-            build_command = f"odgi build -g {quote(gfa_path)} -o {quote(og_path)}"
+            build_command = f"odgi build --sort --optimize -g {quote(gfa_path)} -o {quote(og_path)}"
             subprocess.run(build_command, shell=True, check=True)
 
             # Load graph into Python object
@@ -54,6 +67,46 @@ class Graph:
 
         self.region = region
 
+    def _sort_and_compact(self):
+        """Topologically order nodes and compact ids into [1-max node id] space.
+
+        After this operation, nodes ids should occupy a contiguous range and
+        iterating through the nodes with `for_each_handle` will be in topological order.
+        """
+        self._graph.apply_ordering(self._graph.topological_order(), compact_ids=True)
+        # Since we change the node ids, we need to reset any cached node sets
+        # (adapted from https://stackoverflow.com/a/73131568)
+        cls = self.__class__
+        attrs = [a for a in dir(self) if isinstance(getattr(cls, a, cls), cached_property) and a in self.__dict__]
+        for a in attrs:
+            delattr(self, a)
+
+    def _is_bubble(self) -> bool:
+        """Return true if the graph forms a bubble, i.e., has a single source and sink node.
+
+        Assumes that the node ids have been compacted into a contiguous range.
+        """
+        assert self._graph.is_optimized(), "Graph node space is not compacted"
+        incoming = Counter()
+        outgoing = Counter()
+
+        def increment(counter, node_id):
+            counter[node_id] += 1
+
+        def count_edges(node):
+            node_id = self._graph.get_id(node)
+            self._graph.follow_edges(node, False, lambda _: increment(outgoing, node_id))
+            self._graph.follow_edges(node, True, lambda _: increment(incoming, node_id))
+
+        self._graph.for_each_handle(count_edges)
+
+        return (
+            incoming[1] == 0
+            and outgoing[self.max_node_id] == 0
+            and all(incoming[i] > 0 for i in range(2, self.max_node_id + 1))
+            and all(outgoing[i] > 0 for i in range(1, self.max_node_id))
+        )
+
     def nodes_on_path(self, path_name: str) -> Iterable[int]:
         nodes = []
         self._graph.for_each_step_in_path(
@@ -61,6 +114,18 @@ class Graph:
             lambda s: nodes.append(self._graph.get_id(self._graph.get_handle_of_step(s))),
         )
         return nodes
+
+    def first_handle(self, path_name: str) -> odgi.handle:
+        path = self._graph.get_path_handle(path_name)
+        return self._graph.get_handle_of_step(self._graph.path_begin(path))
+
+    def last_handle(self, path_name: str) -> odgi.handle:
+        path = self._graph.get_path_handle(path_name)
+        return self._graph.get_handle_of_step(self._graph.path_back(path))
+
+    @cached_property
+    def max_node_id(self) -> int:
+        return self._graph.max_node_id()
 
     @cached_property
     def variant_paths(self) -> Set[str]:
@@ -97,10 +162,6 @@ class Graph:
     def has_path(self, name: str) -> bool:
         return self._graph.has_path(name)
 
-    def first_handle(self, path_name: str) -> odgi.handle:
-        path = self._graph.get_path_handle(path_name)
-        return self._graph.get_handle_of_step(self._graph.path_begin(path))
-
     def sequence(self, nodes: Iterable[int]) -> str:
         seq = ""
         for node in nodes:
@@ -108,6 +169,55 @@ class Graph:
             if node_seq != "*":  # Used for "deletion" and "insertion" edges
                 seq += node_seq
         return seq
+
+    def shortest_path(self, base_path_prefix: str):
+        """_summary_
+
+        Assumes nodes are in topological order
+
+        Args:
+            base_path_prefix (str): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        length = [sys.maxsize] * (self._graph.max_node_id() + 1)
+        prev = [None] * (self._graph.max_node_id() + 1)
+
+        free_nodes = set()
+        for path, nodes in self.path_nodes.items():
+            if path.startswith(base_path_prefix):
+                free_nodes.update(nodes)
+
+        ref_nodes = self.path_nodes[self.region.contig]
+
+        length[self._graph.min_node_id()] = 0
+        for node in range(self._graph.min_node_id(), self._graph.max_node_id() + 1):
+            if node in free_nodes:
+                pass  # Equivalent to += 0
+            elif node in ref_nodes:
+                length[node] = sys.maxsize if length[node] == sys.maxsize else length[node] + len(self.sequence([node]))
+            else:
+                length[node] = sys.maxsize
+
+            # Propagate score "along" edges
+            next_nodes = []
+            self._graph.follow_edges(
+                self._graph.get_handle(node), False, lambda n: next_nodes.append(self._graph.get_id(n))
+            )
+            for next_node in next_nodes:
+                if length[node] < length[next_node]:
+                    length[next_node] = length[node]
+                    prev[next_node] = node
+
+        # Reconstruct the path
+        path = [self._graph.max_node_id()]
+        while True:
+            if prev[path[-1]] is None:
+                break
+            path.append(prev[path[-1]])
+
+        return path[::-1]
 
     def generate_possible_haplotypes(
         self, inference_vcf: str, base_path_name: str, region: Range
@@ -539,8 +649,32 @@ class Graph:
                                     source_nodes, sink_nodes, f"_alt_{variant_id}_{allele_idx}"
                                 )
                                 added_nodes.add(graph._graph.get_id(new_node))
+
+                                # Incomplete paths might end on the source of the deletion. Extend the path where relevant.
+                                for source_node in source_nodes:
+                                    paths = graph.node_paths[source_node_id := graph._graph.get_id(source_node)]
+                                    for path in paths:
+                                        match = SAMPLE_PATH_REGEX.match(path)
+                                        if not match:
+                                            continue
+                                        if graph._graph.get_id(graph.last_handle(path)) != source_node_id:
+                                            continue
+                                        match_gt = _get_genotype(
+                                            merged_graph_vcf,
+                                            Range(record.contig, record.start, record.stop),
+                                            variant_id,
+                                            match.group("sample"),
+                                        )
+                                        if not match_gt or match_gt[int(match.group("allele"))] != allele_idx:
+                                            continue
+
+                                        graph._graph.append_step(graph._graph.get_path_handle(path), new_node)
+
                                 # We should not encounter multiple "pure" deletions with the same source and sink sets
 
+            # 6. Sort and compact the graph so nodes are in topological order (and compacted)
+            graph._sort_and_compact()
+            assert graph._graph.is_optimized(), "Graph node space is not compacted"
             return graph
 
     def test_kmers(self, k: int):
@@ -560,21 +694,22 @@ class Graph:
             self._graph.follow_edges(h, False, lambda n: next_nodes.append(n))
             for next_node in next_nodes:
                 next_id = self._graph.get_id(next_node)
-                partial_kmers[next_id].extend(GraphKmer(self._graph, seq[i:], [curr_id]) for i in range(-min(k-1,len(seq)),0))
-
+                partial_kmers[next_id].extend(
+                    GraphKmer(self._graph, seq[i:], [curr_id]) for i in range(-min(k - 1, len(seq)), 0)
+                )
 
         self._graph.for_each_handle(kmerize_node)
 
         # Extend partial kmers until we reach specified length, or a tip
         print(len(kmers), len(partial_kmers))
 
-        #print(partial_kmers)
+        # print(partial_kmers)
         next_id, kmers_to_extend = partial_kmers.popitem()
         seq = self._graph.get_sequence(self._graph.get_handle(next_id))
         print(next_id, kmers_to_extend, seq)
 
         for kmer in kmers_to_extend:
-            kmer.sequence += seq[:k-len(kmer.sequence)]
+            kmer.sequence += seq[: k - len(kmer.sequence)]
             if len(kmer.sequence) == k:
                 kmers.append(kmer)
             else:
@@ -583,7 +718,6 @@ class Graph:
         print(kmers_to_extend)
 
         #     print(kmer.sequence)
-
 
         return kmers
 
@@ -596,6 +730,7 @@ class InferenceHaplotype:
 
     def sequence(self) -> str:
         return self.graph.sequence(self.nodes)
+
 
 @dataclass
 class GraphKmer:

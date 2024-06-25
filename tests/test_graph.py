@@ -1,6 +1,7 @@
 import os
-
 import pytest
+
+import odgi
 
 from npsv3.graph import Graph, variant_path_name
 from npsv3.util.range import Range
@@ -14,6 +15,22 @@ def image_region(cfg, region) -> Range:
     left_padding = max((to_pad + 1) // 2, cfg.pileup.variant_padding)
     right_padding = max(to_pad // 2, cfg.pileup.variant_padding)
     return region.expand(left_padding, right_padding)
+
+
+def assert_topological_order(graph: odgi.graph):
+    visited = set()
+    
+    def check_edge(handle):
+        assert graph.get_id(handle) not in visited
+
+    def check_node(handle):
+        visited.add(graph.get_id(handle))
+        # False to traverse "right" or "downstream" edges
+        graph.follow_edges(handle, False, check_edge)
+
+    graph.for_each_handle(check_node)
+
+
 
 
 class TestGraphConstructionFromVCF:
@@ -122,6 +139,34 @@ class TestGraphConstructionFromVCF:
             assert len(del_nodes & set(haplotypes[h].nodes)) > 0
         for h in (2, 3):
             assert len(del_nodes & set(haplotypes[h].nodes)) == 0
+
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    def test_haplotype_inconsistent_backbone(self, cfg):
+        region = Range("chr1", 6012136, 6012135)
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            data_path("chr1_6011136_6013135.vcf.gz"),
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf=data_path("chr1_6011136_6013135.sv.vcf.gz"),
+        )
+
+        # Since graph is optimized during construction, we should iterate over the nodes in topological order
+        assert_topological_order(graph._graph)
+        assert graph._is_bubble()
+
+        graph._graph.to_gfa()
+        assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
+        
+        # HG00731#0#chr1#0 is complete path, so the shortest path should be the same as the path in 
+        # the original graph
+        first_chrom_path = graph.nodes_on_path("HG00731#0#chr1#0")
+        assert graph.shortest_path("HG00731#0#chr1") == first_chrom_path
+
+        # HG00731#1#chr1 is comprised of multiple paths, so shortest path should link these paths, minimizing
+        # the number of reference bases required. In this case the only difference is now a 1|0 DEL.
+        shortest_second_chrom_path = graph.shortest_path("HG00731#1#chr1")
+        assert set(first_chrom_path) - set(shortest_second_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_1"]
+        assert set(shortest_second_chrom_path) - set(first_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_0"]
 
     @pytest.mark.skipif(
         not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments"), reason="Not running on cluster"
