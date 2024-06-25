@@ -130,7 +130,7 @@ class TestGraphConstructionFromVCF:
             region.expand(cfg.pileup.variant_padding),
         )
 
-        assert len(haplotypes) == 4, "Two possible alleles in CIS, so 4 possible alleles"
+        assert len(haplotypes) == 4, "Two possible alleles in region, so 4 possible haplotypes"
 
         # The first two haplotypes should not have a larger deletion that spans a true shorter deletion, and thus
         # should have the deletion variant
@@ -142,7 +142,7 @@ class TestGraphConstructionFromVCF:
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
     def test_haplotype_inconsistent_backbone(self, cfg):
-        region = Range("chr1", 6012136, 6012135)
+        region = Range("chr1", 6012136, 6012573)
         graph = Graph.from_vcf(
             HG38_REF_FASTA,
             data_path("chr1_6011136_6013135.vcf.gz"),
@@ -154,7 +154,6 @@ class TestGraphConstructionFromVCF:
         assert_topological_order(graph._graph)
         assert graph._is_bubble()
 
-        graph._graph.to_gfa()
         assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
         
         # HG00731#0#chr1#0 is complete path, so the shortest path should be the same as the path in 
@@ -167,6 +166,17 @@ class TestGraphConstructionFromVCF:
         shortest_second_chrom_path = graph.shortest_path("HG00731#1#chr1")
         assert set(first_chrom_path) - set(shortest_second_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_1"]
         assert set(shortest_second_chrom_path) - set(first_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_0"]
+
+        for backbone in ("chr1", "HG00731#0#chr1#0", "HG00731#1#chr1"):
+            haplotypes = graph.generate_possible_haplotypes(
+                data_path("chr1_6011136_6013135.sv.vcf.gz"),
+                backbone,
+                image_region(cfg, region),
+            )
+            assert len(haplotypes) == 12, "4 possible SVs, but 2 are mutually exclusive, thus 12 haplotypes"
+            
+            # One of the paths should match the backbone
+            assert sum(h.nodes == graph.shortest_path(backbone) for h in haplotypes) == 1
 
     @pytest.mark.skipif(
         not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments"), reason="Not running on cluster"

@@ -181,6 +181,8 @@ class Graph:
         Returns:
             _type_: _description_
         """
+        # TODO: Future optimization, if prefix exactly matches end-to-end path, we can skip
+        # the shortest path and just return the path
         length = [sys.maxsize] * (self._graph.max_node_id() + 1)
         prev = [None] * (self._graph.max_node_id() + 1)
 
@@ -220,7 +222,7 @@ class Graph:
         return path[::-1]
 
     def generate_possible_haplotypes(
-        self, inference_vcf: str, base_path_name: str, region: Range
+        self, inference_vcf: str, base_path_prefix: str, region: Range
     ) -> List["InferenceHaplotype"]:
         # Extract variant paths from the inference VCF
         inference_paths_ordered = []
@@ -243,7 +245,8 @@ class Graph:
         removable_paths = self.variant_paths - inference_paths
 
         # Identify nodes on the base path so we can follow those if not specifically exploring an inference variant
-        base_path_nodes = self.path_nodes[base_path_name]
+        base_path = self.shortest_path(base_path_prefix)
+        base_path_nodes = set(base_path)
 
         excluded_paths: set[str] = set()
         for _, paths_iter in itertools.groupby(sorted(removable_paths, key=extract_variant_id), extract_variant_id):
@@ -265,7 +268,7 @@ class Graph:
         # Depth-First-Search to enumerate all possible haplotypes for inference variants
         haplotypes = []
 
-        def _generate_all_paths(node, path):
+        def _generate_all_paths(node: odgi.handle, path: list[int]):
             path = [*path, self._graph.get_id(node)]
 
             while True:
@@ -293,7 +296,7 @@ class Graph:
             for next_node in recurse_nodes:
                 _generate_all_paths(next_node, path)
 
-        _generate_all_paths(self.first_handle(base_path_name), [])
+        _generate_all_paths(self._graph.get_handle(base_path[0]), [])
 
         # Sort the paths in the order of the VCF records and alleles (leveraging that
         # inference paths are listed in allele order)
