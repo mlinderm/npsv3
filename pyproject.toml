@@ -41,6 +41,8 @@ dependencies = [
   "whatshap",
   "Pillow",
   "webdataset",
+  "torch",
+  "torchvision",
 ]
 
 [project.urls]

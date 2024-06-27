@@ -293,8 +293,8 @@ class PileupRead:
     def __init__(
         self,
         read: pysam.AlignedSegment,
-        allele: AlleleRealignment,
         insert_zscore: float,
+        allele=AlleleRealignment(),
         phase_tag: str = "HP",
         read_allele=AlleleRealignment(),
     ):
@@ -392,14 +392,15 @@ class ReadPileup:
         add_insert=False,
         ref_seq: Optional[str] = None,
         phase_tag="HP",
+        allele=AlleleRealignment(),
         read1_realignment=AlleleRealignment(),
         read2_realignment=AlleleRealignment(),
         **attributes,
     ):
         if fragment.read1:
-            read1 = self.add_read(fragment.read1, phase_tag=phase_tag, allele=read1_realignment, **attributes)
+            read1 = self.add_read(fragment.read1, phase_tag=phase_tag, allele=allele, read_allele=read1_realignment, **attributes)
         if fragment.read2:
-            read2 = self.add_read(fragment.read2, phase_tag=phase_tag, allele=read2_realignment, **attributes)
+            read2 = self.add_read(fragment.read2, phase_tag=phase_tag, allele=allele, read_allele=read2_realignment, **attributes)
         if add_insert and fragment.is_properly_paired:
             # Phasing information passes through to insert bases
             assert read1.phase == read2.phase, "Phasing specification doesn't match between reads in pair"

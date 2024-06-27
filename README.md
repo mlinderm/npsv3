@@ -67,7 +67,7 @@ docker run --rm --entrypoint /bin/bash \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
     -it \
-     npsv3
+    npsv3
 ```
 
 And then from within the container, build odgi
