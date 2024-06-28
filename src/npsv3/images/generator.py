@@ -169,7 +169,6 @@ class ImageGenerator:
     def generate(self, read_path, sample: Sample, region: Range, compress=False, **kwargs):
         image = self._generate(read_path, sample, region, **kwargs)
         image_array = image[:, :, self._cfg.pileup.image_channels]
-        print(image_array.shape, self._cfg.pileup.image_channels)
 
         # Create consistent image size
         if compress and image_array.shape != (self._cfg.pileup.image_height, self._cfg.pileup.image_width, len(self._cfg.pileup.image_channels)):

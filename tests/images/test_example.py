@@ -9,6 +9,7 @@ from npsv3.images.example import (
     make_example_from_region,
     make_graph_example_from_region,
     vcf_to_region_examples,
+    vcf_to_graph_examples,
 )
 from npsv3.util.range import Range
 
@@ -56,10 +57,10 @@ class TestRegionToExample:
 
 
 @pytest.mark.skipif(
-    not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference required"
+    not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
 )
 @pytest.mark.cfg_overrides(
-    f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup.example_class=npsv3.images.example.GraphWriter", "pileup.image_channels=[0,1,2,3,4,5,6,7]",
+    f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup.image_channels=[0,1,2,3,4,5,6,7]",
 )
 class TestGraphToExample:
     def test_single_del(self, tmp_path, cfg, hg002_sample):
@@ -92,7 +93,7 @@ class TestGraphToExample:
 
     def test_vcf_to_shards(self, tmp_path, cfg, hg002_sample):
         output_dir = str(tmp_path / "shards")
-        vcf_to_region_examples(
+        vcf_to_graph_examples(
             cfg,
             data_path("12_22127565_22132387.bam"),
             hg002_sample,

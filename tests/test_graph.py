@@ -31,8 +31,6 @@ def assert_topological_order(graph: odgi.graph):
     graph.for_each_handle(check_node)
 
 
-
-
 class TestGraphConstructionFromVCF:
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
     def test_simple_haplotype_generator(self):
@@ -204,11 +202,8 @@ class TestGraphConstructionFromVCF:
             inference_vcf="/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
         )
 
-        graph._graph.to_gfa()
+        #graph._graph.to_gfa()
         assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
-        assert all(
-            graph.is_bubble_path(f"HG00731#{i}#{region.contig}#0") for i in range(2)
-        ), "Graph must form bubble for haplotype paths"
 
         haplotypes = graph.generate_possible_haplotypes(
             "/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",

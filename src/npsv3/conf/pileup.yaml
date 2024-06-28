@@ -50,5 +50,5 @@ save_realignment_bam_dir: null
 downsample: 1.0
 aligner: "bwa"
 
-example_class: "npsv3.images.example.RegionWriter"
+example_fn: "npsv3.images.example.vcf_to_region_examples"
 max_exhaustive_records: 2

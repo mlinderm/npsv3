@@ -1,4 +1,5 @@
 import itertools
+import logging
 import os
 import pathlib
 import shutil
@@ -19,7 +20,7 @@ from npsv3.images.generator import ImageGenerator
 from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
-from npsv3.variant import Variant
+from npsv3.variant import Variant, overlapping_records
 from npsv3.graph import Graph
 from npsv3.graph import Graph
 from npsv3.pileup import AlleleAssignment, BaseAlignment, FragmentTracker, ReadPileup, Strand
@@ -347,9 +348,8 @@ def vcf_to_region_examples(
         # to avoid conflicts between clusters running on the same node.
         ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)
 
-        actor_cls = hydra.utils.get_method(cfg.pileup.example_class)
         actors = [
-            actor_cls.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf)
+            RegionWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf)
             for i in range(cfg.threads)
         ]
         pool = ray.util.ActorPool(actors)
@@ -362,3 +362,60 @@ def vcf_to_region_examples(
         ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))
 
 
+def vcf_to_graph_examples(
+    cfg,
+    read_path: str,
+    sample: Sample,
+    inference_vcf: str,
+    output_dir: str,
+    background_vcf: typing.Optional[str] = None,
+    progress_bar: bool = False,
+    ploidy: int = 2,
+):
+    # Identify regions in the inference with overlapping SVs (i.e., identify bubbles)
+    regions, search_regions = [], []
+    running_total = running_max = 0
+    group_padding = cfg.pileup.variant_padding // 2
+    for region, records in overlapping_records(inference_vcf, flank=group_padding):
+        count = len(records)
+
+        # TODO: Filter out Ns
+        # for record in records:
+        #     if vg_variant_id(record) == "cd8536300a04f95e268065d36bb58150081a8f65":
+        #         print(region, record)
+        #print(region.expand(-group_padding))        
+
+        running_total += count
+        running_max = max(running_max, count)
+
+        (regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region.expand(-group_padding))
+
+    logging.info(
+        "Identified %d regions with mean %f and max %d records",
+        running_total,
+        running_total / (len(regions) + len(search_regions)),
+        running_max,
+    )
+     # We can't exhaustively generate examples for regions with too many records, so we skip any more complex regions
+    logging.info(
+        "Generating exhaustive images for %d regions (across %d threads)", len(regions), cfg.threads
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory() as ray_dir:
+        # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
+        # to avoid conflicts between clusters running on the same node.
+        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)
+
+        actors = [
+            GraphWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf)
+            for i in range(cfg.threads)
+        ]
+        pool = ray.util.ActorPool(actors)
+
+        gen = pool.map_unordered(lambda actor, region: actor.from_region.remote(region), regions)
+        for _ in tqdm(gen, total=len(regions), disable=not progress_bar):
+            pass
+
+        # Make sure the tfrecords files are closed
+        ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))

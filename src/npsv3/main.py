@@ -59,7 +59,8 @@ def main(cfg: DictConfig) -> None:
         else:
             output = hydra.utils.to_absolute_path(cfg.output)
 
-        vcf_to_region_examples(
+        vcf_to_examples = hydra.utils.get_method(cfg.pileup.example_fn)
+        vcf_to_examples(
             cfg,
             hydra.utils.to_absolute_path(cfg.reads),
             sample,
