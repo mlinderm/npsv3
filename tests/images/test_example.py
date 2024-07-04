@@ -105,7 +105,6 @@ class TestGraphToExample:
 
         dataset = wds.WebDataset(os.path.join(output_dir, "images-0000.tar")).decode()
         for _i, sample in enumerate(dataset):
-            print(list(sample))
             region = Range.parse_slug(sample["__key__"])
             assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, cfg.pileup.image_width, len(cfg.pileup.image_channels))
             assert sample["label.cls"] == 3
