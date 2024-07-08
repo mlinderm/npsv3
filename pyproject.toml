@@ -43,6 +43,7 @@ dependencies = [
   "webdataset",
   "torch",
   "torchvision",
+  "lightning",
 ]
 
 [project.urls]

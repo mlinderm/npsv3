@@ -233,50 +233,49 @@ def make_graph_example_from_region(
                     fasta.write(sequence + "\n")
 
             repl_encoded_images = []
+            for repl, repl_sample in enumerate(repl_samples):
+                # Simulate reads from this haplotype combination
+                try:
+                    sample_coverage = (
+                        repl_sample.chrom_mean_coverage(graph.region.contig)
+                        if cfg.simulation.chrom_norm_covg
+                        else repl_sample.mean_coverage
+                    )
+                    replicate_bam_path = simulate_variant_sequencing(
+                        fasta_path,
+                        (sample_coverage * cfg.pileup.downsample) / ploidy,
+                        repl_sample,
+                        reference=cfg.reference,
+                        shared_reference=cfg.shared_reference,
+                        dir=tempdir,
+                        stats_path=cfg.stats_path if cfg.simulation.gc_norm_covg else None,
+                        region=example_region.expand(cfg.pileup.realigner_flank),
+                        phase_vcf_path=background_vcf if cfg.pileup.haplotag_sim else None,
+                        aligner=cfg.pileup.aligner,
+                    )
+                except ValueError:
+                    logging.error(
+                        "Failed to synthesize data for alleles (%d,%d) in graph region %s",
+                        *allele_indices,
+                        str(graph.region),
+                    )
+                    raise
 
-            # Simulate reads from this haplotype combination
-            repl_sample = repl_samples[0]
-            try:
-                sample_coverage = (
-                    repl_sample.chrom_mean_coverage(graph.region.contig)
-                    if cfg.simulation.chrom_norm_covg
-                    else repl_sample.mean_coverage
-                )
-                replicate_bam_path = simulate_variant_sequencing(
-                    fasta_path,
-                    (sample_coverage * cfg.pileup.downsample) / ploidy,
+                synth_image_tensor = generator.generate(
+                    replicate_bam_path,
                     repl_sample,
-                    reference=cfg.reference,
-                    shared_reference=cfg.shared_reference,
-                    dir=tempdir,
-                    stats_path=cfg.stats_path if cfg.simulation.gc_norm_covg else None,
-                    region=example_region.expand(cfg.pileup.realigner_flank),
-                    phase_vcf_path=background_vcf if cfg.pileup.haplotag_sim else None,
-                    aligner=cfg.pileup.aligner,
+                    example_region,
+                    realigner=realigner,
+                    ref_seq=ref_seq,
+                    compress=True,
                 )
-            except ValueError:
-                logging.error(
-                    "Failed to synthesize data for alleles (%d,%d) in graph region %s",
-                    *allele_indices,
-                    str(graph.region),
-                )
-                raise
+                repl_encoded_images.append(synth_image_tensor)
 
-            synth_image_tensor = generator.generate(
-                replicate_bam_path,
-                repl_sample,
-                example_region,
-                realigner=realigner,
-                ref_seq=ref_seq,
-                compress=True,
-            )
-            repl_encoded_images.append(synth_image_tensor)
-
-            # TODO: Get "graph name" into output file
-            if not OmegaConf.is_missing(cfg.simulation, "save_sim_bam_dir"):
-                sim_bam_path = os.path.join(cfg.simulation.save_sim_bam_dir, f"{'_'.join(allele_indices)}.bam")
-                shutil.copy(replicate_bam_path, sim_bam_path)
-                shutil.copy(f"{replicate_bam_path}.bai", f"{sim_bam_path}.bai")
+                # TODO: Get "graph name" into output file
+                if not OmegaConf.is_missing(cfg.simulation, "save_sim_bam_dir"):
+                    sim_bam_path = os.path.join(cfg.simulation.save_sim_bam_dir, f"{'_'.join(allele_indices)}_{repl}.bam")
+                    shutil.copy(replicate_bam_path, sim_bam_path)
+                    shutil.copy(f"{replicate_bam_path}.bai", f"{sim_bam_path}.bai")
 
             # Stack all of the image replicates into a tensor
             alleles_encoded_images.append(np.stack(repl_encoded_images))
