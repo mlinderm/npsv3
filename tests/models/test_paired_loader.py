@@ -12,7 +12,7 @@ from .. import data_path, result_path
 )
 class TestPairedDataLoader:
     def test_paired_loader(self, cfg):
-        dm = GroupedImageDataModule(cfg, data_path("images-0000.tar"), batch_size=1)
+        dm = GroupedImageDataModule(data_path("images-0000.tar"), batch_size=1, num_workers=cfg.threads)
         dm.prepare_data()
 
         dm.setup(stage="fit")

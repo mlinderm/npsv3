@@ -27,9 +27,6 @@ from npsv3.pileup import AlleleAssignment, BaseAlignment, FragmentTracker, ReadP
 from npsv3.realigner import AlleleRealignment, FragmentRealigner, realign_fragment
 from npsv3.simulation import augment_sample, simulate_variant_sequencing
 
-MDS_COMPRESSION = "zstd"
-MDS_HASHES = "sha1", "xxh64"
-
 
 def _reference_sequence(reference_fasta: str, region: Range) -> str:
     with pysam.FastaFile(reference_fasta) as ref_fasta:

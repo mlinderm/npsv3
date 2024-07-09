@@ -4,7 +4,6 @@ import ray
 
 from npsv3.util.sample import Sample
 
-
 @pytest.fixture(scope="session")
 def hydra_setup():
     hydra.initialize(config_path="../src/npsv3/conf", version_base=None)

@@ -1,0 +1,10 @@
+_target_: npsv3.models.paired.GroupedVariant
+encoder:
+  _target_: npsv3.models.paired.InceptionEncoder
+  num_channels: 8
+  projection_size: 512
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.001
+max_group_size: ${data.max_group_size}

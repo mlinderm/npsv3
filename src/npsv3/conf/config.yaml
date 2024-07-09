@@ -2,6 +2,8 @@ defaults:
   - pileup
   - simulation
   - generator: coverage
+  - model: paired_inception
+  - data: grouped_images
   - command: images
   - _self_
   - override hydra/help: custom_help
