@@ -20,6 +20,7 @@ from npsv3.images.generator import ImageGenerator
 from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
+from npsv3.util.timeout import Timeout
 from npsv3.variant import Variant, overlapping_records
 from npsv3.graph import Graph
 from npsv3.graph import Graph
@@ -118,7 +119,6 @@ def make_graph_example_from_region(
     addl_features: typing.Optional[dict] = None,
     **kwargs,
 ):
-    print(region, file=sys.stderr)
     # Create generator if not provided
     generator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
 
@@ -311,16 +311,21 @@ class RegionWriter(ExampleActor):
 @ray.remote
 class GraphWriter(ExampleActor): 
     def from_region(self, region: Range):
-        example = make_graph_example_from_region(self.cfg, region, *self.args, **self.kwargs)
-        sample = {
-            "__key__": region.slug,
-            "image.npy.gz": example["image"],
-        }
-        if "label" in example:
-            sample["label.cls"] = example["label"]
-        if "sim.images" in example:
-            sample["sim.images.npy.gz"] = example["sim.images"]
-        self._writer.write(sample)
+        try:
+            # Attempt to timeout long running regions.
+            with Timeout(self.cfg.timeout):
+                example = make_graph_example_from_region(self.cfg, region, *self.args, **self.kwargs)
+            sample = {
+                "__key__": region.slug,
+                "image.npy.gz": example["image"],
+            }
+            if "label" in example:
+                sample["label.cls"] = example["label"]
+            if "sim.images" in example:
+                sample["sim.images.npy.gz"] = example["sim.images"]
+            self._writer.write(sample)
+        except TimeoutError:
+            logging.error("Timeout error for region %s", region)
 
 def vcf_to_region_examples(
     cfg,

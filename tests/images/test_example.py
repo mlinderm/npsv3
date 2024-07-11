@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from omegaconf import OmegaConf
 import webdataset as wds
 
 from npsv3.simulation import bwa_index_loaded

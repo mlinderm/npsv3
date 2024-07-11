@@ -46,3 +46,5 @@ sample: null
 # Root path to download pre-trained models. Defaults to Keras cache dir: ~/.keras
 cache_dir: null
 
+timeout: 1800
+

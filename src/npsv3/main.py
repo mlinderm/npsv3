@@ -69,11 +69,22 @@ def main(cfg: DictConfig) -> None:
             background_vcf=hydra.utils.to_absolute_path(cfg.background),
             progress_bar=True,
         )
-    elif cfg.command == "train_vae":
-        import torch
-        for i in range(torch.cuda.device_count()):
-            print(torch.cuda.get_device_properties(i).name)
+    elif cfg.command == "train":
+        from npsv3.models.paired import train
 
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        if OmegaConf.is_missing(cfg, "output"):
+            output = os.getcwd()
+        else:
+            output = hydra.utils.to_absolute_path(cfg.output)\
+
+        # Join multiple URLs with "::" separator expected by WebDataset
+        training_urls = cfg.data.training_urls.split("::") if isinstance(cfg.data.training_urls, str) else cfg.data.training_urls
+        training_urls = [hydra.utils.to_absolute_path(url) for url in training_urls]
+        OmegaConf.update(cfg, "data.training_urls", "::".join(training_urls), merge=False)
+        
+        train(cfg, output_dir=output, max_epochs=2)
+        # TODO: Create link to the best model to serve as the final model
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

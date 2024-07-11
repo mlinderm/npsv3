@@ -3,6 +3,7 @@ from collections.abc import Generator, Iterable
 import numpy as np
 import webdataset as wds
 import lightning as L
+from lightning.pytorch.callbacks import ModelCheckpoint
 import torch
 import torch.nn as nn
 from torchvision.transforms import v2 as transforms
@@ -151,7 +152,7 @@ class GroupedVariant(L.LightningModule):
     ):
         super().__init__()
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["encoder"])
 
         self.encoder = encoder
         self.batched_distance = torch.vmap(torch.cdist)
@@ -198,9 +199,16 @@ class GroupedVariant(L.LightningModule):
         return { "optimizer": optimizer }
 
 
-def train(cfg, **kw_args):
+def train(cfg, output_dir=None, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
     model = hydra.utils.instantiate(cfg.model)
 
-    trainer = L.Trainer(**kw_args)
+    # Overwrite existing checkpoints, instead of creating new versions
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
+    trainer = L.Trainer(callbacks=[checkpoint_callback], **kw_args)
+    
+    # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
+    # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
     trainer.fit(model=model, datamodule=dm)
+
+    return checkpoint_callback.best_model_path

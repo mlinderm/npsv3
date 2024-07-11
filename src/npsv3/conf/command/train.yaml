@@ -1,2 +1,2 @@
 # @package _global_
-command: train_vae
+command: train
