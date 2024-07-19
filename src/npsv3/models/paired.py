@@ -138,6 +138,7 @@ class ContrastiveLoss(nn.Module):
         self.margin = margin
 
     def forward(self, distances: torch.Tensor, y_true: torch.Tensor, mask: torch.Tensor):
+        print(distances, y_true, mask)
         loss = y_true * torch.square(distances) + (1.0 - y_true) * torch.square(
             torch.clamp(self.margin - distances, min=0)
         )

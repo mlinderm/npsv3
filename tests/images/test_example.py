@@ -117,3 +117,12 @@ class TestGraphToExample:
                 len(cfg.pileup.image_channels),
             )
         assert _i == 0, "Only one sample in dataset"
+
+    def test_number_of_support(self):
+        dataset = wds.WebDataset(result_path("images-0000.tar")).decode()
+        for _i, sample in enumerate(dataset):
+            if sample["sim.images.npy.gz"].shape[0] == 1:
+                print(sample["__key__"], sample["sim.images.npy.gz"].shape)
+            #assert sample["sim.images.npy.gz"].shape[0] > 1
+
+            assert _i < 100

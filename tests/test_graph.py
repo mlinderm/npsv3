@@ -176,6 +176,25 @@ class TestGraphConstructionFromVCF:
             # One of the paths should match the backbone
             assert sum(h.nodes == graph.shortest_path(backbone) for h in haplotypes) == 1
 
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.parametrize("region,background_vcf,inference_vcf,expected_haplotypes", [
+        (Range("chr1", 8977700, 8977700), "chr1_8976700_8978700.vcf.gz", "chr1_8976700_8978700.sv.vcf.gz", 0),
+        #(Range("chr1", 41824764, 41824818), "chr1_41823764_41825818.vcf.gz", "chr1_41823764_41825818.sv.vcf.gz", 2),
+    ])
+    def test_missing_haplotypes(self, cfg, region, background_vcf, inference_vcf, expected_haplotypes):
+        # Another example: chr1_14420883_14420883, chr1_41824764_41824818
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            data_path(background_vcf),
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf=data_path(inference_vcf),
+        )
+        graph._graph.to_gfa()
+        
+        haplotypes = graph.all_haplotypes(data_path(inference_vcf), f"HG00731#0#{region.contig}#0", image_region(cfg, region))
+        print(haplotypes)
+        assert len(haplotypes) == expected_haplotypes
+
     @pytest.mark.skipif(
         not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments"), reason="Not running on cluster"
     )

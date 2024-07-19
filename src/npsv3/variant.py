@@ -140,6 +140,27 @@ class Variant:
         """Returns changed region of the reference genome, excluding any padding bases"""
         return Range(self.contig, self.start + self._padding, self.end)
 
+    @property
+    def ref_length(self):
+        """Length of reference allele including any padding bases"""
+        raise NotImplementedError()
+
+    def alt_length(self, allele=1):
+        """Length of alternate allele including any padding bases"""
+        raise NotImplementedError()
+
+    def length_change(self, allele=1):
+        svlen = self._record.info.get("SVLEN", None)
+        if svlen is None:
+            svlen = tuple(self.alt_length(i + 1) - self.ref_length for i in range(self.num_alt))
+        elif isinstance(svlen, int):
+            svlen = (svlen,)  # If SVLEN is Number=1, convert to sequence
+        return svlen if allele is None else svlen[allele - 1]
+
+    @property
+    def vg_variant_id(self):
+        return vg_variant_id(self._record)
+
     @classmethod
     def from_pysam(cls, record: pysam.VariantRecord) -> "Variant":
         """Factory method for creating appropriate Variant objects"""
@@ -157,7 +178,7 @@ class _SequenceResolvedVariant(Variant):
 
     @property
     def ref_length(self):
-        return len(self._record.alleles[0])
+        return len(self._record.ref)
 
     def alt_length(self, allele=1):
         assert allele >= 1
