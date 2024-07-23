@@ -59,6 +59,7 @@ coverage.xml
 dmypy.json
 .pyre/
 .ruff_cache/
+prof/
 
 # Translations
 *.mo

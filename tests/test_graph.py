@@ -207,7 +207,7 @@ class TestGraphConstructionFromVCF:
             # Range("chr1", 1075570, 1075670),
             # Range("chr1", 1978993, 1979167),
             # Range("chr1", 2689931, 2689931),
-            Range("chr1", 6012136, 6012135),
+            Range("chr1", 6012135, 6012135),
             # Range("chr1", 12858834, 12858933),
             # Range("chr1", 29553648, 29553842), # Region overlaps N's, should generally be excluded
             # Range("chr1", 38618549, 38620153),

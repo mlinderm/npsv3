@@ -8,7 +8,7 @@ import pysam
 
 from npsv3.util.range import Range
 
-_VALID_BASES_RE = re.compile(r"[ACGTN]+")
+_VALID_BASES_RE = re.compile(r"[ACGTN]+", re.IGNORECASE)
 
 
 def vg_variant_id(record: pysam.VariantRecord) -> str:
@@ -140,16 +140,19 @@ class Variant:
         """Returns changed region of the reference genome, excluding any padding bases"""
         return Range(self.contig, self.start + self._padding, self.end)
 
+    def alt_reference_region(self, allele: int) -> Range:
+        raise NotImplementedError()
+
     @property
     def ref_length(self):
         """Length of reference allele including any padding bases"""
         raise NotImplementedError()
 
-    def alt_length(self, allele=1):
+    def alt_length(self):
         """Length of alternate allele including any padding bases"""
         raise NotImplementedError()
 
-    def length_change(self, allele=1):
+    def length_change(self, allele: typing.Optional[int] = None):
         svlen = self._record.info.get("SVLEN", None)
         if svlen is None:
             svlen = tuple(self.alt_length(i + 1) - self.ref_length for i in range(self.num_alt))
@@ -180,17 +183,22 @@ class _SequenceResolvedVariant(Variant):
     def ref_length(self):
         return len(self._record.ref)
 
-    def alt_length(self, allele=1):
+    def alt_length(self, allele):
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
         return len(alt_allele)
 
-    def _alt_seq(self, ref_seq, flank, allele=1):
+    def alt_reference_region(self, allele) -> Range:
         assert allele >= 1
+        padding = len(os.path.commonprefix([self._record.ref, self._record.alleles[allele]]))
+        return Range(self.contig, self.start + padding, self.end)
 
-        alt_allele = self._record.alleles[allele].upper()
+    def alt_seq(self, allele):
+        assert allele >= 1
+        alt_allele = self._record.alleles[allele]
         assert _VALID_BASES_RE.fullmatch(alt_allele), "Unexpected base in sequence resolved allele"
-        return ref_seq[:flank] + alt_allele[self._padding :] + ref_seq[-flank:]
+        padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
+        return alt_allele[padding:]
 
 
 def overlapping_records(vcf_path: str, flank=0):

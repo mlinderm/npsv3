@@ -8,6 +8,7 @@ from pysam.libcutils import parse_region
 class Range:
     # Zero indexed start, 0-indexed exclusive end
     def __init__(self, contig, start, end):
+        assert end >= start
         self.contig = contig
         self.start = start
         self.end = end
@@ -28,11 +29,17 @@ class Range:
     def __le__(self, rhs):
         return isinstance(rhs, Range) and self.contig == rhs.contig and self.start >= rhs.start and self.end <= rhs.end
 
+    def __lt__(self, rhs):
+        return isinstance(rhs, Range) and self.contig == rhs.contig and ((self.start >= rhs.start and self.end < rhs.end) or (self.start > rhs.start and self.end <= rhs.end))
+    
     def __str__(self):
         return f"{self.contig}:{self.start+1}-{self.end}"
 
     def __hash__(self):
         return hash((self.contig, self.start, self.end))
+
+    def __len__(self):
+        return self.end - self.start
 
     @property
     def slug(self):

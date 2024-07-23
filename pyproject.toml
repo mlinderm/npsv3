@@ -11,7 +11,7 @@ name = "npsv3"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text ="MIT"}
 keywords = []
 authors = [
@@ -20,8 +20,6 @@ authors = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: Implementation :: CPython",
@@ -70,6 +68,7 @@ path = "src/npsv3/__about__.py"
 dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
+  "pytest-profiling"
 ]
 system-site-packages = true
 
@@ -89,7 +88,7 @@ TF_CPP_MIN_LOG_LEVEL = "1"
 
 
 [[tool.hatch.envs.all.matrix]]
-python = ["3.8", "3.9", "3.10", "3.11"]
+python = ["3.10", "3.11"]
 
 [tool.hatch.envs.lint]
 dependencies = [
@@ -114,13 +113,13 @@ all = [
 ]
 
 [tool.black]
-target-version = ["py38"]
+target-version = ["py310"]
 line-length = 120
 skip-string-normalization = true
 extend-exclude = "lib"
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py310"
 line-length = 120
 select = [
   "A",
@@ -166,6 +165,8 @@ ignore = [
 unfixable = [
   # Don't touch unused imports
   "F401",
+  # Don't use | in type annotations
+  "UP007"
 ]
 extend-exclude = ["lib"]
 
