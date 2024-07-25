@@ -99,12 +99,12 @@ dependencies = [
 [tool.hatch.envs.lint.scripts]
 typing = "mypy --exclude lib/ --install-types --non-interactive {args:src/npsv3 tests}"
 style = [
-  "ruff {args:.}",
+  "ruff check {args:.}",
   "black --check --diff {args:.}",
 ]
 fmt = [
   "black {args:.}",
-  "ruff --fix {args:.}",
+  "ruff check --fix {args:.}",
   "style",
 ]
 all = [

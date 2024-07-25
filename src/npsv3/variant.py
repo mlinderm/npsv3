@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import typing
+from functools import cached_property
 
 import pysam
 
@@ -160,7 +161,7 @@ class Variant:
             svlen = (svlen,)  # If SVLEN is Number=1, convert to sequence
         return svlen if allele is None else svlen[allele - 1]
 
-    @property
+    @cached_property
     def vg_variant_id(self):
         return vg_variant_id(self._record)
 

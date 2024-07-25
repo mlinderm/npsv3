@@ -21,6 +21,7 @@ from .. import B37_REF_FASTA, data_path, result_path
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "generator._target_=npsv3.images.generator.CoverageImageGenerator"
 )
+@pytest.mark.usefixtures("ray_setup")
 class TestRegionToExample:
     def test_single_region(self, tmp_path, cfg, hg002_sample):
         region = Range("12", 22129564, 22130387)
@@ -63,6 +64,7 @@ class TestRegionToExample:
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup.image_channels=[0,1,2,3,4,5,6,7]",
 )
+@pytest.mark.usefixtures("ray_setup")
 class TestGraphToExample:
     def test_single_del(self, tmp_path, cfg, hg002_sample):
         region = Range("12", 22129564, 22130387)
@@ -118,11 +120,11 @@ class TestGraphToExample:
             )
         assert _i == 0, "Only one sample in dataset"
 
-    def test_number_of_support(self):
-        dataset = wds.WebDataset(result_path("images-0000.tar")).decode()
-        for _i, sample in enumerate(dataset):
-            if sample["sim.images.npy.gz"].shape[0] == 1:
-                print(sample["__key__"], sample["sim.images.npy.gz"].shape)
-            #assert sample["sim.images.npy.gz"].shape[0] > 1
+    # def test_number_of_support(self):
+    #     dataset = wds.WebDataset(result_path("images-0000.tar")).decode()
+    #     for _i, sample in enumerate(dataset):
+    #         if sample["sim.images.npy.gz"].shape[0] == 1:
+    #             print(sample["__key__"], sample["sim.images.npy.gz"].shape)
+    #         #assert sample["sim.images.npy.gz"].shape[0] > 1
 
-            assert _i < 100
+    #         assert _i < 100

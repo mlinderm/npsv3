@@ -22,8 +22,7 @@ from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
 from npsv3.util.timeout import Timeout
 from npsv3.variant import Variant, overlapping_records
-from npsv3.graph import Graph
-from npsv3.graph import Graph
+from npsv3.graphs.graph import Graph
 from npsv3.pileup import AlleleAssignment, BaseAlignment, FragmentTracker, ReadPileup, Strand
 from npsv3.realigner import AlleleRealignment, FragmentRealigner, realign_fragment
 from npsv3.simulation import augment_sample, simulate_variant_sequencing
@@ -133,7 +132,7 @@ def make_graph_example_from_region(
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
         assert graph.is_bubble_path(region.contig), "Graph over region must form bubble for reference background"
-        realign_haplotypes = graph.generate_possible_haplotypes(inference_vcf, region.contig, example_region)
+        realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, example_region)
         assert len(realign_haplotypes) >= 1
         assert realign_haplotypes[0].nodes == graph.nodes_on_path(
             region.contig
@@ -195,7 +194,7 @@ def make_graph_example_from_region(
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
     backgrounds = [
-        graph.generate_possible_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", example_region)
+        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", example_region)
         for i in range(ploidy)
     ]
 
