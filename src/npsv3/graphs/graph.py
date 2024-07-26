@@ -299,9 +299,9 @@ class Graph:
 
         _, source_prev = self._from_source(free_nodes)
         _, sink_prev = self._to_sink(free_nodes)
-
+        #import pdb;pdb.set_trace()
         # Mark nodes to include in the all paths enumeration
-        include_nodes = set()
+        include_nodes = set(free_nodes)
         for variant_id, alt_allele_indices in inference_alleles.items():
             path = variant_path_name(variant_id, 0)
             
@@ -315,7 +315,9 @@ class Graph:
             # Add nodes for alternate alleles
             include_nodes.update(variant_nodes := set().union(*(self.path_nodes[variant_path_name(variant_id, allele_idx)] for allele_idx in alt_allele_indices)))
             
-            # Include path in the absence of the variant (by removing nodes in alternate alleles)
+            # The absence of the variant might conflict with the base path. Thus we explicitly include the base path above,
+            # and here include the reference path. This ensures we have the backbone (i.e., the "true" path) and the explicit
+            # reference path for each variant at the cost of increase the number of haplotypes.
             _, interior_prev = self._from_source(free_nodes - variant_nodes, path_into[-1], path_from[0])
             include_nodes.update(_path_from_prev(interior_prev, path_from[0]))
 
@@ -326,7 +328,7 @@ class Graph:
 
         def _generate_all_paths(node: odgi.handle, path: list[int]):
             path = [*path, self._graph.get_id(node)]
-            #print(path[-1])
+            
             while True:
                 next_nodes = []
                 self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))
@@ -353,6 +355,12 @@ class Graph:
                 _generate_all_paths(next_node, path)
 
         _generate_all_paths(self._graph.get_handle(self.min_node_id), [])
+
+        # Label haplotypes with reference paths if they don't have any of the alternate alleles for that variant
+        for haplotype in haplotypes:
+            for variant_id, alt_allele_indices in inference_alleles.items():
+                if haplotype.paths.isdisjoint({variant_path_name(variant_id, a) for a in alt_allele_indices}):
+                    haplotype.paths.add(variant_path_name(variant_id, 0))
 
         # Sort the paths in the order of the VCF records and alleles (leveraging that
         # inference paths are listed in allele order)

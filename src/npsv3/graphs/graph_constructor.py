@@ -189,7 +189,6 @@ class GraphConstructor:
             if variant_region.end == end_source_span.end:
                 # Don't need to split the end_source span, there are identical ending points
                 end_source_span.names.add(ref_name)
-                end_source_span.alts.append(alt)
             else:
                 end_variant_span = ReferenceSpan(
                     Range(variant_region.contig, end_source_span.start, variant_region.end), source_span=end_source_span
@@ -320,7 +319,7 @@ def variant_path_name(variant_id: str, allele: int) -> str:
 def gfa_to_xg(gfa_path: str, xg_path: str):
     with open(xg_path, "w") as xg_file:
         convert_command = f"vg convert --gfa-in {gfa_path} --xg-out {xg_path}"
-        convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE, check=True)
+        convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE)
         if convert_result.returncode != 0 or not os.path.exists(xg_path):
             print(convert_result.stderr, file=sys.stderr)
             raise RuntimeError("Failed to convert GFA to XG")
@@ -355,3 +354,8 @@ def vcf_to_paths(gfa_path: str, vcf_path: str, region: Range):
                 path_name, length, _, _, strand, nodes, *_ = line.split("\t", 6)
                 if int(length) > 0:
                     yield (path_name, strand, nodes[1:].split(">"))  # Drop leading ">"
+
+def add_haplotypes_to_gfa(gfa_path: str, vcf_path: str, region: Range):
+    with open(gfa_path, "a") as gfa_file:
+        for name, strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
+            print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)    

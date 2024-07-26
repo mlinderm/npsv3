@@ -3,10 +3,10 @@ from collections import deque
 
 import pytest
 
-from npsv3.graphs.graph_constructor import GraphConstructor, ReferenceSpan, AltPath, variant_path_name, vcf_to_paths
+from npsv3.graphs.graph_constructor import GraphConstructor, ReferenceSpan, AltPath, variant_path_name, vcf_to_paths, gfa_to_xg, add_haplotypes_to_gfa
 from npsv3.util.range import Range
 
-from .. import B37_REF_FASTA, HG38_REF_FASTA, data_path
+from .. import B37_REF_FASTA, HG38_REF_FASTA, HG00731_VCF, data_path
 
 class TestGraphConstructor:
     def test_find_spans(self):
@@ -160,3 +160,17 @@ class TestGraphConstructor:
         colocated_span = construct.spans[35]
         assert colocated_span.region == Range("chr1", 6012521, 6012522)
         assert len(colocated_span.alts) == 2
+
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG00731_VCF, reason="HG00731 VCF required")
+    def test_gfa_generation(self, tmp_path, cfg):
+        region = Range("chr1", 5246615, 5246691)
+        construct = GraphConstructor(
+            region.expand(cfg.pileup.graph_flank),
+            HG00731_VCF,
+        )
+
+        # Generate complete GFA without error
+        gfa_path = os.path.join(tmp_path, "test.gfa")
+        construct.to_gfa(HG38_REF_FASTA, gfa_path)
+        add_haplotypes_to_gfa(gfa_path, HG00731_VCF, region.expand(cfg.pileup.graph_flank))

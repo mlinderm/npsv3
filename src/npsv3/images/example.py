@@ -205,6 +205,7 @@ def make_graph_example_from_region(
     # For fully labeled data, one of the haplotypes should be the true haplotype
     labels = []
     for allele, haplotypes in enumerate(backgrounds):
+        assert len(haplotypes) >= 2, f"Fewer than 2 haplotypes for allele {allele} in region {region}"
         base_path_nodes = graph.shortest_path(f"{sample.name}#{allele}#{region.contig}")
         for allele_index, haplotype in enumerate(haplotypes):
             if haplotype.nodes == base_path_nodes:
