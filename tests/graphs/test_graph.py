@@ -197,6 +197,7 @@ class TestGraphConstructionFromVCF:
             # Range("chr1", 29553648, 29553842), # Region overlaps N's, should generally be excluded
             # Range("chr1", 38618549, 38620153),
             Range("chr1", 5722418, 5722418),
+            Range("chr21", 37122424, 37122424),
         ],
     )
     def test_observed_errors_haplotype(self, cfg, region):
@@ -211,14 +212,14 @@ class TestGraphConstructionFromVCF:
 
         haplotypes = graph.all_haplotypes(
             HG00731_SV_VCF,
-            "chr1",
+            region.contig,
             region.expand(cfg.pileup.variant_padding),
         )
         assert len(haplotypes) > 1
         assert (
             len(haplotypes[0].sequence()) == graph.region.length
         ), "With reference background, first haplotype should match reference length"
-        assert haplotypes[0].nodes == graph.nodes_on_path("chr1")
+        assert haplotypes[0].nodes == graph.nodes_on_path(region.contig)
 
 
         backgrounds = [
@@ -226,6 +227,5 @@ class TestGraphConstructionFromVCF:
             for i in range(2)
         ]
         for allele, background in enumerate(backgrounds):
-            base_path_nodes = graph.shortest_path(f"HG00731#{allele}#{region.contig}") 
-            # One of the paths should match the backbone
-            assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1
+            base_path_nodes = graph.shortest_path(f"HG00731#{allele}#{region.contig}")
+            assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1, f"No path matches backbone for allele {allele}"

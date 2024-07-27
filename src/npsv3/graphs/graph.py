@@ -264,13 +264,7 @@ class Graph:
         _, prev = self._from_source(free_nodes, self.min_node_id, self.max_node_id)
 
         # Reconstruct the path
-        path = [self._graph.max_node_id()]
-        while True:
-            if prev[path[-1]] is None:
-                break
-            path.append(prev[path[-1]])
-
-        return path[::-1]
+        return _path_from_prev(prev, self.max_node_id)
 
 
     def all_haplotypes(
@@ -299,9 +293,10 @@ class Graph:
 
         _, source_prev = self._from_source(free_nodes)
         _, sink_prev = self._to_sink(free_nodes)
-        #import pdb;pdb.set_trace()
-        # Mark nodes to include in the all paths enumeration
-        include_nodes = set(free_nodes)
+        
+        # Mark nodes to include in the all paths enumeration. Start with the base path so one of the reported 
+        # haplotypes matches the "true" haplotype.
+        include_nodes = set(_path_from_prev(source_prev, self.max_node_id))
         for variant_id, alt_allele_indices in inference_alleles.items():
             path = variant_path_name(variant_id, 0)
             

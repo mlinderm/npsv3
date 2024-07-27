@@ -74,7 +74,7 @@ RUN pip install --upgrade pip
 # Install pytorch from CPU-only wheel
 RUN python3 -m pip install --no-cache-dir \
   --extra-index-url https://download.pytorch.org/whl/cpu/ \
-  torch torchvision torchaudio
+  torch==2.3.1 torchvision==0.18.1
        
 # Install hatch for development
 RUN python3 -m pip install --no-cache-dir \
