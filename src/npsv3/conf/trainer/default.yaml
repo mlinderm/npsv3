@@ -1,0 +1,7 @@
+# Adapted: https://github.com/ashleve/lightning-hydra-template/blob/main/configs/trainer/default.yaml
+_target_: lightning.pytorch.trainer.Trainer
+
+min_epochs: 1 # prevents early stopping
+max_epochs: 10
+
+check_val_every_n_epoch: 1

@@ -401,7 +401,7 @@ class ReadPileup:
             read1 = self.add_read(fragment.read1, phase_tag=phase_tag, allele=allele, read_allele=read1_realignment, **attributes)
         if fragment.read2:
             read2 = self.add_read(fragment.read2, phase_tag=phase_tag, allele=allele, read_allele=read2_realignment, **attributes)
-        if add_insert and fragment.is_properly_paired:
+        if add_insert and fragment.is_properly_paired and (fragment.read1.reference_end < fragment.read2.reference_start):
             # Phasing information passes through to insert bases
             assert read1.phase == read2.phase, "Phasing specification doesn't match between reads in pair"
             self.add_insert(fragment.insert_region, phase=read1.phase, **attributes)

@@ -56,8 +56,8 @@ def _bwa_index_unload(shared_name: str, lock_file: str):
         except portalocker.LockException:
             continue
 
-
-def _bwa_index_load(reference, lock_file="/var/tmp/npsv3/bwa.lock") -> typing.Optional[str]:
+# Use the same lock file as npsv2 in case the the jobs are running on the same node
+def _bwa_index_load(reference, lock_file="/var/tmp/npsv2/bwa.lock") -> typing.Optional[str]:
     # Create lock directory if it doesn't exist
     os.makedirs(os.path.dirname(lock_file), mode=0o777, exist_ok=True)
 

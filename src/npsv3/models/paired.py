@@ -54,6 +54,11 @@ def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value
                 # positive support image is already present in this group
                 group_label = label - i
                 i += len(indices)
+            elif len(indices) < max_genotypes:
+                # Space in current group to append positive
+                i += len(indices)
+                indices.append(label)
+                group_label = len(indices) - 1
             else:
                 # Swap positive support image into group
                 group_label = len(indices) - 1
@@ -130,7 +135,8 @@ class InceptionEncoder(nn.Module):
     def forward(self, x):
         embeddings = self.inception(x)
         projection = self.bn(embeddings)
-        return projection
+        # L2 normalize vs. L2 regularize embeddings?
+        return torch.nn.functional.normalize(projection, p=2, dim=1)
 
 class ContrastiveLoss(nn.Module):
     def __init__(self, margin=1.0):
@@ -138,7 +144,6 @@ class ContrastiveLoss(nn.Module):
         self.margin = margin
 
     def forward(self, distances: torch.Tensor, y_true: torch.Tensor, mask: torch.Tensor):
-        print(distances, y_true, mask)
         loss = y_true * torch.square(distances) + (1.0 - y_true) * torch.square(
             torch.clamp(self.margin - distances, min=0)
         )
@@ -206,7 +211,9 @@ def train(cfg, output_dir=None, **kw_args):
 
     # Overwrite existing checkpoints, instead of creating new versions
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
-    trainer = L.Trainer(callbacks=[checkpoint_callback], **kw_args)
+    
+    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], **kw_args)
+    #trainer = L.Trainer(callbacks=[checkpoint_callback], **kw_args)
     
     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state

@@ -91,7 +91,7 @@ class GraphConstructor:
 
         with open(out_file, "w") if isinstance(out_file, str) else nullcontext(out_file) as gfa_file:
             print("H", "VN:Z:1.0", sep="\t", file=gfa_file)
-
+            print(f"# Region: {self.region}", file=gfa_file)
             # Assign node ids to spans and each span's alternate alleles, associating those nodes with paths
             node_id_gen = itertools.count(1)
             for span in self.spans:
@@ -321,6 +321,9 @@ def gfa_to_xg(gfa_path: str, xg_path: str):
         convert_command = f"vg convert --gfa-in {gfa_path} --xg-out {xg_path}"
         convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE)
         if convert_result.returncode != 0 or not os.path.exists(xg_path):
+            # with open(gfa_path) as file:
+            #     for line in file:
+            #         print(line.strip())
             print(convert_result.stderr, file=sys.stderr)
             raise RuntimeError("Failed to convert GFA to XG")
 

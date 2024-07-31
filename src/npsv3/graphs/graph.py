@@ -484,7 +484,7 @@ class Graph:
                     if record.start == new_start:
                         new_start = record.start - 1
                 for record in vcf_file.fetch(contig=region.contig, start=new_end - 1, end=new_end):
-                    if record.stop == new_end:
+                    if record.stop >= new_end:
                         new_end = record.stop + 1
             if new_start != region.start or new_end != region.end:
                 return cls.from_vcf(

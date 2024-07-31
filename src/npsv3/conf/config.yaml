@@ -4,6 +4,7 @@ defaults:
   - generator: coverage
   - model: paired_inception
   - data: grouped_images
+  - trainer: paired
   - command: images
   - _self_
   - override hydra/help: custom_help

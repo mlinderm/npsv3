@@ -1,5 +1,5 @@
 _target_: npsv3.models.paired.GroupedImageDataModule
 training_urls: ???
 batch_size: 16
-num_workers: 1
+num_workers: ${threads}
 max_group_size: 6

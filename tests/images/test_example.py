@@ -13,8 +13,9 @@ from npsv3.images.example import (
     vcf_to_graph_examples,
 )
 from npsv3.util.range import Range
+from npsv3.util.sample import Sample
 
-from .. import B37_REF_FASTA, data_path, result_path
+from .. import B37_REF_FASTA, HG38_REF_FASTA, data_path, result_path
 
 
 @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")

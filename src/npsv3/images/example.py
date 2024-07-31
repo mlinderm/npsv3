@@ -212,7 +212,7 @@ def make_graph_example_from_region(
                 labels.append(allele_index)
                 break
         else:
-            raise ValueError("True haplotype not found in possible haplotypes")
+            raise ValueError(f"True haplotype not found in possible haplotypes for region {region}")
     if len(labels) == ploidy:
         example["label"] = np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)).item()
 

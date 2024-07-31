@@ -70,20 +70,23 @@ def main(cfg: DictConfig) -> None:
             progress_bar=True,
         )
     elif cfg.command == "train":
+        import torch
         from npsv3.models.paired import train
+
+        torch.set_num_threads(cfg.threads)
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         if OmegaConf.is_missing(cfg, "output"):
             output = os.getcwd()
         else:
-            output = hydra.utils.to_absolute_path(cfg.output)\
+            output = hydra.utils.to_absolute_path(cfg.output)
 
         # Join multiple URLs with "::" separator expected by WebDataset
         training_urls = cfg.data.training_urls.split("::") if isinstance(cfg.data.training_urls, str) else cfg.data.training_urls
         training_urls = [hydra.utils.to_absolute_path(url) for url in training_urls]
         OmegaConf.update(cfg, "data.training_urls", "::".join(training_urls), merge=False)
         
-        train(cfg, output_dir=output, max_epochs=2)
+        train(cfg, output_dir=output)
         # TODO: Create link to the best model to serve as the final model
     else:
         msg = f"Command {cfg.command} not implemented"
