@@ -6,10 +6,12 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
 import torch
 import torch.nn as nn
+import torch.utils.data as data
 from torchvision.transforms import v2 as transforms
 import torchvision.models as models
+from torchmetrics.classification.accuracy import Accuracy
 import hydra
-
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 def transform_images(images: np.ndarray) -> torch.Tensor:
     """Preprocess images from numpy array to torch tensor
@@ -78,23 +80,30 @@ def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value
 
 split_and_pad_support = wds.pipelinefilter(_split_and_pad_support)
 
+class EmptyDataset(data.Dataset):
+    def __init__(self):
+        super(EmptyDataset).__init__()
+    
+    def __iter__(self):
+        return iter(())
+
 
 class GroupedImageDataModule(L.LightningDataModule):
-    def __init__(self, training_urls, batch_size=16, num_workers=1, max_group_size=6):
+    def __init__(self, training_urls, validation_urls=None, batch_size=16, num_workers=1, max_group_size=6):
         super().__init__()
 
         self.training_urls = training_urls
-        self.save_hyperparameters(ignore=["training_urls"])
+        self.validation_urls = validation_urls
+        self.save_hyperparameters(ignore=["training_urls", "validation_urls"])
 
     def make_loader(self, urls, mode="train"):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
 
+        dataset = wds.WebDataset(urls, shardshuffle=100 if mode == "train" else False)
         if mode == "train":
-            shuffle = 5000
-
+            dataset = dataset.shuffle(5000)
         dataset = (
-            wds.WebDataset(urls)
-            .shuffle(shuffle)
+            dataset
             .decode()
             .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls")
             .map_tuple(transform_images, transform_images, wds.utils.identity)
@@ -107,17 +116,27 @@ class GroupedImageDataModule(L.LightningDataModule):
             wds.WebLoader(
                 dataset,
                 batch_size=None,
+                shuffle=False,
                 num_workers=self.hparams.num_workers,
             )
             .unbatched()
-            .shuffle(shuffle)
-            .batched(self.hparams.batch_size)
         )
+        if mode == "train":
+            loader = loader.shuffle(5000)
+        loader = loader.batched(self.hparams.batch_size)
 
         return loader
 
     def train_dataloader(self):
         return self.make_loader(self.training_urls, mode="train")
+
+    def val_dataloader(self):
+        # Make sure to return a valid dataloader, even if validation data is not available since
+        # Lightning still calls this method with zero validation steps
+        if self.validation_urls:
+            return self.make_loader(self.validation_urls or [], mode="val")
+        else:
+            return data.DataLoader(EmptyDataset())
 
 
 class InceptionEncoder(nn.Module):
@@ -135,70 +154,139 @@ class InceptionEncoder(nn.Module):
     def forward(self, x):
         embeddings = self.inception(x)
         projection = self.bn(embeddings)
-        # L2 normalize vs. L2 regularize embeddings?
-        return torch.nn.functional.normalize(projection, p=2, dim=1)
+        return projection
+
+class EuclideanDistanceMetric(nn.Module):
+    def __init__(self):
+        super(EuclideanDistanceMetric, self).__init__()
+        self.batched_distance = torch.vmap(torch.cdist)
+
+    def forward(self, query_embeddings, support_embeddings):
+        return torch.squeeze(
+            self.batched_distance(
+                torch.unsqueeze(torch.nn.functional.normalize(query_embeddings, p=2, dim=-1), 1),
+                torch.nn.functional.normalize(support_embeddings, p=2, dim=-1),
+            ),
+            dim=1,
+        )
+
+class DotProductSimilarityMetric(nn.Module):
+    def __init__(self):
+        super(DotProductSimilarityMetric, self).__init__()
+        self.batched_dot = torch.vmap(torch.mv)
+
+    def forward(self, query_embeddings, support_embeddings):
+        return self.batched_dot(support_embeddings, query_embeddings)
 
 class ContrastiveLoss(nn.Module):
     def __init__(self, margin=1.0):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, distances: torch.Tensor, y_true: torch.Tensor, mask: torch.Tensor):
-        loss = y_true * torch.square(distances) + (1.0 - y_true) * torch.square(
+    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor, query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
+        label_pair = nn.functional.one_hot(label, distances.shape[1])
+        loss = label_pair * torch.square(distances) + (1.0 - label_pair) * torch.square(
             torch.clamp(self.margin - distances, min=0)
         )
-        return torch.mean(loss[mask.to(torch.bool)])
+        return torch.mean(loss[mask])
+
+class NPairsLoss(nn.Module):
+    def __init__(self, l2_reg=0.002):
+        super(NPairsLoss, self).__init__()
+        self.l2_reg = l2_reg
+
+    def forward(self, metric, label, mask, query_embeddings, support_embeddings):
+        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
+        reg = 0.25*self.l2_reg*torch.mean(torch.torch.square(query_embeddings).sum(dim=1) + torch.square(support_embeddings).sum(dim=(1,2)))
+        return nn.functional.cross_entropy(masked_metric, label, reduction="mean") + reg
+
+class MinimizingPredictor(nn.Module):
+    def __init__(self):
+        super(MinimizingPredictor, self).__init__()
+
+    def forward(self, metric, mask):
+        masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
+        return torch.argmin(metric, dim=1)
+
+class MaximizingPredictor(nn.Module):
+    def __init__(self):
+        super(MaximizingPredictor, self).__init__()
+
+    def forward(self, metric, mask):
+        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
+        return torch.argmax(metric, dim=1)
 
 class GroupedVariant(L.LightningModule):
     def __init__(
         self,
         encoder: nn.Module,
+        metric: nn.Module,
+        loss: nn.Module,
         optimizer: torch.optim.Optimizer,
+        predictor: nn.Module,
         max_group_size=6,
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["encoder"])
+        self.save_hyperparameters(ignore=["encoder", "metric"])
 
         self.encoder = encoder
-        self.batched_distance = torch.vmap(torch.cdist)
-        self.loss = ContrastiveLoss()
+        self.metric = metric
+        self.loss = loss
+        self.predictor = predictor
 
-        self.example_input_array = (torch.zeros(1, 8, 100, 300), torch.zeros(1, 6, 8, 100, 300))
+        self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+
+        self.example_input_array = (torch.zeros(1, 8, 100, 300), torch.zeros(1, max_group_size, 8, 100, 300))
+
+    def on_train_start(self) -> None:
+        # Reset validation metrics at the start of training to avoid effects of sanity batches
+        self.val_acc.reset()
 
     def forward(self, query, support):
-        query_projections = self.encoder(query)
+        query_embeddings = self.encoder(query)
 
         # https://github.com/pytorch/pytorch/issues/1927#issuecomment-1245392571
         support = support.transpose(0, 1)
-        support_projections = torch.stack([self.encoder(s) for s in support], dim=0)
-        support_projections = support_projections.transpose(0, 1)
+        support_embeddings = torch.stack([self.encoder(s) for s in support], dim=0)
+        support_embeddings = support_embeddings.transpose(0, 1)
 
-        # Compute pairwise distances between query and support projections for each group
-        distances = torch.squeeze(
-            self.batched_distance(torch.unsqueeze(query_projections, 1), support_projections), dim=1
-        )
+        metric = self.metric(query_embeddings, support_embeddings)
+        
+        return (metric, query_embeddings, support_embeddings)
 
-        return (distances, query_projections, support_projections)
+    def _model_step(self, batch, batch_idx):
+        query, support, num_support, label = batch
+        metric, query_embeddings, support_embeddings = self(query, support)
+
+        # Create a mask for the valid support images in each group by filling ones out to the
+        # last valid support image (via "exclusive cumsum")
+        mask = torch.zeros(metric.shape, dtype=torch.long, device=metric.device)
+        mask[(torch.arange(metric.shape[0]), num_support - 1)] = 1
+        mask = (1 - (mask.cumsum(dim=-1) - mask)).to(torch.bool)
+
+        loss = self.loss(metric, label, mask, query_embeddings, support_embeddings)
+        preds = self.predictor(metric, mask)
+        
+        return (loss, preds, label)
 
     def training_step(self, batch, batch_idx):
-        query, support, num_support, label = batch
-        distances, query_projections, support_projections = self(query, support)
-
-        # Create a mask for the valid support images in each group
-        mask = torch.zeros(distances.shape, dtype=torch.long, device=distances.device)
-        mask[(torch.arange(distances.shape[0]), num_support - 1)] = 1
-        mask = 1 - (
-            mask.cumsum(dim=-1) - mask
-        )  # Fill ones out to the last valid support image (via "exclusive cumsum")
-
-        # Compute the loss for each group
-        label_pair = nn.functional.one_hot(label, self.hparams.max_group_size)
-
-        # Contrastive loss
-        loss = self.loss(distances, label_pair, mask)
+        loss, preds, label = self._model_step(batch, batch_idx)
+       
         self.log("train_loss", loss, prog_bar=True)
+        self.train_acc(preds, label)
+        self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
+
         return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss, preds, label = self._model_step(batch, batch_idx)
+       
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.val_acc(preds, label)
+        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+
 
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
@@ -212,8 +300,14 @@ def train(cfg, output_dir=None, **kw_args):
     # Overwrite existing checkpoints, instead of creating new versions
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
     
-    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], **kw_args)
-    #trainer = L.Trainer(callbacks=[checkpoint_callback], **kw_args)
+    if cfg.data.validation_urls:
+        limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
+        num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
+    else:
+        # Skip validation if no validation data provided
+        limit_val_batches = num_sanity_val_steps = 0
+
+    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, **kw_args)
     
     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state

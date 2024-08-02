@@ -132,7 +132,7 @@ def make_graph_example_from_region(
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
         assert graph.is_bubble_path(region.contig), "Graph over region must form bubble for reference background"
-        realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, example_region)
+        realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region)
         assert len(realign_haplotypes) >= 1
         assert realign_haplotypes[0].nodes == graph.nodes_on_path(
             region.contig
@@ -194,7 +194,7 @@ def make_graph_example_from_region(
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
     backgrounds = [
-        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", example_region)
+        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region)
         for i in range(ploidy)
     ]
 

@@ -1,0 +1,17 @@
+_target_: npsv3.models.paired.GroupedVariant
+encoder:
+  _target_: npsv3.models.paired.InceptionEncoder
+  num_channels: 8
+  projection_size: 512
+metric:
+  _target_: npsv3.models.paired.DotProductSimilarityMetric
+loss:
+  _target_: npsv3.models.paired.NPairsLoss
+  l2_reg: 0.002
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.001
+predictor:
+  _target_: npsv3.models.paired.MinimizingPredictor
+max_group_size: ${data.max_group_size}

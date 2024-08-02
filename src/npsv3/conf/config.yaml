@@ -2,7 +2,7 @@ defaults:
   - pileup
   - simulation
   - generator: coverage
-  - model: paired_inception
+  - model: paired_inception_contrastive
   - data: grouped_images
   - trainer: paired
   - command: images
