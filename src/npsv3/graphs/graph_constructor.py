@@ -46,15 +46,15 @@ class GraphConstructor:
             for record in vcf_file.fetch(**self.region.pysam_fetch):
                 variant = Variant.from_pysam(record)
                 for allele_idx, allele_len in enumerate(variant.length_change(allele=None), start=1):
-                    # Find and split the corresponding span
-                    alt_region = variant.alt_reference_region(allele_idx)
-                    alt = AltPath(
-                        variant_path_name(variant.vg_variant_id, allele_idx),
-                        alt_region.end,
-                        variant.alt_seq(allele_idx),
-                    )
-
-                    self._split_spans(alt_region, variant.vg_variant_id, alt)
+                    if allele_len is not None: # Ignore * alleles
+                        # Find and split the corresponding span
+                        alt_region = variant.alt_reference_region(allele_idx)
+                        alt = AltPath(
+                            variant_path_name(variant.vg_variant_id, allele_idx),
+                            alt_region.end,
+                            variant.alt_seq(allele_idx),
+                        )
+                        self._split_spans(alt_region, variant.vg_variant_id, alt)
 
     @property
     def num_spans(self) -> int:
@@ -190,12 +190,14 @@ class GraphConstructor:
                 # Don't need to split the end_source span, there are identical ending points
                 end_source_span.names.add(ref_name)
             else:
-                end_variant_span = ReferenceSpan(
-                    Range(variant_region.contig, end_source_span.start, variant_region.end), source_span=end_source_span
+                remainder_span = ReferenceSpan(
+                    Range(variant_region.contig, variant_region.end, end_source_span.end), source_span=end_source_span
                 )
-                end_variant_span.names.add(ref_name)
-                self.spans.insert(end_idx, end_variant_span)
-                end_source_span.region = Range(end_source_span.contig, variant_region.end, end_source_span.end)
+
+                end_source_span.names.add(ref_name)
+                end_source_span.region = Range(end_source_span.contig, end_source_span.start, variant_region.end)
+
+                self.spans.insert(end_idx + 1, remainder_span)
 
             if variant_region.start == start_source_span.start:
                 # Don't need to split the start_source span, there are identical starting points
@@ -318,17 +320,16 @@ def variant_path_name(variant_id: str, allele: int) -> str:
 
 def gfa_to_xg(gfa_path: str, xg_path: str):
     with open(xg_path, "w") as xg_file:
-        convert_command = f"vg convert --gfa-in {gfa_path} --xg-out {xg_path}"
+        convert_command = f"vg convert --gfa-in {gfa_path} --xg-out"
         convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE)
         if convert_result.returncode != 0 or not os.path.exists(xg_path):
-            # with open(gfa_path) as file:
-            #     for line in file:
-            #         print(line.strip())
             print(convert_result.stderr, file=sys.stderr)
             raise RuntimeError("Failed to convert GFA to XG")
 
 
 def vcf_to_gbwt(xg_path: str, vcf_path: str, region: Range, gbwt_path: str):
+    # VG drops the '*' alleles as produced by HaplotypeCaller or other tools, producing
+    # incorrect haplotypes
     gbwt_command = f"vg gbwt \
         --xg-name {quote(xg_path)} \
         --vcf-input {quote(vcf_path)} \

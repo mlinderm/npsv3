@@ -17,7 +17,8 @@ def vg_variant_id(record: pysam.VariantRecord) -> str:
     assert record.ref is not None and record.alts is not None
     variant_string = f"{record.contig}\n{record.pos}\n{record.ref.upper()}\n"
     for alt in record.alts:
-        variant_string += f"{alt.upper()}\n"
+        if alt != "*": # Ignore "*" alleles since they are not handled by VG
+            variant_string += f"{alt.upper()}\n"
     return hashlib.sha1(bytes(variant_string, "ascii")).hexdigest()  # noqa: S324
 
 
@@ -98,10 +99,10 @@ class Variant:
 
         self._sequence_resolved = not _has_symbolic_allele(record)
         if self._sequence_resolved:
-            self._padding = len(os.path.commonprefix(record.alleles))
+            self._padding = len(os.path.commonprefix([a for a in record.alleles if a != "*"]))
             self._right_padding = [
                 len(os.path.commonprefix([record.ref[self._padding :][::-1], a[self._padding :][::-1]]))
-                for a in record.alts
+                for a in record.alts if a != "*"
             ]
         else:
             assert len(record.alts) == 1, "Multiallelic symbolic variants not currently supported"
@@ -154,9 +155,12 @@ class Variant:
         raise NotImplementedError()
 
     def length_change(self, allele: typing.Optional[int] = None):
-        svlen = self._record.info.get("SVLEN", None)
+        try:
+            svlen = self._record.info.get("SVLEN", None)
+        except ValueError: # PySAM seems to raise an error if field is not defined in VCF at all
+            svlen = None
         if svlen is None:
-            svlen = tuple(self.alt_length(i + 1) - self.ref_length for i in range(self.num_alt))
+            svlen = tuple(self.alt_length(i) - self.ref_length if alt != "*" else None for i, alt in enumerate(self._record.alts, start=1))
         elif isinstance(svlen, int):
             svlen = (svlen,)  # If SVLEN is Number=1, convert to sequence
         return svlen if allele is None else svlen[allele - 1]
@@ -184,23 +188,52 @@ class _SequenceResolvedVariant(Variant):
     def ref_length(self):
         return len(self._record.ref)
 
-    def alt_length(self, allele):
+    def alt_length(self, allele) -> typing.Optional[int]:
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
-        return len(alt_allele)
+        return len(alt_allele) if alt_allele != "*" else None
 
-    def alt_reference_region(self, allele) -> Range:
+    def alt_reference_region(self, allele) -> typing.Optional[Range]:
         assert allele >= 1
-        padding = len(os.path.commonprefix([self._record.ref, self._record.alleles[allele]]))
+        alt_allele = self._record.alleles[allele]
+        if alt_allele == "*":
+            return None
+        # Compute per-allele padding (since is may be different than the global padding)
+        padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
         return Range(self.contig, self.start + padding, self.end)
 
-    def alt_seq(self, allele):
+    def alt_seq(self, allele) -> typing.Optional[str]:
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
-        assert _VALID_BASES_RE.fullmatch(alt_allele), "Unexpected base in sequence resolved allele"
+        if alt_allele == "*":
+            return None
+        assert _VALID_BASES_RE.fullmatch(alt_allele), f"Unexpected base in sequence resolved allele {alt_allele} in region {self.reference_region}"
+        # Compute per-allele padding (since is may be different than the global padding)
         padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
         return alt_allele[padding:]
 
+
+class _SymbolicDeletionVariant(Variant):
+    def __init__(self, record):
+        Variant.__init__(self, record)
+        assert self.num_alt == 1, "Multi-allelic symbolic variants are not supported"
+
+    @property
+    def ref_length(self):
+        return self.end - self.start
+
+    def alt_length(self, allele=1):
+        assert allele >= 1
+        return 1
+
+    def alt_reference_region(self, allele) -> Range:
+        assert allele >= 1
+        return Range(self.contig, self.start + self._padding, self.end)
+
+    def alt_seq(self, allele):
+        assert allele >= 1
+        return ""
+        
 
 def overlapping_records(vcf_path: str, flank=0):
     # We assume VCF is in sorted order

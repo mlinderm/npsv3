@@ -229,3 +229,18 @@ class TestGraphConstructionFromVCF:
         for allele, background in enumerate(backgrounds):
             base_path_nodes = graph.shortest_path(f"HG00731#{allele}#{region.contig}")
             assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1, f"No path matches backbone for allele {allele}"
+
+
+    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="HG38 reference required")
+    def test_star_alleles(self):
+        region = Range("14", 77187572, 77187592)
+        graph = Graph.from_vcf(
+            B37_REF_FASTA,
+            data_path("14_77187582_77187582.vcf.gz"),
+            region,
+        )
+        
+        graph._graph.to_gfa()
+
+        assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30
+        assert graph.sequence_length(graph.nodes_on_path("HG002#1#14#0")) == 18

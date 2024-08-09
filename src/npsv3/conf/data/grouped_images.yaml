@@ -4,3 +4,4 @@ validation_urls: null
 batch_size: 16
 num_workers: ${threads}
 max_group_size: 6
+shuffle_size: 1000

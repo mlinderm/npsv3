@@ -28,6 +28,13 @@ def _make_paths_absolute(cfg: DictConfig, keys: typing.Iterable[str]):
             OmegaConf.update(cfg, key, hydra.utils.to_absolute_path(OmegaConf.select(cfg, key)))
 
 
+def _to_webdataset_urls(urls: typing.Union[str, typing.Iterable[str]]) -> str:
+    # Join multiple URLs with "::" separator expected by WebDataset
+    list_of_urls = urls.split("::") if isinstance(urls, str) else urls
+    list_of_urls = [hydra.utils.to_absolute_path(url) for url in list_of_urls]
+    return "::".join(list_of_urls)
+    
+
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     if cfg.command == "preprocess":
@@ -81,11 +88,10 @@ def main(cfg: DictConfig) -> None:
         else:
             output = hydra.utils.to_absolute_path(cfg.output)
 
-        # Join multiple URLs with "::" separator expected by WebDataset
-        training_urls = cfg.data.training_urls.split("::") if isinstance(cfg.data.training_urls, str) else cfg.data.training_urls
-        training_urls = [hydra.utils.to_absolute_path(url) for url in training_urls]
-        OmegaConf.update(cfg, "data.training_urls", "::".join(training_urls), merge=False)
-        
+        OmegaConf.update(cfg, "data.training_urls", _to_webdataset_urls(cfg.data.training_urls), merge=False)
+        if not OmegaConf.is_missing(cfg, "data.validation_urls"):
+             OmegaConf.update(cfg, "data.validation_urls", _to_webdataset_urls(cfg.data.validation_urls), merge=False)
+
         train(cfg, output_dir=output)
         # TODO: Create link to the best model to serve as the final model
     else:

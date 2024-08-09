@@ -174,3 +174,17 @@ class TestGraphConstructor:
         gfa_path = os.path.join(tmp_path, "test.gfa")
         construct.to_gfa(HG38_REF_FASTA, gfa_path)
         add_haplotypes_to_gfa(gfa_path, HG00731_VCF, region.expand(cfg.pileup.graph_flank))
+
+    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
+    def test_star_alleles(self, tmp_path):
+        region = Range("14", 77187572, 77187592)
+        vcf_path = data_path("14_77187582_77187582.vcf.gz")
+        construct = GraphConstructor(region, vcf_path)
+        
+        # Generate complete GFA without error
+        gfa_path = os.path.join(tmp_path, "test.gfa")
+        construct.to_gfa(B37_REF_FASTA, gfa_path)
+        add_haplotypes_to_gfa(gfa_path, vcf_path, region)
+
+       # GFA isn't well equipped to test if haplotype is correctly determined
+

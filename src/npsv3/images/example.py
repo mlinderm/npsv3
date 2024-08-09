@@ -131,12 +131,12 @@ def make_graph_example_from_region(
 
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
-        assert graph.is_bubble_path(region.contig), "Graph over region must form bubble for reference background"
+        assert graph.is_bubble_path(region.contig), f"Graph must form bubble for reference background for region {region}"
         realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region)
         assert len(realign_haplotypes) >= 1
         assert realign_haplotypes[0].nodes == graph.nodes_on_path(
             region.contig
-        ), "First haplotype must be the reference"
+        ), f"First haplotype must be the reference for region {region}"
 
         realign_fasta_path = os.path.join(tempdir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
@@ -153,7 +153,7 @@ def make_graph_example_from_region(
         ref_seq = realign_haplotypes[0].sequence()[
             example_region.start - graph.region.start : example_region.end - graph.region.end
         ]
-        assert len(ref_seq) == example_region.length, "Reference sequence length does not match the region size"
+        assert len(ref_seq) == example_region.length, f"Reference sequence length does not match the region size for region {region}"
 
     # Construct image for "real" data
     with tempfile.TemporaryDirectory() as tempdir:
@@ -194,7 +194,7 @@ def make_graph_example_from_region(
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
     backgrounds = [
-        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region)
+        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding))
         for i in range(ploidy)
     ]
 
@@ -252,7 +252,7 @@ def make_graph_example_from_region(
                     )
                 except ValueError:
                     logging.error(
-                        "Failed to synthesize data for alleles (%d,%d) in graph region %s",
+                        "Failed to synthesize data for alleles (%d,%d) for region %s",
                         *allele_indices,
                         str(graph.region),
                     )

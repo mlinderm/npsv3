@@ -89,7 +89,7 @@ class EmptyDataset(data.Dataset):
 
 
 class GroupedImageDataModule(L.LightningDataModule):
-    def __init__(self, training_urls, validation_urls=None, batch_size=16, num_workers=1, max_group_size=6):
+    def __init__(self, training_urls, validation_urls=None, batch_size=16, num_workers=1, max_group_size=6, shuffle_size=1000):
         super().__init__()
 
         self.training_urls = training_urls
@@ -101,7 +101,7 @@ class GroupedImageDataModule(L.LightningDataModule):
 
         dataset = wds.WebDataset(urls, shardshuffle=100 if mode == "train" else False)
         if mode == "train":
-            dataset = dataset.shuffle(5000)
+            dataset = dataset.shuffle(self.hparams.shuffle_size)
         dataset = (
             dataset
             .decode()
@@ -122,7 +122,7 @@ class GroupedImageDataModule(L.LightningDataModule):
             .unbatched()
         )
         if mode == "train":
-            loader = loader.shuffle(5000)
+            loader = loader.shuffle(self.hparams.shuffle_size)
         loader = loader.batched(self.hparams.batch_size)
 
         return loader
@@ -197,8 +197,13 @@ class NPairsLoss(nn.Module):
 
     def forward(self, metric, label, mask, query_embeddings, support_embeddings):
         masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
-        reg = 0.25*self.l2_reg*torch.mean(torch.torch.square(query_embeddings).sum(dim=1) + torch.square(support_embeddings).sum(dim=(1,2)))
-        return nn.functional.cross_entropy(masked_metric, label, reduction="mean") + reg
+        loss = nn.functional.cross_entropy(masked_metric, label, reduction="mean")
+        
+        masked_support = torch.where(mask, torch.square(support_embeddings).sum(dim=2),  support_embeddings.new_full([], 0))
+        return loss + 0.25*self.l2_reg*(
+            torch.mean(torch.torch.square(query_embeddings).sum(dim=1)) + 
+            torch.mean(masked_support)
+        )
 
 class MinimizingPredictor(nn.Module):
     def __init__(self):
