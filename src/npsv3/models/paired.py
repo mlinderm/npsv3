@@ -44,7 +44,7 @@ def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value
         Generator[tuple, None, None]: (query, support, num_support, label) tuples.
     """
     for sample in data:
-        query, support, label = sample
+        query, support, label, *_ = sample
         genotypes, replicates, *image_size = support.shape
         assert label < genotypes and len(image_size) == 3, "Unexpected data shape"
 
@@ -80,6 +80,32 @@ def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value
 
 split_and_pad_support = wds.pipelinefilter(_split_and_pad_support)
 
+
+def _wrap_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value=0) -> Generator[tuple, None, None]:
+    for sample in data:
+        query, support, label, key, *_ = sample
+        genotypes, replicates, *image_size = support.shape
+        assert label < genotypes and len(image_size) == 3, "Unexpected data shape"
+
+        for i in range(0, genotypes, max_genotypes):
+            indices = range(i, min(i + max_genotypes, genotypes))
+            
+            # yield a separate example for each replicate
+            num_support = len(indices)
+            padding = (0, 0) * len(image_size) + (0, max_genotypes - num_support)
+            for j in range(replicates):
+                print(query.shape, support.shape)
+                yield query, torch.nn.functional.pad(
+                    support[indices, j],
+                    padding,
+                    mode='constant',
+                    value=padding_value,
+                ), num_support, label, genotypes, key
+
+
+wrap_and_pad_support = wds.pipelinefilter(_wrap_and_pad_support)
+
+
 class EmptyDataset(data.Dataset):
     def __init__(self):
         super(EmptyDataset).__init__()
@@ -89,13 +115,15 @@ class EmptyDataset(data.Dataset):
 
 
 class GroupedImageDataModule(L.LightningDataModule):
-    def __init__(self, training_urls, validation_urls=None, batch_size=16, num_workers=1, max_group_size=6, shuffle_size=1000):
+    def __init__(self, training_urls=None, validation_urls=None, prediction_urls=None, test_urls=None, batch_size=16, num_workers=1, max_group_size=6, shuffle_size=1000):
         super().__init__()
-
+        self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
+        
         self.training_urls = training_urls
         self.validation_urls = validation_urls
-        self.save_hyperparameters(ignore=["training_urls", "validation_urls"])
-
+        self.prediction_urls = prediction_urls
+        self.test_urls = test_urls
+       
     def make_loader(self, urls, mode="train"):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
 
@@ -138,10 +166,32 @@ class GroupedImageDataModule(L.LightningDataModule):
         else:
             return data.DataLoader(EmptyDataset())
 
+    def test_dataloader(self):
+        # Make sure to return a valid dataloader, even if validation data is not available since
+        # Lightning still calls this method with zero validation steps
+        if self.test_urls:
+            return self.make_loader(self.test_urls or [], mode="test")
+        else:
+            return data.DataLoader(EmptyDataset())
+
+    def predict_dataloader(self):
+        dataset = (
+            wds.WebDataset(self.prediction_urls, shardshuffle=False)
+            .decode()
+            .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls", "__key__")
+            .map_tuple(transform_images, transform_images, wds.utils.identity, wds.utils.identity)
+            .compose(wrap_and_pad_support(max_genotypes=self.hparams.max_group_size, padding_value=0))
+            .batched(self.hparams.batch_size, partial=True)
+        )
+
+        return wds.WebLoader(dataset, batch_size=None, shuffle=False, num_workers=self.hparams.num_workers)
 
 class InceptionEncoder(nn.Module):
     def __init__(self, num_channels=8, projection_size=512):
         super(InceptionEncoder, self).__init__()
+        self.num_channels = num_channels
+        self.projection_size = projection_size
+        
         self.inception = models.inception_v3(weights=None, aux_logits=False)
 
         # Replace the first layer for our number of channels
@@ -242,8 +292,9 @@ class GroupedVariant(L.LightningModule):
 
         self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
         self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        self.test_acc = Accuracy(task="multiclass", num_classes=max_group_size)
 
-        self.example_input_array = (torch.zeros(1, 8, 100, 300), torch.zeros(1, max_group_size, 8, 100, 300))
+        self.example_input_array = (torch.zeros(1, self.encoder.num_channels, 100, 300), torch.zeros(1, max_group_size, self.encoder.num_channels, 100, 300))
 
     def on_train_start(self) -> None:
         # Reset validation metrics at the start of training to avoid effects of sanity batches
@@ -262,7 +313,7 @@ class GroupedVariant(L.LightningModule):
         return (metric, query_embeddings, support_embeddings)
 
     def _model_step(self, batch, batch_idx):
-        query, support, num_support, label = batch
+        query, support, num_support, label, *_ = batch
         metric, query_embeddings, support_embeddings = self(query, support)
 
         # Create a mask for the valid support images in each group by filling ones out to the
@@ -276,7 +327,7 @@ class GroupedVariant(L.LightningModule):
         
         return (loss, preds, label)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label = self._model_step(batch, batch_idx)
        
         self.log("train_loss", loss, prog_bar=True)
@@ -285,7 +336,7 @@ class GroupedVariant(L.LightningModule):
 
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label = self._model_step(batch, batch_idx)
        
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -293,29 +344,70 @@ class GroupedVariant(L.LightningModule):
         self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
 
 
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, preds, label = self._model_step(batch, batch_idx)
+       
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.test_acc(preds, label)
+        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        query, support, num_support, label, total_support, key = batch
+        metric, *_ = self(query, support)
+        return metric, num_support, label, total_support, key
+
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
         return { "optimizer": optimizer }
 
 
-def train(cfg, output_dir=None, **kw_args):
+# def train(cfg, output_dir=None, **kw_args):
+#     dm = hydra.utils.instantiate(cfg.data)
+#     model = hydra.utils.instantiate(cfg.model)
+
+#     # Overwrite existing checkpoints, instead of creating new versions
+#     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
+    
+#     if cfg.data.validation_urls:
+#         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
+#         num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
+#     else:
+#         # Skip validation if no validation data provided
+#         limit_val_batches = num_sanity_val_steps = 0
+
+#     if cfg.data.test_urls:
+#         limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
+#     else:
+#         # Skip testing if no testing data provided
+#         limit_test_batches = 0
+
+#     trainer =  hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, limit_test_batches=limit_test_batches, **kw_args)
+    
+#     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
+#     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
+#     trainer.fit(model=model, datamodule=dm)
+
+#     return checkpoint_callback.best_model_path
+
+def predict(cfg, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
-    model = hydra.utils.instantiate(cfg.model)
-
-    # Overwrite existing checkpoints, instead of creating new versions
-    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
     
-    if cfg.data.validation_urls:
-        limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
-        num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
-    else:
-        # Skip validation if no validation data provided
-        limit_val_batches = num_sanity_val_steps = 0
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+    # We need to instantiate any of ignored components in the model
+    model = model_cls.load_from_checkpoint(cfg.model.checkpoint, encoder=hydra.utils.instantiate(cfg.model.encoder), metric=hydra.utils.instantiate(cfg.model.metric))
+    print(model)
+    trainer = L.Trainer(limit_predict_batches=2)
+    predictions = trainer.predict(model, dm)
+    print(predictions)
 
-    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, **kw_args)
+
+def test(cfg, **kw_args):
+    dm = hydra.utils.instantiate(cfg.data)
     
-    # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
-    # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
-    trainer.fit(model=model, datamodule=dm)
-
-    return checkpoint_callback.best_model_path
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+    # We need to instantiate any of ignored components in the model
+    model = model_cls.load_from_checkpoint(cfg.model.checkpoint, encoder=hydra.utils.instantiate(cfg.model.encoder), metric=hydra.utils.instantiate(cfg.model.metric))
+    
+    trainer = L.Trainer(**kw_args)
+    trainer.test(model, dm)

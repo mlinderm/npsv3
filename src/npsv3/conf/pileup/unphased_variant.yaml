@@ -1,0 +1,6 @@
+defaults:
+  - base
+
+image_channels: [0, 1, 2, 3, 4, 6, 7]
+
+example_fn: "npsv3.images.example.vcf_to_variant_examples"

@@ -35,6 +35,9 @@ def _to_webdataset_urls(urls: typing.Union[str, typing.Iterable[str]]) -> str:
     return "::".join(list_of_urls)
     
 
+OmegaConf.register_new_resolver("strip_ext", lambda path: os.path.splitext(path)[0])
+OmegaConf.register_new_resolver("len", lambda arg: len(arg))
+
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     if cfg.command == "preprocess":
@@ -53,9 +56,9 @@ def main(cfg: DictConfig) -> None:
             json.dump(stats, file)
 
     elif cfg.command == "images":
-        from npsv3.images.example import vcf_to_region_examples
         from npsv3.util.sample import Sample
 
+        _make_paths_absolute(cfg, ["reference", "stats_path"])
         _check_shared_reference(cfg)
 
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
@@ -78,7 +81,7 @@ def main(cfg: DictConfig) -> None:
         )
     elif cfg.command == "train":
         import torch
-        from npsv3.models.paired import train
+        from npsv3.models.runners import train
 
         torch.set_num_threads(cfg.threads)
 
@@ -89,11 +92,34 @@ def main(cfg: DictConfig) -> None:
             output = hydra.utils.to_absolute_path(cfg.output)
 
         OmegaConf.update(cfg, "data.training_urls", _to_webdataset_urls(cfg.data.training_urls), merge=False)
-        if not OmegaConf.is_missing(cfg, "data.validation_urls"):
-             OmegaConf.update(cfg, "data.validation_urls", _to_webdataset_urls(cfg.data.validation_urls), merge=False)
+        if not OmegaConf.is_missing(cfg, "data.validation_urls") and OmegaConf.select(cfg, "data.validation_urls") is not None:
+            OmegaConf.update(cfg, "data.validation_urls", _to_webdataset_urls(cfg.data.validation_urls), merge=False)
 
         train(cfg, output_dir=output)
         # TODO: Create link to the best model to serve as the final model
+    
+    elif cfg.command == "test":
+        import torch
+        from npsv3.models.paired import test
+        
+        torch.set_num_threads(cfg.threads)
+
+        _make_paths_absolute(cfg, ["model.checkpoint"])
+        OmegaConf.update(cfg, "data.test_urls", _to_webdataset_urls(cfg.data.test_urls), merge=False)
+       
+        test(cfg)
+    
+    elif cfg.command == "predict":
+        import torch
+        from npsv3.models.paired import predict
+        
+        torch.set_num_threads(cfg.threads)
+
+        _make_paths_absolute(cfg, ["model.checkpoint"])
+        OmegaConf.update(cfg, "data.prediction_urls", _to_webdataset_urls(cfg.data.prediction_urls), merge=False)
+       
+        predict(cfg)
+    
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

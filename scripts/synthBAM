@@ -25,7 +25,8 @@ import pysam
 with pysam.AlignmentFile("-", "r") as untagged_file:
     with pysam.AlignmentFile("-", "w", template=untagged_file) as tagged_file:
         for read in untagged_file:
-            read.set_tag("HP",  2 if "alt" in read.query_name else 1)
+            name = read.query_name
+            read.set_tag("HP", 1 if name[name.find("#") + 1] == "0" else 2)
             tagged_file.write(read)
 '
 }

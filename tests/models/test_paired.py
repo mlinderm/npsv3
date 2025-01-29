@@ -1,11 +1,9 @@
 import pytest
-import webdataset as wds
 import torch
-from torchvision.transforms import v2 as transforms
+from npsv3.models.paired import GroupedImageDataModule
+from npsv3.models.runners import train
 
-from npsv3.models.paired import transform_images, split_and_pad_support, GroupedImageDataModule
-
-from .. import data_path, result_path
+from .. import data_path
 
 @pytest.mark.cfg_overrides(
     f"pileup.image_channels=[0,1,2,3,4,5,6,7]",
@@ -28,3 +26,24 @@ class TestPairedDataLoader:
         assert _i == 1, "The two replicates become 2 examples in the dataset"
 
         dm.teardown(stage="fit")
+
+class TestPairedCNNModel:
+    @pytest.mark.cfg_overrides(
+        f"model=paired_inception_contrastive",
+        f"data.training_urls={data_path('images-0000.tar')}",
+        f"data.validation_urls={data_path('images-0000.tar')}",
+        "data.batch_size=2",
+        "trainer=paired",
+    )
+    def test_paired_cnn_contrastive_model(self, cfg):
+        train(cfg, fast_dev_run=True)
+
+    @pytest.mark.cfg_overrides(
+        f"model=paired_inception_npairs",
+        f"data.training_urls={data_path('images-0000.tar')}",
+        f"data.validation_urls={data_path('images-0000.tar')}",
+        "data.batch_size=2",
+        "trainer=paired",
+    )
+    def test_paired_cnn_npairs_model(self, cfg):
+        train(cfg, fast_dev_run=True)

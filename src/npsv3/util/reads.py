@@ -25,6 +25,7 @@ def haplotag_reads(reference: str, sample: Sample, read_path: str, vcf_path: str
 
     haplotag_result = subprocess.run(whatshap_commandline, shell=True, stderr=subprocess.PIPE, check=False)
     if haplotag_result.returncode != 0 or not os.path.exists(tagged_bam.name):
+        print(haplotag_result.stderr)
         raise RuntimeError("Failed to haplotag read file")
     pysam.index(tagged_bam.name)
     return tagged_bam.name

@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 import os
+from omegaconf import OmegaConf
 
 def _first_existing(*paths):
     for path in paths:
@@ -40,6 +41,17 @@ HG00731_SV_VCF = _first_existing(
     "/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
 )
 
+SYNDIP_VCF = _first_existing(
+    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/syndip.genotyped.passing.b37.vcf.gz"
+)
+
+SYNDIP_SV_VCF = _first_existing(
+    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/syndip.sv.genotyped.passing.b37.vcf.gz"
+)
+
+SYNDIP_BAM = _first_existing(
+    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/CHM1_CHM13_2.b37.bam"
+)
 
 def data_path(path: str) -> str:
     return os.path.join(DATA_DIR, path)
@@ -48,3 +60,6 @@ def data_path(path: str) -> str:
 def result_path(path: str) -> str:
     os.makedirs(RESULT_DIR, exist_ok=True)
     return os.path.join(RESULT_DIR, path)
+
+# Match resolvers available in main.py
+OmegaConf.register_new_resolver("len", lambda arg: len(arg))

@@ -1,5 +1,5 @@
 defaults:
-  - pileup
+  - pileup: unphased
   - simulation
   - generator: coverage
   - model: paired_inception_contrastive

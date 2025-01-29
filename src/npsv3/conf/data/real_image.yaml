@@ -1,9 +1,9 @@
-_target_: npsv3.models.paired.GroupedImageDataModule
+_target_: npsv3.models.dvae.RealImageDataModule
 training_urls: null
 validation_urls: null
 prediction_urls: null
 test_urls: null
+num_channels: ${len:${pileup.image_channels}}
 batch_size: 16
 num_workers: ${threads}
-max_group_size: 6
 shuffle_size: 1000

@@ -38,3 +38,14 @@ def hg002_sample():
         sequencer="HS25",
         read_length=148,
     )
+
+@pytest.fixture(scope="function")
+def syndip_sample():
+    return Sample(
+        "CHM1_CHM13",
+        mean_coverage=44.76,
+        mean_insert_size=344.72,
+        std_insert_size=105.32,
+        sequencer="HSXn",
+        read_length=151,
+    )

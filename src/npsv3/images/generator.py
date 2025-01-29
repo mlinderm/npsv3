@@ -135,7 +135,7 @@ class ImageGenerator:
         self,
         image_tensor: np.ndarray,
         render_channels=False,
-        select_channels=[ALIGNED_CHANNEL, PAIRED_CHANNEL, PHASE_CHANNEL],
+        select_channels=[ALIGNED_CHANNEL, PAIRED_CHANNEL, ALLELE_CHANNEL],
         margin=5,
     ):
         # TODO: Better combine all the channels into a single image, perhaps ALIGNED, PAIRED_CHANNEL, ALLELE (with mapq as alpha)...
@@ -147,7 +147,7 @@ class ImageGenerator:
             image.paste(combined_image, ((image.width - width) // 2, 0))
 
             for i in range(num_channels):
-                channel_image = Image.fromarray(image_tensor[:, :, [i] * len(channels)], mode=combined_image.mode)
+                channel_image = Image.fromarray(image_tensor[:, :, [i] * 3], mode=combined_image.mode)
                 coord = (i * (width + margin), height + margin)
                 image.paste(channel_image, coord)
 

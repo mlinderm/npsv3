@@ -1,0 +1,26 @@
+_target_: npsv3.models.dvae.DVAE
+encoder:
+  _target_: npsv3.models.dvae.Encoder
+  in_channels: ${len:${pileup.image_channels}}
+  num_hiddens: 128
+  num_residual_layers: 2
+  num_residual_hiddens: 32
+  embedding_dim: 64
+quantizer:
+  _target_: npsv3.models.dvae.VectorQuantizerEMA
+  num_embeddings: 512
+  embedding_dim: ${..encoder.embedding_dim}
+  commitment_cost: 0.25
+  decay: 0.99
+decoder:
+  _target_: npsv3.models.dvae.Decoder
+  in_channels: ${..encoder.embedding_dim}
+  num_hiddens: ${..encoder.num_hiddens}
+  num_residual_layers: ${..encoder.num_residual_layers}
+  num_residual_hiddens: ${..encoder.num_residual_hiddens}
+  out_channels: ${..encoder.in_channels}  
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.001
+  amsgrad: false

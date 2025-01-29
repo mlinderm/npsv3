@@ -1,0 +1,6 @@
+defaults:
+  - base
+
+image_channels: [0, 1, 2, 3, 4, 5, 6, 7]
+haplotag_reads: true
+haplotag_sim: true
