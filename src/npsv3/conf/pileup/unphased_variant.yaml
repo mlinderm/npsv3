@@ -1,6 +1,9 @@
 defaults:
   - base
 
+image_width: 288
+image_height: 96
 image_channels: [0, 1, 2, 3, 4, 6, 7]
+variant_padding: 96
 
 example_fn: "npsv3.images.example.vcf_to_variant_examples"

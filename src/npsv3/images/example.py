@@ -35,7 +35,7 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
 
 
 def example_to_image(
-    cfg, example, out_path: str, with_simulations=False, margin=10, max_replicates=1, **kwargs
+    cfg, example, out_path: typing.Optional[str]=None, with_simulations=False, margin=10, max_replicates=1, **kwargs
 ):
     generator = hydra.utils.instantiate(cfg.generator, cfg, _recursive_=False)
 
@@ -61,7 +61,9 @@ def example_to_image(
     else:
         image = real_image
 
-    image.save(out_path)
+    if out_path:
+        image.save(out_path)
+    return image
 
 
 def make_example_from_region(
@@ -185,13 +187,9 @@ def make_graph_example_from_region(
         )
 
     example = {"region": str(example_region), "image": image_tensor}
-
-    # If we are augmenting the simulated data, use the provided statistics for the first example, so it
-    # will hopefully be most similar to the real data and then augment the remaining replicates
-    if cfg.simulation.augment:
-        repl_samples = augment_sample(sample, cfg.simulation.replicates, keep_original=True)
-    else:
-        repl_samples = [sample] * cfg.simulation.replicates
+    # Add any additional (extension) features
+    if addl_features:
+        example.update(addl_features)
 
     # Generate the possible haplotypes for this region on the possible backgrounds
     # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
@@ -199,10 +197,6 @@ def make_graph_example_from_region(
         graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding))
         for i in range(ploidy)
     ]
-
-    # Generate the relevant sequences once, which are then combined to create the fasta for simulation.
-    # TODO: Do we need pad out the shorter sequences?
-    sequences = [[haplotype.sequence() for haplotype in background] for background in backgrounds]
 
     # For fully labeled data, one of the haplotypes should be the true haplotype
     labels = []
@@ -217,6 +211,21 @@ def make_graph_example_from_region(
             raise ValueError(f"True haplotype not found in possible haplotypes for region {region}")
     if len(labels) == ploidy:
         example["label"] = np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)).item()
+
+    if cfg.simulation.replicates == 0:
+        # No more work to be done if there are not simulations
+        return example
+
+    # If we are augmenting the simulated data, use the provided statistics for the first example, so it
+    # will hopefully be most similar to the real data and then augment the remaining replicates
+    if cfg.simulation.augment:
+        repl_samples = augment_sample(sample, cfg.simulation.replicates, keep_original=True)
+    else:
+        repl_samples = [sample] * cfg.simulation.replicates
+
+    # Generate the relevant sequences once, which are then combined to create the fasta for simulation.
+    # TODO: Do we need pad out the shorter sequences?
+    sequences = [[haplotype.sequence() for haplotype in background] for background in backgrounds]
 
     # TODO: Do we want to only have one of 0/1, 1/0?
     alleles_encoded_images = []
@@ -282,10 +291,6 @@ def make_graph_example_from_region(
         sim_image_tensor = np.stack(alleles_encoded_images)
         example["sim.images"] = sim_image_tensor
         
-        # Add any additional (extension) features
-        if addl_features:
-            example.update(addl_features)
-
     return example
 
 class ExampleActor:

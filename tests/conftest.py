@@ -3,6 +3,7 @@ import pytest
 import ray
 
 from npsv3.util.sample import Sample
+from npsv3.util.config import setup_resolvers
 
 @pytest.fixture(scope="session")
 def hydra_setup():
@@ -13,7 +14,7 @@ def hydra_setup():
 
 @pytest.fixture(scope="session")
 def ray_setup():
-    ray.init(num_cpus=1, include_dashboard=False)
+    ray.init(num_cpus=1, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
     yield
     ray.shutdown()
 

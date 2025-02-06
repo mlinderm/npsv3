@@ -91,9 +91,9 @@ def main(cfg: DictConfig) -> None:
         else:
             output = hydra.utils.to_absolute_path(cfg.output)
 
-        OmegaConf.update(cfg, "data.training_urls", _to_webdataset_urls(cfg.data.training_urls), merge=False)
-        if not OmegaConf.is_missing(cfg, "data.validation_urls") and OmegaConf.select(cfg, "data.validation_urls") is not None:
-            OmegaConf.update(cfg, "data.validation_urls", _to_webdataset_urls(cfg.data.validation_urls), merge=False)
+        OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
+        if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
+            OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
         train(cfg, output_dir=output)
         # TODO: Create link to the best model to serve as the final model
@@ -120,6 +120,22 @@ def main(cfg: DictConfig) -> None:
        
         predict(cfg)
     
+    elif cfg.command == "encode":
+        import torch
+        from npsv3.models.dvae import encode
+        
+        torch.set_num_threads(cfg.threads)
+
+         # If no output directory is specified, use the Hydra output directory (the current working directory)
+        if OmegaConf.is_missing(cfg, "output"):
+            output = os.getcwd()
+        else:
+            output = hydra.utils.to_absolute_path(cfg.output)
+
+        _make_paths_absolute(cfg, ["model.checkpoint"])
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
+       
+        encode(cfg, output_dir=output)
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

@@ -9,7 +9,7 @@ def train(cfg, output_dir=None, **kw_args):
     # Overwrite existing checkpoints, instead of creating new versions
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
     
-    if cfg.data.validation_urls:
+    if cfg.data.validate_urls:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
         num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
     else:

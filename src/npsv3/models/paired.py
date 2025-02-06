@@ -261,6 +261,7 @@ class MinimizingPredictor(nn.Module):
 
     def forward(self, metric, mask):
         masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
+        # TODO: Should this use masked_metric?
         return torch.argmin(metric, dim=1)
 
 class MaximizingPredictor(nn.Module):
@@ -269,6 +270,7 @@ class MaximizingPredictor(nn.Module):
 
     def forward(self, metric, mask):
         masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
+        # TODO: Should this use masked_metric?
         return torch.argmax(metric, dim=1)
 
 class GroupedVariant(L.LightningModule):

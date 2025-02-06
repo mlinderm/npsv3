@@ -175,7 +175,7 @@ class TestVariantToExample:
         dataset = wds.WebDataset(os.path.join(output_dir, "images-0000.tar"), shardshuffle=False).decode()
         for _i, sample in enumerate(dataset):
             assert sample["__key__"] == "553e586e2a8e7c2fd70661fec7b529c5453a9b45"
-            assert sample["region.txt"] == str(Range("12",22129465,22130487))
+            assert sample["region.txt"] == str(Range("12",22129565,22130387).expand(cfg.pileup.variant_padding))
             assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, cfg.pileup.image_width, len(cfg.pileup.image_channels))
             assert sample["label.cls"] == 3
             assert sample["sim.images.npy.gz"].shape == (

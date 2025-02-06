@@ -1,7 +1,7 @@
 _target_: npsv3.models.dvae.RealImageDataModule
-training_urls: null
-validation_urls: null
-prediction_urls: null
+train_urls: null
+validate_urls: null
+predict_urls: null
 test_urls: null
 num_channels: ${len:${pileup.image_channels}}
 batch_size: 16

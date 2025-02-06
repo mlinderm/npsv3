@@ -38,7 +38,7 @@ dependencies = [
   "pybedtools",
   "whatshap",
   "Pillow",
-  "webdataset",
+  "webdataset>=0.2.100",
   "torch",
   "torchvision",
   "lightning",
