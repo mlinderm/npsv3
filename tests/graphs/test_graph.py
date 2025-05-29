@@ -231,7 +231,7 @@ class TestGraphConstructionFromVCF:
             assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1, f"No path matches backbone for allele {allele}"
 
 
-    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
     def test_star_alleles(self):
         region = Range("14", 77187572, 77187592)
         graph = Graph.from_vcf(

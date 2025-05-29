@@ -6,6 +6,8 @@ encoder:
   num_residual_layers: 2
   num_residual_hiddens: 32
   embedding_dim: 64
+  strides: [4, 4]
+  padding: [0, 0]
 quantizer:
   _target_: npsv3.models.dvae.VectorQuantizerEMA
   num_embeddings: 512
@@ -18,7 +20,9 @@ decoder:
   num_hiddens: ${..encoder.num_hiddens}
   num_residual_layers: ${..encoder.num_residual_layers}
   num_residual_hiddens: ${..encoder.num_residual_hiddens}
-  out_channels: ${..encoder.in_channels}  
+  out_channels: ${..encoder.in_channels}
+  strides: ${..encoder.strides}
+  padding: ${..encoder.padding}  
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true

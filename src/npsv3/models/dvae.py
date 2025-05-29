@@ -1,4 +1,4 @@
-import io, itertools, os, random
+import io, itertools, math, os, random
 from typing import Any, Dict, Sequence
 from functools import partial
 
@@ -178,15 +178,15 @@ class ResidualStack(nn.Module):
         for layer in self._layers:
             x = layer(x)
         return F.relu(x)
-    
+
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens, embedding_dim):
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens, embedding_dim, strides=[4, 4], padding=[0,0]):
         super(Encoder, self).__init__()
         # Here is the 16x downsampling on each dimension. Alternate approaches seem to interleave downsampling with residual blocks
         # Could we use different downsampling factors for height and width?
-        self._conv_1 = nn.Conv2d(in_channels=in_channels, out_channels=num_hiddens//2, kernel_size=4, stride=4, padding=0)
-        self._conv_2 = nn.Conv2d(in_channels=num_hiddens//2, out_channels=num_hiddens, kernel_size=4, stride=4, padding=0)
+        self._conv_1 = nn.Conv2d(in_channels=in_channels, out_channels=num_hiddens//2, kernel_size=4, stride=strides[0], padding=padding[0])
+        self._conv_2 = nn.Conv2d(in_channels=num_hiddens//2, out_channels=num_hiddens, kernel_size=4, stride=strides[1], padding=padding[1])
         self._conv_3 = nn.Conv2d(in_channels=num_hiddens, out_channels=num_hiddens, kernel_size=3, stride=1, padding=1)
         self._residual_stack = ResidualStack(in_channels=num_hiddens, num_hiddens=num_hiddens, num_residual_layers=num_residual_layers, num_residual_hiddens=num_residual_hiddens)
         
@@ -202,12 +202,12 @@ class Encoder(nn.Module):
         
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens, out_channels):
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens, out_channels, strides=[4, 4], padding=[0,0]):
         super(Decoder, self).__init__()
         self._conv_1 = nn.Conv2d(in_channels=in_channels, out_channels=num_hiddens, kernel_size=3, stride=1, padding=1)
         self._residual_stack = ResidualStack(in_channels=num_hiddens, num_hiddens=num_hiddens, num_residual_layers=num_residual_layers, num_residual_hiddens=num_residual_hiddens)
-        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens, out_channels=num_hiddens//2, kernel_size=4, stride=4, padding=0)
-        self._conv_trans_2 = nn.ConvTranspose2d(in_channels=num_hiddens//2, out_channels=out_channels, kernel_size=4, stride=4, padding=0)  
+        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens, out_channels=num_hiddens//2, kernel_size=4, stride=strides[1], padding=padding[1])
+        self._conv_trans_2 = nn.ConvTranspose2d(in_channels=num_hiddens//2, out_channels=out_channels, kernel_size=4, stride=strides[0], padding=padding[0])  
 
     def forward(self, inputs):
         x = self._conv_1(inputs)

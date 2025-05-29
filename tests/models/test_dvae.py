@@ -63,6 +63,8 @@ class TestDVAEModel:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=vqvae",
+        #"model.encoder.strides=[2,2]",
+        #"model.encoder.padding=[1,1]",
         "data=real_image",
         f"data.predict_urls={data_path('unphased_variant_images-0000.tar')}",
         "data.batch_size=1",
@@ -102,7 +104,8 @@ class TestDVAEModel:
     "pileup=unphased_variant",
     "model=vqvae",
     "model.quantizer.num_embeddings=4096",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data.batch_size=256,data=real_image,model.quantizer.num_embeddings=4096,model=vqvae,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
+    "+experiments=downsample4",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/+experiments=downsample4,data.batch_size=256,data=real_image,model.quantizer.num_embeddings=4096,model=vqvae,pileup=unphased_variant,trainer.max_epochs=10/epoch=9-step=117540.ckpt"',
     "data=real_image",
     "data.batch_size=1",
 )

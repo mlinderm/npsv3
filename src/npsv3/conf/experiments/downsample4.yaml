@@ -1,0 +1,5 @@
+# @package _global_  
+model:
+  encoder:
+    strides: [2, 2]
+    padding: [1, 1]

@@ -181,10 +181,11 @@ class TestGraphConstructor:
         vcf_path = data_path("14_77187582_77187582.vcf.gz")
         construct = GraphConstructor(region, vcf_path)
         
-        # Generate complete GFA without error
-        gfa_path = os.path.join(tmp_path, "test.gfa")
-        construct.to_gfa(B37_REF_FASTA, gfa_path)
-        add_haplotypes_to_gfa(gfa_path, vcf_path, region)
+        construct.to_gfa(B37_REF_FASTA)
+        # # Generate complete GFA without error
+        # gfa_path = os.path.join(tmp_path, "test.gfa")
+        # construct.to_gfa(B37_REF_FASTA, gfa_path)
+        # add_haplotypes_to_gfa(gfa_path, vcf_path, region)
 
        # GFA isn't well equipped to test if haplotype is correctly determined
 

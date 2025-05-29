@@ -498,9 +498,9 @@ class Graph:
             constructor.to_gfa(reference_fasta, gfa_path)
         
             # Append haplotype paths to GFA before loading
-            with open(gfa_path, "a") as gfa_file:
-                for name, strand, nodes in vcf_to_paths(gfa_path, background_vcf, region):
-                    print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)
+            # with open(gfa_path, "a") as gfa_file:
+            #     for name, strand, nodes in vcf_to_paths(gfa_path, background_vcf, region):
+            #         print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)
 
             
             # Construct graph object from GFA file

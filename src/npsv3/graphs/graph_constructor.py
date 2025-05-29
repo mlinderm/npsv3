@@ -18,7 +18,7 @@ from collections.abc import MutableSequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from shlex import quote
-from typing import Optional, TextIO, Tuple, Union
+from typing import Optional, Sequence, TextIO, Tuple, Union
 
 import pysam
 
@@ -31,7 +31,7 @@ from npsv3.variant import Variant
 
 
 class GraphConstructor:
-    def __init__(self, region: Range, graph_vcf: str):
+    def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Optional[Sequence[str]] = None):
         """Construct a graph from graph_vcf variants in region. Assumes VCF is indexed and in sorted order."""
         self.region = region
 
@@ -39,7 +39,12 @@ class GraphConstructor:
         self.spans: MutableSequence[ReferenceSpan] = [ReferenceSpan(region)]
         self.spans[0].names.add(self.region.contig)
 
+        self.paths = defaultdict(list)
+
         self._construct_from_vcf(graph_vcf)
+        self._assign_nodes()
+        self._extract_paths()
+        self._extract_haplotypes(graph_vcf)  # Should be haplotype_vcf
 
     def _construct_from_vcf(self, vcf_path: str):
         with pysam.VariantFile(vcf_path, drop_samples=True) as vcf_file:
@@ -55,6 +60,81 @@ class GraphConstructor:
                             variant.alt_seq(allele_idx),
                         )
                         self._split_spans(alt_region, variant.vg_variant_id, alt)
+
+    def _assign_nodes(self):
+        node_id_gen = itertools.count(1)
+        for span in self.spans:
+            span.node_id = next(node_id_gen)
+            for alt in span.alts:
+                alt.node_id = next(node_id_gen)
+
+    def _extract_paths(self):
+        for span in self.spans:
+            for name in span.names:
+                self.paths[name].append(span.node_id)
+            for alt in span.alts:
+                self.paths[alt.name].append(alt.node_id)
+
+    def _extract_haplotypes(self, vcf_path: str, samples: Optional[Sequence[str]]=None, ploidy=2):
+        with pysam.VariantFile(vcf_path) as vcf_file:
+            if samples:
+                vcf_file.subset_samples(samples)
+
+            current_samples = list(vcf_file.header.samples)
+            assert samples is None or len(current_samples) == len(samples), "Sample count mismatch"
+
+            haplotypes = [self.paths[self.region.contig]] * (ploidy * len(current_samples))
+
+            last_phased = None
+            last_phase_set = None
+
+            for record in vcf_file.fetch(**self.region.pysam_fetch):
+                variant = Variant.from_pysam(record)
+                ref_path = variant_path_name(variant.vg_variant_id, 0)
+
+                # https://github.com/jltsiren/gbwt/blob/bde6858046580d1b9dbfa54f48ab187c85998ffe/src/variants.cpp#L826
+
+                # /*
+                #     First phase:
+                #     - If the current site is unphased or the ploidy changes, finish the existing haplotype.
+                #     - If the current haplotype is inactive, activate it.
+                #     - If the current haplotype has an alternate allele, append it.
+                #     - If the current site is unphased, finish the current haplotype.
+                # */
+                # /*
+                #     Second phase:
+                #     - If the current site is unphased or haploid, finish the existing haplotype.
+                #     - If the current site is haploid, skip the rest.
+                #     - If the current haplotype is inactive, activate it.
+                #     - If the current haplotype has an alternate allele, append it.
+                #     - If the current site is unphased, finish the current haplotype.
+                # */
+
+                # Replace the reference nodes with the variant nodes for alternate alleles
+                # Do so for both all alleles of the record
+                has_overlap_allele = "*" == variant._record.alts[-1]
+                
+                for g, genotype in enumerate(record.samples.itervalues()):
+                    phased = genotype.phased
+                    indices = genotype.allele_indices
+  
+                    for i, index in itertools.zip_longest(range(ploidy), indices):
+                        haplotype_idx = g * ploidy + i
+                        if has_overlap_allele and index == (variant.num_alt + 1):
+                            # This is an overlapping allele that is effectively a local phase set, so we don't need to
+                            # terminate haplotypes
+                            pass
+                        
+                        if index is not None and index > 0:
+                            path = variant_path_name(variant.vg_variant_id, index)
+                            haplotypes[haplotype_idx] = _replace_sublist(haplotypes[haplotype_idx], self.paths[ref_path], self.paths[path])
+
+            # Add haplotype paths to the graph
+            for i, haplotype in enumerate(haplotypes):
+                sample_idx = i // ploidy
+                haplotype_idx = i % ploidy
+                self.paths[f"{current_samples[sample_idx]}#{haplotype_idx}#{self.region.contig}#0"] = haplotype
+
 
     @property
     def num_spans(self) -> int:
@@ -87,22 +167,10 @@ class GraphConstructor:
                 "*" if len(region) == 0 else ref_seq[region.start - self.region.start : region.end - self.region.start]
             )
 
-        paths = defaultdict(list)
-
         with open(out_file, "w") if isinstance(out_file, str) else nullcontext(out_file) as gfa_file:
             print("H", "VN:Z:1.0", sep="\t", file=gfa_file)
             print(f"# Region: {self.region}", file=gfa_file)
-            # Assign node ids to spans and each span's alternate alleles, associating those nodes with paths
-            node_id_gen = itertools.count(1)
-            for span in self.spans:
-                span.node_id = next(node_id_gen)
-                for name in span.names:
-                    paths[name].append(span.node_id)
-
-                for alt in span.alts:
-                    alt.node_id = next(node_id_gen)
-                    paths[alt.name].append(alt.node_id)
-
+           
             # Emit nodes from spans and their alternate alleles
             for span in self.spans:
                 print("S", span.node_id, get_ref_seq(span.region), sep="\t", file=gfa_file)
@@ -134,7 +202,7 @@ class GraphConstructor:
                         print("L", alt.node_id, "+", next_alt.node_id, "+", "0M", sep="\t", file=gfa_file)
 
             # Emit paths
-            for path, nodes in paths.items():
+            for path, nodes in self.paths.items():
                 print("P", path, ",".join(f"{n}+" for n in nodes), "*", sep="\t", file=gfa_file)
 
     def _split_spans(self, variant_region: Range, variant_id: str, alt: "AltPath") -> None:
@@ -363,3 +431,15 @@ def add_haplotypes_to_gfa(gfa_path: str, vcf_path: str, region: Range):
     with open(gfa_path, "a") as gfa_file:
         for name, strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
             print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)    
+
+def _replace_sublist(lst, old, new):
+    """Replace the sublist old with new in lst"""
+    i = 0
+    while i < len(lst):
+        if lst[i : i + len(old)] == old:
+            lst = lst[:i] + new + lst[i + len(old):]
+            i += len(new)
+        else:
+            i += 1
+    return lst
+   
