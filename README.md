@@ -61,7 +61,7 @@ During development we are manually building a fork of ODGI and manually installi
 ```
 docker run --rm --entrypoint /bin/bash \
     --shm-size=8g \
-    -v ~/Research/Data:/data \
+    -v ~/Research/data:/data \
     -v `pwd`/../odgi:/opt/odgi \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
@@ -69,17 +69,17 @@ docker run --rm --entrypoint /bin/bash \
     npsv3
 ```
 
-And then from within the container, build odgi
+And then from within the container, build odgi (optionally with the `--fresh` option for `cmake` to force reconfiguration):
 ```
-cmake -S /opt/odgi -B /opt/odgi/build \
+cmake -S /opt/odgi -B /opt/odgi/build --fresh \
     && cmake --build /opt/odgi/build -- -j 2
 ```
-and finally the npsv3 package
+and finally the npsv3 package (which may require the `--break-system-packages` to `pip` depending on the underlying distribution):
 ```
-python -m pip install -e .
+python3 -m pip install -e .
 ```
 
-You can run the unit tests with `hatch run test`.
+You can run the unit tests with `hatch test`.
 
 ## License
 

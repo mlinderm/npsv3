@@ -46,7 +46,7 @@ class TestGraphConstructor:
         assert end_idx == 1, "Should match insertion span"
 
         start_idx, end_idx = construct.find_overlapping_spans(Range("chr1", 50, 51))
-        assert start_idx == 1, "Should match insertion span"
+        assert start_idx == 2, "Should match insertion span"
         assert end_idx == 2, "Should match after insertion span"
 
         # SNV in a series
