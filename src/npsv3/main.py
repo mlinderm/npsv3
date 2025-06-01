@@ -1,11 +1,10 @@
 import json
 import logging
 import os
-import sys
 import typing
 
 import hydra
-from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from npsv3.simulation import bwa_index_loaded
 
@@ -28,12 +27,12 @@ def _make_paths_absolute(cfg: DictConfig, keys: typing.Iterable[str]):
             OmegaConf.update(cfg, key, hydra.utils.to_absolute_path(OmegaConf.select(cfg, key)))
 
 
-def _to_webdataset_urls(urls: typing.Union[str, typing.Iterable[str]]) -> str:
+def _to_webdataset_urls(urls: str | typing.Iterable[str]) -> str:
     # Join multiple URLs with "::" separator expected by WebDataset
     list_of_urls = urls.split("::") if isinstance(urls, str) else urls
     list_of_urls = [hydra.utils.to_absolute_path(url) for url in list_of_urls]
     return "::".join(list_of_urls)
-    
+
 
 OmegaConf.register_new_resolver("strip_ext", lambda path: os.path.splitext(path)[0])
 OmegaConf.register_new_resolver("len", lambda arg: len(arg))
@@ -81,6 +80,7 @@ def main(cfg: DictConfig) -> None:
         )
     elif cfg.command == "train":
         import torch
+
         from npsv3.models.runners import train
 
         torch.set_num_threads(cfg.threads)
@@ -97,33 +97,36 @@ def main(cfg: DictConfig) -> None:
 
         train(cfg, output_dir=output)
         # TODO: Create link to the best model to serve as the final model
-    
+
     elif cfg.command == "test":
         import torch
+
         from npsv3.models.paired import test
-        
+
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.test_urls", _to_webdataset_urls(cfg.data.test_urls), merge=False)
-       
+
         test(cfg)
-    
+
     elif cfg.command == "predict":
         import torch
+
         from npsv3.models.paired import predict
-        
+
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.prediction_urls", _to_webdataset_urls(cfg.data.prediction_urls), merge=False)
-       
+
         predict(cfg)
-    
+
     elif cfg.command == "encode":
         import torch
+
         from npsv3.models.dvae import encode
-        
+
         torch.set_num_threads(cfg.threads)
 
          # If no output directory is specified, use the Hydra output directory (the current working directory)
@@ -134,7 +137,7 @@ def main(cfg: DictConfig) -> None:
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
-       
+
         encode(cfg, output_dir=output)
     else:
         msg = f"Command {cfg.command} not implemented"

@@ -1,22 +1,23 @@
-import pytest
-import hydra
 import io
 import os
-import torch
-from omegaconf import OmegaConf
+
+import hydra
 import lightning as L
+import pytest
+import torch
 import webdataset as wds
+from omegaconf import OmegaConf
 from PIL import Image
 
-from npsv3.models.dvae import RealImageDataModule, EncodingToWebDatasetCallback, reconstruct
-from npsv3.models.runners import train
-from npsv3.simulation import bwa_index_loaded
 from npsv3.images.example import (
     example_to_image,
     vcf_to_variant_examples,
 )
+from npsv3.models.dvae import EncodingToWebDatasetCallback, RealImageDataModule, reconstruct
+from npsv3.models.runners import train
+from npsv3.simulation import bwa_index_loaded
 
-from .. import B37_REF_FASTA, data_path, result_path, RESULT_DIR
+from .. import B37_REF_FASTA, data_path, result_path
 
 
 def torch_decode(key, data):

@@ -6,7 +6,6 @@ import os
 import random
 import subprocess
 import tempfile
-import typing
 from shlex import quote
 
 import portalocker
@@ -57,7 +56,7 @@ def _bwa_index_unload(shared_name: str, lock_file: str):
             continue
 
 # Use the same lock file as npsv2 in case the the jobs are running on the same node
-def _bwa_index_load(reference, lock_file="/var/tmp/npsv2/bwa.lock") -> typing.Optional[str]:
+def _bwa_index_load(reference, lock_file="/var/tmp/npsv2/bwa.lock") -> str | None:
     # Create lock directory if it doesn't exist
     os.makedirs(os.path.dirname(lock_file), mode=0o777, exist_ok=True)
 
@@ -111,19 +110,17 @@ def bwa_index_loaded(reference: str, load=False) -> str:
     """
     if load:
         return _bwa_index_load(reference)
-    else:
-        shared_name = os.path.basename(reference)
-        return shared_name if _is_bwa_index_loaded(shared_name) else None
+    shared_name = os.path.basename(reference)
+    return shared_name if _is_bwa_index_loaded(shared_name) else None
 
 
 def _art_read_length(read_length, profile):
     """Make sure read length is compatible ART"""
     if profile in ("HS10", "HS20"):
         return min(read_length, 100)
-    elif profile in ("HS25", "HSXn", "HSXt"):
+    if profile in ("HS25", "HSXn", "HSXt"):
         return min(read_length, 150)
-    else:
-        return read_length
+    return read_length
 
 
 def simulate_variant_sequencing(
@@ -133,9 +130,9 @@ def simulate_variant_sequencing(
     reference: str,
     shared_reference=None,
     dir=tempfile.gettempdir(),
-    stats_path: typing.Optional[str] = None,
+    stats_path: str | None = None,
     region: Range = None,
-    phase_vcf_path: typing.Optional[str] = None,
+    phase_vcf_path: str | None = None,
     aligner: str = "bwa",
 ):
     shared_ref_arg = f"-S {quote(shared_reference)}" if shared_reference else ""

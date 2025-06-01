@@ -1,9 +1,7 @@
 import random
 import sys
-import typing
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 import pysam
 
@@ -89,8 +87,7 @@ def read_start(read):
     first_op, first_len = read.cigar[0]
     if first_op == pysam.CSOFT_CLIP:
         return read.reference_start - first_len
-    else:
-        return read.reference_start
+    return read.reference_start
 
 
 _IUPAC_TO_ALLELES = {
@@ -126,8 +123,8 @@ def _refine_base_alignment(base: str, ref: str):
 
 @dataclass
 class AlleleRealignment:
-    ref_quality: Optional[int] = None
-    alt_quality: Optional[int] = None
+    ref_quality: int | None = None
+    alt_quality: int | None = None
     allele: AlleleAssignment = AlleleAssignment.AMB
 
 
@@ -211,8 +208,7 @@ class Fragment:
     def fragment_overlaps(self, region: Range, min_overlap=3, read_overlap_only=False):
         if self.is_properly_paired:
             return self.fragment_region.get_overlap(region) >= min_overlap
-        else:
-            return self.reads_overlap(region, min_overlap)
+        return self.reads_overlap(region, min_overlap)
 
     def reads_overlap(self, region: Range, min_overlap=3):
         return (self.read1 and (region.get_overlap(self.read1) >= min_overlap)) or (
@@ -322,7 +318,7 @@ class PileupRead:
 
 
 class PileupInsert:
-    def __init__(self, region: Range, allele, insert_zscore: float, phase: Optional[int] = None):
+    def __init__(self, region: Range, allele, insert_zscore: float, phase: int | None = None):
         self.region = region
         self.allele = allele
         self.insert_zscore = insert_zscore
@@ -348,11 +344,11 @@ class ReadPileup:
     def region_columns(self, region: Range, region_item: Range):
         return _region_columns(region, region_item)
 
-    def read_columns(self, region: Range, pileup_item, ref_seq: Optional[str] = None):
+    def read_columns(self, region: Range, pileup_item, ref_seq: str | None = None):
         if isinstance(pileup_item, PileupRead):
             assert ref_seq is None or region.length == len(ref_seq)
             for col_slice, cigar_op, read_slice in _read_columns(region, pileup_item._read):
-                align = _CIGAR_TO_BASE_ALIGNMENT.get(cigar_op, None)
+                align = _CIGAR_TO_BASE_ALIGNMENT.get(cigar_op)
                 if align is None:
                     continue
                 elif ref_seq and cigar_op == pysam.CMATCH:
@@ -365,7 +361,7 @@ class ReadPileup:
             for col_slice in _region_columns(region, pileup_item.region):
                 yield (col_slice, BaseAlignment.INSERT, slice(0, col_slice.stop - col_slice.start))
 
-    def overlapping_reads(self, region: Range, max_reads: Optional[int] = None):
+    def overlapping_reads(self, region: Range, max_reads: int | None = None):
         reads = self._reads[region]
         if len(reads) > max_reads:
             reads = random.sample(reads, k=max_reads)
@@ -390,7 +386,7 @@ class ReadPileup:
         self,
         fragment: Fragment,
         add_insert=False,
-        ref_seq: Optional[str] = None,
+        ref_seq: str | None = None,
         phase_tag="HP",
         allele=AlleleRealignment(),
         read1_realignment=AlleleRealignment(),
@@ -407,7 +403,7 @@ class ReadPileup:
             self.add_insert(fragment.insert_region, phase=read1.phase, **attributes)
 
 
-def fetch_reads(read_path: str, fetch_region: Range, reference: typing.Optional[str] = None) -> FragmentTracker:
+def fetch_reads(read_path: str, fetch_region: Range, reference: str | None = None) -> FragmentTracker:
     fragments = FragmentTracker()
     with pysam.AlignmentFile(read_path, reference_filename=reference) as alignment_file:
         for read in alignment_file.fetch(**fetch_region.pysam_fetch):

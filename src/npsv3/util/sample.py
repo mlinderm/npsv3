@@ -4,7 +4,6 @@ import logging
 import os
 import subprocess
 import tempfile
-import typing
 from shlex import quote
 
 import numpy as np
@@ -29,12 +28,12 @@ class Sample:
     def __init__(self, name, **kwargs):
         self.name = name
 
-        self.bam = kwargs.get("bam", None)
+        self.bam = kwargs.get("bam")
         self.gender = kwargs.get("gender", 0)  # Use PED encoding
 
         # Statistics fields initialized to None
         for k in _SAMPLE_STATS_FIELDS:
-            setattr(self, k, kwargs.get(k, None))
+            setattr(self, k, kwargs.get(k))
 
         self._chrom_normalized_coverage = kwargs.get("chrom_normalized_coverage", {})
         self._gc_normalized_coverage = kwargs.get("gc_normalized_coverage", {})
@@ -79,7 +78,7 @@ class Sample:
 
 def _compute_coverage_with_samtools(
     read_path: str, fasta_path: str, covg_regions=5000, depth_samples=200, min_samples_per_chrom=5, threads=1
-) -> typing.Tuple[float, dict, dict, dict]:
+) -> tuple[float, dict, dict, dict]:
     """Compute coverage across windows with samtools (run via goleft)
 
     Args:

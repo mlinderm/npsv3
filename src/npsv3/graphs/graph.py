@@ -5,22 +5,21 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from shlex import quote
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Union
 
 import odgi
 import pysam
 from pysam import bcftools
-from intervaltree import Interval, IntervalTree
 
-from npsv3.variant import Variant, vg_variant_id
+from npsv3.graphs.graph_constructor import GraphConstructor, variant_path_name
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
-from npsv3.graphs.graph_constructor import GraphConstructor, vcf_to_paths, variant_path_name
+from npsv3.variant import Variant
 
 HandleOrIntType = Union[odgi.handle, int]
 
@@ -90,7 +89,7 @@ class Graph:
         if isinstance(node, int):
             return self._graph.get_handle(node)
         return node
-    
+
     def as_id(self, node: HandleOrIntType) -> int:
         if isinstance(node, int):
             return node
@@ -105,10 +104,10 @@ class Graph:
         return self._graph.max_node_id()
 
     @cached_property
-    def ref_nodes(self) -> Set[int]:
+    def ref_nodes(self) -> set[int]:
         nodes = set()
         self._graph.for_each_step_in_path(
-            self._graph.get_path_handle(self.region.contig), 
+            self._graph.get_path_handle(self.region.contig),
             lambda s: nodes.add(self._graph.get_id(self._graph.get_handle_of_step(s)))
         )
         return nodes
@@ -130,7 +129,7 @@ class Graph:
         return self._graph.get_handle_of_step(self._graph.path_back(path))
 
     @cached_property
-    def variant_paths(self) -> Set[str]:
+    def variant_paths(self) -> set[str]:
         paths = set()
         self._graph.for_each_path_handle(
             lambda p: (
@@ -140,7 +139,7 @@ class Graph:
         return paths
 
     @cached_property
-    def path_nodes(self) -> Dict[str, Set[int]]:
+    def path_nodes(self) -> dict[str, set[int]]:
         path_node_sets = {}
 
         def extract_nodes(path):
@@ -154,8 +153,8 @@ class Graph:
         return path_node_sets
 
     @cached_property
-    def node_paths(self) -> Dict[int, List[str]]:
-        node_path_lists: Dict[int, List[str]] = {}
+    def node_paths(self) -> dict[int, list[str]]:
+        node_path_lists: dict[int, list[str]] = {}
         for path_name, nodes in self.path_nodes.items():
             for node in nodes:
                 node_path_lists.setdefault(node, []).append(path_name)
@@ -182,12 +181,12 @@ class Graph:
             length += node_length
         return length
 
-    def _from_source(self, free_nodes: Set[int], start_id = None, end_id = None):
+    def _from_source(self, free_nodes: set[int], start_id = None, end_id = None):
         if start_id is None:
             start_id = self.min_node_id
         if end_id is None:
             end_id = self.max_node_id
-        
+
         # TODO: Shift to partial list that only includes the subset of nodes
         length = [sys.maxsize] * (self.max_node_id + 1)
         prev = [None] * (self.max_node_id + 1)
@@ -213,10 +212,10 @@ class Graph:
                 if op(length[node], length[next_node]):
                     length[next_node] = length[node]
                     prev[next_node] = node
-        
+
         return length, prev
 
-    def _to_sink(self, free_nodes: Set[int]):
+    def _to_sink(self, free_nodes: set[int]):
         length = [sys.maxsize] * (self._graph.max_node_id() + 1)
         prev = [None] * (self._graph.max_node_id() + 1)
 
@@ -230,7 +229,7 @@ class Graph:
                 length[node] = sys.maxsize if length[node] == sys.maxsize else length[node] + len(self.sequence([node]))
             else:
                 length[node] = sys.maxsize
-            
+
             # Propagate score backward along edges
             prev_nodes = []
             self._graph.follow_edges(
@@ -240,7 +239,7 @@ class Graph:
                 if length[node] < length[prev_node]:
                     length[prev_node] = length[node]
                     prev[prev_node] = node
-        
+
         return length, prev
 
     def shortest_path(self, base_path_prefix: str) -> list[int]:
@@ -269,7 +268,7 @@ class Graph:
 
     def all_haplotypes(
         self, inference_vcf: str, base_path_prefix: str, region: Range
-    ) -> List["InferenceHaplotype"]:
+    ) -> list["InferenceHaplotype"]:
         """Enumerate all possible haplotypes containing alleles in region of inference_vcf using base_path_prefix as backbone"""
         # Extract variant paths from the inference VCF
         inference_alleles = {}
@@ -293,37 +292,37 @@ class Graph:
 
         _, source_prev = self._from_source(free_nodes)
         _, sink_prev = self._to_sink(free_nodes)
-        
-        # Mark nodes to include in the all paths enumeration. Start with the base path so one of the reported 
+
+        # Mark nodes to include in the all paths enumeration. Start with the base path so one of the reported
         # haplotypes matches the "true" haplotype.
         include_nodes = set(_path_from_prev(source_prev, self.max_node_id))
         for variant_id, alt_allele_indices in inference_alleles.items():
             path = variant_path_name(variant_id, 0)
-            
+
             path_start = self.as_id(self.first_handle(path))
             path_end = self.as_id(self.last_handle(path))
 
-            # Add nodes for path into and from variant       
+            # Add nodes for path into and from variant
             include_nodes.update(path_into := _path_from_prev(source_prev, path_start, drop_start=True))
             include_nodes.update(path_from := _path_from_prev(sink_prev, path_end, reverse=True, drop_start=True))
-            
+
             # Add nodes for alternate alleles
             include_nodes.update(variant_nodes := set().union(*(self.path_nodes[variant_path_name(variant_id, allele_idx)] for allele_idx in alt_allele_indices)))
-            
+
             # The absence of the variant might conflict with the base path. Thus we explicitly include the base path above,
             # and here include the reference path. This ensures we have the backbone (i.e., the "true" path) and the explicit
             # reference path for each variant at the cost of increase the number of haplotypes.
             _, interior_prev = self._from_source(free_nodes - variant_nodes, path_into[-1], path_from[0])
             include_nodes.update(_path_from_prev(interior_prev, path_from[0]))
 
-        # DFS to enumerate all possible haplotypes   
+        # DFS to enumerate all possible haplotypes
         assert self.min_node_id in include_nodes and self.max_node_id in include_nodes
 
         haplotypes = []
 
         def _generate_all_paths(node: odgi.handle, path: list[int]):
             path = [*path, self._graph.get_id(node)]
-            
+
             while True:
                 next_nodes = []
                 self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))
@@ -376,7 +375,7 @@ class Graph:
         return len(into_outof_nodes) == 0
 
     @classmethod
-    def from_vcf(cls, reference_fasta: str, background_vcf: str, region: Range, inference_vcf: Optional[str] = None):
+    def from_vcf(cls, reference_fasta: str, background_vcf: str, region: Range, inference_vcf: str | None = None):
         """Construct graph from VCF
 
         Args:
@@ -493,16 +492,16 @@ class Graph:
 
             # Construct graph (via GFA file)
             gfa_path = os.path.join(temp_dir, "graph.gfa")
-            
+
             constructor = GraphConstructor(region, merged_graph_vcf)
             constructor.to_gfa(reference_fasta, gfa_path)
-        
+
             # Append haplotype paths to GFA before loading
             # with open(gfa_path, "a") as gfa_file:
             #     for name, strand, nodes in vcf_to_paths(gfa_path, background_vcf, region):
             #         print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)
 
-            
+
             # Construct graph object from GFA file
             graph = cls(gfa_path, region)
             assert graph._graph.is_optimized(), "Graph node space is not compacted"
@@ -556,8 +555,8 @@ class Graph:
 @dataclass
 class InferenceHaplotype:
     graph: Graph
-    nodes: List[int]
-    paths: Set[str]
+    nodes: list[int]
+    paths: set[str]
 
     def sequence(self) -> str:
         return self.graph.sequence(self.nodes)
@@ -567,9 +566,9 @@ class InferenceHaplotype:
 class GraphKmer:
     graph: Graph
     sequence: str
-    node_ids: List[int]
+    node_ids: list[int]
 
-def _path_from_prev(prev, start: int, reverse=False, drop_start=False) -> List[int]:
+def _path_from_prev(prev, start: int, reverse=False, drop_start=False) -> list[int]:
     path = [start]
     while True:
         if (next_node := prev[path[-1]]) is None:

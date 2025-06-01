@@ -2,8 +2,9 @@ import hydra
 import pytest
 import ray
 
-from npsv3.util.sample import Sample
 from npsv3.util.config import setup_resolvers
+from npsv3.util.sample import Sample
+
 
 @pytest.fixture(scope="session")
 def hydra_setup():
@@ -19,17 +20,16 @@ def ray_setup():
     ray.shutdown()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cfg(request, hydra_setup): #noqa: ARG001
     marker = request.node.get_closest_marker("cfg_overrides")
-    _cfg = hydra.compose(
+    return hydra.compose(
         config_name="config",
         overrides=marker.args if marker else [],
     )
-    return _cfg
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def hg002_sample():
     return Sample(
         "HG002",
@@ -40,7 +40,7 @@ def hg002_sample():
         read_length=148,
     )
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def syndip_sample():
     return Sample(
         "CHM1_CHM13",

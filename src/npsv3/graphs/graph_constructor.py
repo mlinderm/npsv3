@@ -14,11 +14,11 @@ import sys
 import tempfile
 from bisect import bisect_left
 from collections import defaultdict
-from collections.abc import MutableSequence
+from collections.abc import MutableSequence, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from shlex import quote
-from typing import Optional, Sequence, TextIO, Tuple, Union
+from typing import Optional, TextIO
 
 import pysam
 
@@ -31,7 +31,7 @@ from npsv3.variant import Variant
 
 
 class GraphConstructor:
-    def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Optional[Sequence[str]] = None):
+    def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Sequence[str] | None = None):
         """Construct a graph from graph_vcf variants in region. Assumes VCF is indexed and in sorted order."""
         self.region = region
 
@@ -75,7 +75,7 @@ class GraphConstructor:
             for alt in span.alts:
                 self.paths[alt.name].append(alt.node_id)
 
-    def _extract_haplotypes(self, vcf_path: str, samples: Optional[Sequence[str]]=None, ploidy=2):
+    def _extract_haplotypes(self, vcf_path: str, samples: Sequence[str] | None=None, ploidy=2):
         with pysam.VariantFile(vcf_path) as vcf_file:
             if samples:
                 vcf_file.subset_samples(samples)
@@ -112,19 +112,19 @@ class GraphConstructor:
 
                 # Replace the reference nodes with the variant nodes for alternate alleles
                 # Do so for both all alleles of the record
-                has_overlap_allele = "*" == variant._record.alts[-1]
-                
+                has_overlap_allele = variant._record.alts[-1] == "*"
+
                 for g, genotype in enumerate(record.samples.itervalues()):
                     phased = genotype.phased
                     indices = genotype.allele_indices
-  
+
                     for i, index in itertools.zip_longest(range(ploidy), indices):
                         haplotype_idx = g * ploidy + i
                         if has_overlap_allele and index == (variant.num_alt + 1):
                             # This is an overlapping allele that is effectively a local phase set, so we don't need to
                             # terminate haplotypes
                             pass
-                        
+
                         if index is not None and index > 0:
                             path = variant_path_name(variant.vg_variant_id, index)
                             haplotypes[haplotype_idx] = _replace_sublist(haplotypes[haplotype_idx], self.paths[ref_path], self.paths[path])
@@ -149,17 +149,16 @@ class GraphConstructor:
         if len(region) == 0:  # A "region" must match or be between spans
             start_idx = bisect_left(self.spans, region.start, key=span_between_point_key)
             return (start_idx, start_idx)
-        else:
-            # TODO: Linear search likely faster for end coordinate
-            start_idx = bisect_left(self.spans, region.start, key=span_start_point_key)
-            end_idx = bisect_left(self.spans, region.end, key=span_end_point_key)
-            return (start_idx, end_idx)
+        # TODO: Linear search likely faster for end coordinate
+        start_idx = bisect_left(self.spans, region.start, key=span_start_point_key)
+        end_idx = bisect_left(self.spans, region.end, key=span_end_point_key)
+        return (start_idx, end_idx)
 
     def find_target_span(self, target_start: int) -> int:
         """Find the leftmost span that starts at the target position, including any null regions"""
         return bisect_left(self.spans, target_start, key=span_between_point_key)
 
-    def to_gfa(self, ref_fasta: str, out_file: Union[str, TextIO] = sys.stdout):
+    def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout):
         ref_seq = _reference_sequence(ref_fasta, self.region)
 
         def get_ref_seq(region: Range):
@@ -170,7 +169,7 @@ class GraphConstructor:
         with open(out_file, "w") if isinstance(out_file, str) else nullcontext(out_file) as gfa_file:
             print("H", "VN:Z:1.0", sep="\t", file=gfa_file)
             print(f"# Region: {self.region}", file=gfa_file)
-           
+
             # Emit nodes from spans and their alternate alleles
             for span in self.spans:
                 print("S", span.node_id, get_ref_seq(span.region), sep="\t", file=gfa_file)
@@ -293,7 +292,7 @@ class ReferenceSpan:
         self.region: Range = region
         self.names: set[str] = set(source_span.names) if source_span else set()
         self.alts: list[AltPath] = []
-        self.node_id: Optional[int] = None
+        self.node_id: int | None = None
 
     @property
     def contig(self) -> str:
@@ -313,7 +312,7 @@ class AltPath:
     name: str
     target: int
     sequence: str
-    node_id: Optional[int] = None
+    node_id: int | None = None
 
 
 class _StartPointRegionCmp:
@@ -367,8 +366,7 @@ class _BetweenPointRegionCmp:
     def __eq__(self, point: int):
         if self.region.start == self.region.end:
             return self.region.start == point
-        else:
-            return self.region.start <= point < self.region.end
+        return self.region.start <= point < self.region.end
 
 
 def span_between_point_key(span: ReferenceSpan):
@@ -389,7 +387,7 @@ def variant_path_name(variant_id: str, allele: int) -> str:
 def gfa_to_xg(gfa_path: str, xg_path: str):
     with open(xg_path, "w") as xg_file:
         convert_command = f"vg convert --gfa-in {gfa_path} --xg-out"
-        convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE)
+        convert_result = subprocess.run(convert_command, shell=True, stdout=xg_file, stderr=subprocess.PIPE, check=False)
         if convert_result.returncode != 0 or not os.path.exists(xg_path):
             print(convert_result.stderr, file=sys.stderr)
             raise RuntimeError("Failed to convert GFA to XG")
@@ -430,7 +428,7 @@ def vcf_to_paths(gfa_path: str, vcf_path: str, region: Range):
 def add_haplotypes_to_gfa(gfa_path: str, vcf_path: str, region: Range):
     with open(gfa_path, "a") as gfa_file:
         for name, strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
-            print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)    
+            print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)
 
 def _replace_sublist(lst, old, new):
     """Replace the sublist old with new in lst"""
@@ -442,4 +440,3 @@ def _replace_sublist(lst, old, new):
         else:
             i += 1
     return lst
-   

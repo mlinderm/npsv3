@@ -2,7 +2,7 @@ import numpy as np
 import pysam
 from scipy.special import logsumexp
 
-from npsv3._native import FragmentRealigner, test_realign_read_pair, test_score_alignment
+from npsv3._native import FragmentRealigner
 from npsv3.pileup import AlleleAssignment, AlleleRealignment, Fragment
 
 
@@ -14,10 +14,9 @@ def _realignment_assignment(ref_quality, alt_quality, assign_delta) -> AlleleAss
     delta = alt_quality - ref_quality
     if delta > assign_delta:
         return AlleleAssignment.ALT
-    elif delta < -assign_delta:
+    if delta < -assign_delta:
         return AlleleAssignment.REF
-    else:
-        return AlleleAssignment.AMB
+    return AlleleAssignment.AMB
 
 
 def _read_realignment(scores, assign_delta) -> AlleleRealignment:

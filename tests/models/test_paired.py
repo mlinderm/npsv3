@@ -1,12 +1,14 @@
 import pytest
 import torch
+
 from npsv3.models.paired import GroupedImageDataModule
 from npsv3.models.runners import train
 
 from .. import data_path
 
+
 @pytest.mark.cfg_overrides(
-    f"pileup.image_channels=[0,1,2,3,4,5,6,7]",
+    "pileup.image_channels=[0,1,2,3,4,5,6,7]",
 )
 class TestPairedDataLoader:
     def test_paired_loader(self, cfg):
@@ -29,9 +31,9 @@ class TestPairedDataLoader:
 
 class TestPairedCNNModel:
     @pytest.mark.cfg_overrides(
-        f"model=paired_inception_contrastive",
-        f"data.training_urls={data_path('images-0000.tar')}",
-        f"data.validation_urls={data_path('images-0000.tar')}",
+        "model=paired_inception_contrastive",
+        f"data.train_urls={data_path('images-0000.tar')}",
+        f"data.validate_urls={data_path('images-0000.tar')}",
         "data.batch_size=2",
         "trainer=paired",
     )
@@ -39,9 +41,9 @@ class TestPairedCNNModel:
         train(cfg, fast_dev_run=True)
 
     @pytest.mark.cfg_overrides(
-        f"model=paired_inception_npairs",
-        f"data.training_urls={data_path('images-0000.tar')}",
-        f"data.validation_urls={data_path('images-0000.tar')}",
+        "model=paired_inception_npairs",
+        f"data.train_urls={data_path('images-0000.tar')}",
+        f"data.validate_urls={data_path('images-0000.tar')}",
         "data.batch_size=2",
         "trainer=paired",
     )

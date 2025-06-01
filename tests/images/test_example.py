@@ -1,22 +1,21 @@
 import os
 
 import pytest
-from omegaconf import OmegaConf
 import webdataset as wds
+from omegaconf import OmegaConf
 
-from npsv3.simulation import bwa_index_loaded
 from npsv3.images.example import (
     example_to_image,
     make_example_from_region,
     make_graph_example_from_region,
-    vcf_to_region_examples,
     vcf_to_graph_examples,
+    vcf_to_region_examples,
     vcf_to_variant_examples,
 )
+from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
-from npsv3.util.sample import Sample
 
-from .. import B37_REF_FASTA, HG38_REF_FASTA, SYNDIP_BAM, SYNDIP_VCF, SYNDIP_SV_VCF, data_path, result_path, RESULT_DIR
+from .. import B37_REF_FASTA, SYNDIP_BAM, SYNDIP_SV_VCF, SYNDIP_VCF, data_path, result_path
 
 
 @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
@@ -133,7 +132,7 @@ class TestGraphToExample:
             Range("1", 33439881, 33440008),
         ],
     )
-    def test_syndip_images(self, tmp_path, cfg, syndip_sample, region):
+    def test_syndip_images(self, cfg, syndip_sample, region):
         local_conf = OmegaConf.from_dotlist([
             #f"simulation.save_sim_bam_dir={RESULT_DIR}",
         ])
@@ -187,11 +186,11 @@ class TestVariantToExample:
             )
 
             png_path = result_path("test.png")
-            
+
             example_to_image(
                 cfg,
                 {"image": sample["image.npy.gz"], "sim.images": sample["sim.images.npy.gz"] },
                 png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5], # ALIGNED, PAIRED, ALLELE
-            ) 
+            )
             assert os.path.exists(png_path)
         assert _i == 0, "Only one sample in dataset"

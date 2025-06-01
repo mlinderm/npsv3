@@ -1,7 +1,6 @@
 import os
 import subprocess
 import tempfile
-import typing
 from shlex import quote
 
 import pysam

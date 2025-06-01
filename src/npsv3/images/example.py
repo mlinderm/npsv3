@@ -1,31 +1,28 @@
 import itertools
 import logging
 import os
-import pathlib
 import shutil
-import sys
 import tempfile
-import typing
 
 import hydra
 import numpy as np
 import pysam
 import ray
 import webdataset as wds
+from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
-from omegaconf import OmegaConf
 
+from npsv3.graphs.graph import Graph
 from npsv3.images.generator import ImageGenerator
+from npsv3.realigner import FragmentRealigner
+from npsv3.simulation import augment_sample, simulate_variant_sequencing
 from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
 from npsv3.util.timeout import Timeout
 from npsv3.util.vcf import index_variant_file
 from npsv3.variant import Variant, overlapping_records
-from npsv3.graphs.graph import Graph
-from npsv3.realigner import FragmentRealigner
-from npsv3.simulation import augment_sample, simulate_variant_sequencing
 
 
 def _reference_sequence(reference_fasta: str, region: Range) -> str:
@@ -35,7 +32,7 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
 
 
 def example_to_image(
-    cfg, example, out_path: typing.Optional[str]=None, with_simulations=False, margin=10, max_replicates=1, **kwargs
+    cfg, example, out_path: str | None=None, with_simulations=False, margin=10, max_replicates=1, **kwargs
 ):
     generator = hydra.utils.instantiate(cfg.generator, cfg, _recursive_=False)
 
@@ -71,9 +68,9 @@ def make_example_from_region(
     region: Range,
     read_path: str,
     sample: Sample,
-    background_vcf: typing.Optional[str] = None,
+    background_vcf: str | None = None,
     generator: ImageGenerator = None,
-    addl_features: typing.Optional[dict] = None,
+    addl_features: dict | None = None,
     **kwargs,
 ):
     # Create generator if not provided
@@ -119,7 +116,7 @@ def make_graph_example_from_region(
     background_vcf: str,
     inference_vcf: str,
     generator: ImageGenerator = None,
-    addl_features: typing.Optional[dict] = None,
+    addl_features: dict | None = None,
     ploidy: int = 2,
     **kwargs,
 ):
@@ -262,7 +259,7 @@ def make_graph_example_from_region(
                         aligner=cfg.pileup.aligner,
                     )
                 except ValueError:
-                    logging.error(
+                    logging.exception(
                         "Failed to synthesize data for alleles (%d,%d) for region %s",
                         *allele_indices,
                         str(graph.region),
@@ -290,7 +287,7 @@ def make_graph_example_from_region(
         # Stack the replicated images for each genotype into a tensor
         sim_image_tensor = np.stack(alleles_encoded_images)
         example["sim.images"] = sim_image_tensor
-        
+
     return example
 
 class ExampleActor:
@@ -301,7 +298,7 @@ class ExampleActor:
         self.kwargs = kwargs
 
         self._writer = wds.TarWriter(self.output_path)
-    
+
     def cleanup(self):
         self._writer.close()
 
@@ -318,7 +315,7 @@ class RegionWriter(ExampleActor):
             }
             self._writer.write(sample)
         except TimeoutError:
-            logging.error("Timeout error for region %s", region)
+            logging.exception("Timeout error for region %s", region)
 
 
 @ray.remote
@@ -328,7 +325,7 @@ class VariantWriter(ExampleActor):
         # Then call make_graph_example_from_region for that variant alone
         inference_vcf = self.kwargs.get("inference_vcf")
         assert inference_vcf, "Inference VCF is not provided"
-        
+
         with pysam.VariantFile(inference_vcf) as src_vcf_file:
             src_header = src_vcf_file.header
             for record in src_vcf_file.fetch(**region.pysam_fetch):
@@ -342,7 +339,7 @@ class VariantWriter(ExampleActor):
                     kwargs = self.kwargs.copy()
                     kwargs["inference_vcf"] = dst_vcf
                     example = make_graph_example_from_region(self.cfg, variant.reference_region, *self.args, **kwargs)
-                    
+
                     sample = {
                         "__key__": variant.vg_variant_id,
                         "region.txt": example["region"],
@@ -352,11 +349,11 @@ class VariantWriter(ExampleActor):
                         sample["label.cls"] = example["label"]
                     if "sim.images" in example:
                         sample["sim.images.npy.gz"] = example["sim.images"]
-                    self._writer.write(sample)                       
-                
+                    self._writer.write(sample)
+
 
 @ray.remote
-class GraphWriter(ExampleActor): 
+class GraphWriter(ExampleActor):
     def from_region(self, region: Range):
         try:
             # Attempt to timeout long running regions.
@@ -372,7 +369,7 @@ class GraphWriter(ExampleActor):
                 sample["sim.images.npy.gz"] = example["sim.images"]
             self._writer.write(sample)
         except TimeoutError:
-            logging.error("Timeout error for region %s", region)
+            logging.exception("Timeout error for region %s", region)
 
 
 def vcf_to_region_examples(
@@ -381,7 +378,7 @@ def vcf_to_region_examples(
     sample: Sample,
     inference_vcf: str,
     output_dir: str,
-    background_vcf: typing.Optional[str] = None,
+    background_vcf: str | None = None,
     progress_bar: bool = False,
 ):
 
@@ -417,7 +414,7 @@ def vcf_to_variant_examples(
     sample: Sample,
     inference_vcf: str,
     output_dir: str,
-    background_vcf: typing.Optional[str] = None,
+    background_vcf: str | None = None,
     progress_bar: bool = False,
     ploidy: int = 2,
 ):
@@ -450,7 +447,7 @@ def vcf_to_graph_examples(
     sample: Sample,
     inference_vcf: str,
     output_dir: str,
-    background_vcf: typing.Optional[str] = None,
+    background_vcf: str | None = None,
     progress_bar: bool = False,
     ploidy: int = 2,
 ):
@@ -465,7 +462,7 @@ def vcf_to_graph_examples(
         # for record in records:
         #     if vg_variant_id(record) == "cd8536300a04f95e268065d36bb58150081a8f65":
         #         print(region, record)
-        #print(region.expand(-group_padding))        
+        #print(region.expand(-group_padding))
 
         running_total += count
         running_max = max(running_max, count)

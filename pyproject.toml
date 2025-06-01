@@ -11,7 +11,7 @@ name = "npsv3"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text ="MIT"}
 keywords = []
 authors = [
@@ -20,7 +20,6 @@ authors = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
@@ -65,121 +64,20 @@ allow-direct-references = true
 [tool.hatch.version]
 path = "src/npsv3/__about__.py"
 
-[tool.hatch.envs.default]
-dependencies = [
-  "coverage[toml]>=6.5",
-  "pytest",
-  "pytest-profiling"
-]
-system-site-packages = true
-
-[tool.hatch.envs.default.scripts]
-test = "pytest tests {args:tests}"
-test-cov = "coverage run -m pytest {args:tests}"
-cov-report = [
-  "- coverage combine",
-  "coverage report",
-]
-cov = [
-  "test-cov",
-  "cov-report",
-]
-[tool.hatch.envs.default.env-vars]
-TF_CPP_MIN_LOG_LEVEL = "1"
-
-
-[[tool.hatch.envs.all.matrix]]
-python = ["3.10", "3.11"]
-
-[tool.hatch.envs.lint]
-dependencies = [
-  "black>=23.1.0",
+[tool.hatch.envs.types]
+extra-dependencies = [
   "mypy>=1.0.0",
-  "ruff>=0.0.243",
 ]
-[tool.hatch.envs.lint.scripts]
-typing = "mypy --exclude lib/ --install-types --non-interactive {args:src/npsv3 tests}"
-style = [
-  "ruff check {args:.}",
-  "black --check --diff {args:.}",
-]
-fmt = [
-  "black {args:.}",
-  "ruff check --fix {args:.}",
-  "style",
-]
-all = [
-  "style",
-  "typing",
-]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/npsv3 tests}"
 
-[tool.black]
-target-version = ["py310"]
-line-length = 120
-skip-string-normalization = true
-extend-exclude = "lib"
+[tool.hatch.envs.hatch-test]
+installer = "pip"
 
-[tool.ruff]
-target-version = "py310"
-line-length = 120
-select = [
-  "A",
-  "ARG",
-  "B",
-  "C",
-  "DTZ",
-  "E",
-  "EM",
-  "F",
-  "FBT",
-  "I",
-  "ICN",
-  "ISC",
-  "N",
-  "PLC",
-  "PLE",
-  "PLR",
-  "PLW",
-  "Q",
-  "RUF",
-  "S",
-  "T",
-  "TID",
-  "UP",
-  "W",
-  "YTT",
-]
-ignore = [
-  # Allow non-abstract empty methods in abstract base classes
-  "B027",
-  # Allow boolean positional values in function calls, like `dict.get(... True)`
-  "FBT003",
-  # Ignore checks for possible passwords
-  "S105", "S106", "S107",
-  # Ignore complexity
-  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
-  # Allow assertions
-  "S101",
-  # Allow subprocess calls
-  "S602", "S603",
-]
-unfixable = [
-  # Don't touch unused imports
-  "F401",
-  # Don't use | in type annotations
-  "UP007"
-]
-extend-exclude = ["lib"]
-
-[tool.ruff.isort]
-known-first-party = ["npsv3"]
-
-[tool.ruff.flake8-tidy-imports]
-ban-relative-imports = "all"
-
-[tool.ruff.per-file-ignores]
-# Tests can use magic values, assertions, and relative imports
-"tests/**/*" = ["PLR2004", "S101", "TID252"]
+[tool.hatch.envs.hatch-static-analysis]
+dependencies = ["ruff==0.11.2"]
+installer = "pip"
+config-path = "ruff_defaults.toml"
 
 [tool.coverage.run]
 source_pkgs = ["npsv3", "tests"]
@@ -199,3 +97,15 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "if TYPE_CHECKING:",
 ]
+
+[tool.ruff]
+extend = "ruff_defaults.toml"
+extend-exclude = ["lib"]
+
+[tool.ruff.lint]
+# Don't flag `import lightning as L` or similar conventions
+extend-ignore = ["N812"] 
+
+[tool.ruff.lint.extend-per-file-ignores]
+"**/tests/**/*" = ["SLF001"]
+

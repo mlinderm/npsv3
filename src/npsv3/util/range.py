@@ -31,7 +31,7 @@ class Range:
 
     def __lt__(self, rhs):
         return isinstance(rhs, Range) and self.contig == rhs.contig and ((self.start >= rhs.start and self.end < rhs.end) or (self.start > rhs.start and self.end <= rhs.end))
-    
+
     def __str__(self):
         return f"{self.contig}:{self.start+1}-{self.end}"
 
@@ -78,12 +78,11 @@ class Range:
             if has_region.reference_name != self.contig:
                 return 0
             return has_region.get_overlap(self.start, self.end)
-        elif isinstance(has_region, Range):
+        if isinstance(has_region, Range):
             if self.contig != has_region.contig:
                 return 0
             return max(0, min(self.end, has_region.end) - max(self.start, has_region.start))
-        else:
-            raise NotImplementedError()
+        raise NotImplementedError
 
     def union(self, other: "Range") -> "Range":
         if self.contig != other.contig:
@@ -94,8 +93,7 @@ class Range:
     def intersection(self, other: "Range") -> "Range":
         if self.contig != other.contig or other.start >= self.end or self.start >= other.end:
             return Range("", 0, 0)
-        else:
-            return Range(self.contig, max(self.start, other.start), min(self.end, other.end))
+        return Range(self.contig, max(self.start, other.start), min(self.end, other.end))
 
     def window(self, size):
         assert self.length % size == 0

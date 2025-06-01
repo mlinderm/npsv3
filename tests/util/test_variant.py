@@ -1,10 +1,10 @@
 import os
 
 import pysam
-import pytest
 
-from npsv3.variant import Variant
 from npsv3.util.range import Range
+from npsv3.variant import Variant
+
 
 class TestVCFVariantTypes:
     def test_star_allele(self, tmp_path):
@@ -19,13 +19,13 @@ class TestVCFVariantTypes:
 14	77187582	.	C	CAAAAAAAAAA,*	344.04	PASS	AC=2,4
 """
             )
-        
+
         with open(vcf_path) as vcf_file:
             for line in vcf_file:
                 print(line.strip())
         record = next(pysam.VariantFile(vcf_path, "r"))
         variant = Variant.from_pysam(record)
-        
+
         assert variant._padding == 1
         assert variant.reference_region == Range("14", 77187582, 77187582)
         assert variant.length_change() == (10, None)
@@ -35,4 +35,3 @@ class TestVCFVariantTypes:
         assert variant.alt_seq(1) == "AAAAAAAAAA"
         assert variant.alt_seq(2) is None
 
-        

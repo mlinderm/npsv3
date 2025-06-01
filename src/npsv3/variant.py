@@ -24,7 +24,7 @@ def vg_variant_id(record: pysam.VariantRecord) -> str:
 
 # Adapted from nucleus:
 # https://github.com/google/nucleus/blob/3bd27ac076a6f3f93e49a27ed60661858e727dda/nucleus/util/variant_utils.py#L718
-def generate_allele_indices(num_alleles: int, ploidy: int) -> typing.Generator[typing.Tuple[int, ...], None, None]:
+def generate_allele_indices(num_alleles: int, ploidy: int) -> typing.Generator[tuple[int, ...], None, None]:
     """Generate VCF allele indices (genotype) in order of the VCF genotype likelihood (or other 'G') field
 
     Args:
@@ -65,20 +65,18 @@ def genotype_field_index(allele_indices: typing.Sequence[int]) -> int:
     """
     if len(allele_indices) == 1:
         return allele_indices[0]
-    elif len(allele_indices) == 2:
+    if len(allele_indices) == 2:
         a1, a2 = sorted(allele_indices)
         return a1 + (a2 * (a2 + 1) // 2)
-    else:
-        msg = "Only ploidy <= 2 is currently supported"
-        raise NotImplementedError(msg)
+    msg = "Only ploidy <= 2 is currently supported"
+    raise NotImplementedError(msg)
 
 
 def genotype_count(num_alleles: int, ploidy: int):
     if ploidy <= 2:
         return (num_alleles * (num_alleles + 1)) // ploidy
-    else:
-        msg = "Only ploidy <= 2 is currently supported"
-        raise NotImplementedError(msg)
+    msg = "Only ploidy <= 2 is currently supported"
+    raise NotImplementedError(msg)
 
 
 def _has_symbolic_allele(record):
@@ -143,18 +141,18 @@ class Variant:
         return Range(self.contig, self.start + self._padding, self.end)
 
     def alt_reference_region(self, allele: int) -> Range:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
     def ref_length(self):
         """Length of reference allele including any padding bases"""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def alt_length(self):
         """Length of alternate allele including any padding bases"""
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    def length_change(self, allele: typing.Optional[int] = None):
+    def length_change(self, allele: int | None = None):
         try:
             svlen = self._record.info.get("SVLEN", None)
         except ValueError: # PySAM seems to raise an error if field is not defined in VCF at all
@@ -174,9 +172,8 @@ class Variant:
         """Factory method for creating appropriate Variant objects"""
         if not _has_symbolic_allele(record):
             return _SequenceResolvedVariant(record)
-        else:
-            msg = "Symbolic variants not currently supported"
-            raise NotImplementedError(msg)
+        msg = "Symbolic variants not currently supported"
+        raise NotImplementedError(msg)
 
 
 class _SequenceResolvedVariant(Variant):
@@ -188,12 +185,12 @@ class _SequenceResolvedVariant(Variant):
     def ref_length(self):
         return len(self._record.ref)
 
-    def alt_length(self, allele) -> typing.Optional[int]:
+    def alt_length(self, allele) -> int | None:
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
         return len(alt_allele) if alt_allele != "*" else None
 
-    def alt_reference_region(self, allele) -> typing.Optional[Range]:
+    def alt_reference_region(self, allele) -> Range | None:
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
         if alt_allele == "*":
@@ -202,7 +199,7 @@ class _SequenceResolvedVariant(Variant):
         padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
         return Range(self.contig, self.start + padding, self.end)
 
-    def alt_seq(self, allele) -> typing.Optional[str]:
+    def alt_seq(self, allele) -> str | None:
         assert allele >= 1
         alt_allele = self._record.alleles[allele]
         if alt_allele == "*":
@@ -233,7 +230,7 @@ class _SymbolicDeletionVariant(Variant):
     def alt_seq(self, allele):
         assert allele >= 1
         return ""
-        
+
 
 def overlapping_records(vcf_path: str, flank=0):
     # We assume VCF is in sorted order

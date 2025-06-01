@@ -1,16 +1,17 @@
 import os
-import pytest
 
 import odgi
+import pytest
 
-from npsv3.graphs.graph import Graph, variant_path_name
+from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
 
-from .. import B37_REF_FASTA, HG38_REF_FASTA, HG00731_VCF, HG00731_SV_VCF, data_path
+from .. import B37_REF_FASTA, HG00731_SV_VCF, HG00731_VCF, HG38_REF_FASTA, data_path
+
 
 def assert_topological_order(graph: odgi.graph):
     visited = set()
-    
+
     def check_edge(handle):
         assert graph.get_id(handle) not in visited
 
@@ -70,16 +71,16 @@ class TestGraphConstructionFromVCF:
             region,
             inference_vcf=data_path("chrY_56879191_56881191.sv.vcf.gz"),
         )
-        
+
         # Use exhaustive generation
         haplotypes = graph.all_haplotypes(data_path("chrY_56879191_56881191.sv.vcf.gz"), "chrY", region)
-        
+
         assert len(haplotypes) == 2, "The reference background should generate the same number of haplotypes"
 
         assert len(haplotypes[0].sequence()) == region.length
         assert len(haplotypes[1].sequence()) == region.length + 73
-        
-    @pytest.mark.skip()
+
+    @pytest.mark.skip
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
     def test_complex_haplotype(self):
         region = Range("chr13", 29557413, 29560096)
@@ -99,7 +100,7 @@ class TestGraphConstructionFromVCF:
         assert len(haplotypes) > 1000
 
     # For chr1_41823764_41825818.vcf.gz the "reference" path for the variant conflicts with "true" path
-    # so we have 2 haplotypes for the absence of that variant, the explicit reference path and an 
+    # so we have 2 haplotypes for the absence of that variant, the explicit reference path and an
     # "implicit" path that does not include the alternate allele
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
@@ -132,7 +133,7 @@ class TestGraphConstructionFromVCF:
         # Since graph is optimized during construction, we should iterate over the nodes in topological order
         assert_topological_order(graph._graph)
 
-        # HG00731#0#chr1#0 is complete path, so the shortest path should be the same as the path in 
+        # HG00731#0#chr1#0 is complete path, so the shortest path should be the same as the path in
         # the original graph
         first_chrom_path = graph.nodes_on_path("HG00731#0#chr1#0")
         assert graph.shortest_path("HG00731#0#chr1") == first_chrom_path
@@ -150,7 +151,7 @@ class TestGraphConstructionFromVCF:
                 region.expand(cfg.pileup.variant_padding),
             )
             assert len(haplotypes) == 12, "4 possible SVs, but 2 are mutually exclusive, thus 12 haplotypes"
-            
+
             # One of the paths should match the backbone
             assert sum(h.nodes == graph.shortest_path(backbone) for h in haplotypes) == 1
 
@@ -179,7 +180,7 @@ class TestGraphConstructionFromVCF:
         for h in (2, 3):
             assert len(del_nodes & set(haplotypes[h].nodes)) == 0
 
-    
+
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
     @pytest.mark.skipif(
         not HG00731_VCF or not HG00731_SV_VCF, reason="HG00731 VCFs required"
@@ -239,7 +240,7 @@ class TestGraphConstructionFromVCF:
             data_path("14_77187582_77187582.vcf.gz"),
             region,
         )
-        
+
         graph._graph.to_gfa()
 
         assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30

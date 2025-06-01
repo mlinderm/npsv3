@@ -1,17 +1,13 @@
 import math
-import sys
-import tempfile
-import typing
 
-import hydra
 import numpy as np
 import pysam
-from PIL import Image
 import torch
+from PIL import Image
 from torchvision.transforms import v2 as transforms
 
 from npsv3.images.annotated_array import AnnotatedArray
-from npsv3.pileup import AlleleAssignment, BaseAlignment, FragmentTracker, ReadPileup, Strand, fetch_reads
+from npsv3.pileup import AlleleAssignment, BaseAlignment, ReadPileup, Strand, fetch_reads
 from npsv3.realigner import AlleleRealignment, realign_fragment
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
@@ -71,23 +67,21 @@ class ImageGenerator:
     def _align_pixel(self, align):
         if isinstance(align, BaseAlignment):
             return self._aligned_to_pixel[align]
-        else:
-            return [self._aligned_to_pixel[a] for a in align]
+        return [self._aligned_to_pixel[a] for a in align]
 
     def _zscore_pixel(self, zscore):
         if zscore is None:
             return 0
-        else:
-            return np.clip(
-                self._cfg.pileup.insert_size_mean_pixel + zscore * self._cfg.pileup.insert_size_sd_pixel,
-                1,
-                MAX_PIXEL_VALUE,
-            )
+        return np.clip(
+            self._cfg.pileup.insert_size_mean_pixel + zscore * self._cfg.pileup.insert_size_sd_pixel,
+            1,
+            MAX_PIXEL_VALUE,
+        )
 
     def _allele_pixel(self, realignment: AlleleRealignment):
         if self._cfg.pileup.binary_allele:
             return self._allele_to_pixel[realignment.allele]
-        elif (
+        if (
             realignment is None
             or realignment.ref_quality is None
             or math.isnan(realignment.ref_quality)
@@ -95,15 +89,14 @@ class ImageGenerator:
             or math.isnan(realignment.alt_quality)
         ):
             return 0
-        else:
-            return np.clip(
-                (realignment.alt_quality - realignment.ref_quality)
-                / self._cfg.pileup.max_alleleq
-                * self._cfg.pileup.allele_pixel_range
-                + self._cfg.pileup.amb_allele_pixel,
-                1,
-                MAX_PIXEL_VALUE,
-            )
+        return np.clip(
+            (realignment.alt_quality - realignment.ref_quality)
+            / self._cfg.pileup.max_alleleq
+            * self._cfg.pileup.allele_pixel_range
+            + self._cfg.pileup.amb_allele_pixel,
+            1,
+            MAX_PIXEL_VALUE,
+        )
 
     def _strand_pixel(self, read: pysam.AlignedSegment):
         return self._strand_to_pixel[Strand.NEGATIVE if read.is_reverse else Strand.POSITIVE]
@@ -111,25 +104,21 @@ class ImageGenerator:
     def _qual_pixel(self, qual, max_qual: int):
         if qual is None:
             return 0
-        else:
-            return np.minimum(np.array(qual) / max_qual, 1.0) * MAX_PIXEL_VALUE
+        return np.minimum(np.array(qual) / max_qual, 1.0) * MAX_PIXEL_VALUE
 
     def _mapq_pixel(self, qual):
         if qual is None:
             return 0
-        elif self._cfg.pileup.discrete_mapq:
+        if self._cfg.pileup.discrete_mapq:
             if qual == 0:
                 return self._cfg.pileup.mapq0_pixel
-            else:
-                return np.minimum((np.array(qual) / self._cfg.pileup.max_mapq) * 127 + 128, MAX_PIXEL_VALUE)
-        else:
-            return self._qual_pixel(qual, self._cfg.pileup.max_mapq)
+            return np.minimum((np.array(qual) / self._cfg.pileup.max_mapq) * 127 + 128, MAX_PIXEL_VALUE)
+        return self._qual_pixel(qual, self._cfg.pileup.max_mapq)
 
     def _phase_pixel(self, hp):
         if hp is None:
             return 0
-        else:
-            return (hp / 2.0) * MAX_PIXEL_VALUE
+        return (hp / 2.0) * MAX_PIXEL_VALUE
 
     def _flatten_image(
         self,
@@ -152,8 +141,7 @@ class ImageGenerator:
                 image.paste(channel_image, coord)
 
             return image
-        else:
-            return combined_image
+        return combined_image
 
     def image_region(self, region) -> Range:
         # Try to minimize compression by setting right padding to exact width...
@@ -193,8 +181,8 @@ class CoverageImageGenerator(ImageGenerator):
         read_path,
         sample: Sample,
         region: Range,
-        realigner: typing.Optional[AlleleRealignment] = None,
-        ref_seq: typing.Optional[str] = None,
+        realigner: AlleleRealignment | None = None,
+        ref_seq: str | None = None,
         **kwargs,
     ):
         image_height = self._cfg.pileup.image_height

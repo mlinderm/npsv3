@@ -1,6 +1,5 @@
 # Adapted from: https://gist.github.com/TySkby/143190ad1b88c6115597c45f996b030c
 
-import contextlib
 import errno
 import os
 import signal

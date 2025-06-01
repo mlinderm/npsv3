@@ -1,7 +1,7 @@
 _target_: npsv3.models.paired.GroupedImageDataModule
-training_urls: null
-validation_urls: null
-prediction_urls: null
+train_urls: null
+validate_urls: null
+predict_urls: null
 test_urls: null
 batch_size: 16
 num_workers: ${threads}

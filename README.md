@@ -11,7 +11,7 @@
 
 When cloning `npsv3`, make sure to recursively clone all of the submodules, i.e. `git clone --recursive git@github.com:mlinderm/npsv3.git`.
 
-`npsv3` requires Python 3.8+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
+`npsv3` requires Python 3.11+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
 
 ```
 docker build -t npsv3 .
@@ -40,8 +40,7 @@ We have installed `npsv3` with conda, e.g.,
 ```
 conda create -n npsv3 python=3.11
 conda activate npsv3
-conda install mkl==2024.0
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+python -m pip install -e .
 ```
 
 ## Running

@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 import os
+
 from omegaconf import OmegaConf
+
 
 def _first_existing(*paths):
     for path in paths:
