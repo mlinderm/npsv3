@@ -388,7 +388,7 @@ class Graph:
             _type_: _description_
         """
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Merge a separate inference VCF into the haplotype VCF, matching the samples if needed
+            # Merge a separate inference VCF into the background VCF, matching the samples if needed
             if inference_vcf and inference_vcf != background_vcf:
                 with pysam.VariantFile(background_vcf) as background_vcf_file:
                     background_header = background_vcf_file.header

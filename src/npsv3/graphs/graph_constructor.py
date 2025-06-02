@@ -41,12 +41,13 @@ class GraphConstructor:
 
         self.paths = defaultdict(list)
 
-        self._construct_from_vcf(graph_vcf)
+        self._vcf_to_spans(graph_vcf)
         self._assign_nodes()
         self._extract_paths()
         self._extract_haplotypes(graph_vcf)  # Should be haplotype_vcf
 
-    def _construct_from_vcf(self, vcf_path: str):
+    def _vcf_to_spans(self, vcf_path: str):
+        """Split the reference region into spans based on variants in vcf_path."""
         with pysam.VariantFile(vcf_path, drop_samples=True) as vcf_file:
             for record in vcf_file.fetch(**self.region.pysam_fetch):
                 variant = Variant.from_pysam(record)
@@ -62,6 +63,7 @@ class GraphConstructor:
                         self._split_spans(alt_region, variant.vg_variant_id, alt)
 
     def _assign_nodes(self):
+        """Assign unique node IDs to spans and their alternate alleles."""
         node_id_gen = itertools.count(1)
         for span in self.spans:
             span.node_id = next(node_id_gen)
@@ -69,6 +71,7 @@ class GraphConstructor:
                 alt.node_id = next(node_id_gen)
 
     def _extract_paths(self):
+        """Extract paths from the spans to create a mapping of path names to node IDs."""
         for span in self.spans:
             for name in span.names:
                 self.paths[name].append(span.node_id)
@@ -76,6 +79,7 @@ class GraphConstructor:
                 self.paths[alt.name].append(alt.node_id)
 
     def _extract_haplotypes(self, vcf_path: str, samples: Sequence[str] | None=None, ploidy=2):
+        """Extract haplotypes from the vcf_path for samples as paths"""
         with pysam.VariantFile(vcf_path) as vcf_file:
             if samples:
                 vcf_file.subset_samples(samples)
@@ -394,7 +398,7 @@ def gfa_to_xg(gfa_path: str, xg_path: str):
 
 
 def vcf_to_gbwt(xg_path: str, vcf_path: str, region: Range, gbwt_path: str):
-    # VG drops the '*' alleles as produced by HaplotypeCaller or other tools, producing
+    # vg drops the '*' alleles (e.g., as produced by HaplotypeCaller) producing
     # incorrect haplotypes
     gbwt_command = f"vg gbwt \
         --xg-name {quote(xg_path)} \

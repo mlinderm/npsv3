@@ -2,6 +2,7 @@ import os
 from collections import deque
 
 import pytest
+import pysam
 
 from npsv3.graphs.graph_constructor import (
     AltPath,
@@ -12,6 +13,7 @@ from npsv3.graphs.graph_constructor import (
     vcf_to_paths,
 )
 from npsv3.util.range import Range
+from npsv3.util.vcf import index_variant_file
 
 from .. import B37_REF_FASTA, HG00731_VCF, HG38_REF_FASTA, data_path
 
@@ -197,11 +199,40 @@ class TestGraphConstructor:
         vcf_path = data_path("14_77187582_77187582.vcf.gz")
         construct = GraphConstructor(region, vcf_path)
 
+        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,5,6,7]
+        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,7]
+
         construct.to_gfa(B37_REF_FASTA)
-        # # Generate complete GFA without error
-        # gfa_path = os.path.join(tmp_path, "test.gfa")
-        # construct.to_gfa(B37_REF_FASTA, gfa_path)
-        # add_haplotypes_to_gfa(gfa_path, vcf_path, region)
 
-       # GFA isn't well equipped to test if haplotype is correctly determined
 
+    @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
+    def test_mixed_alleles(self, tmp_path): 
+        vcf_path = os.path.join(tmp_path, "test.vcf.gz")
+        with pysam.BGZFile(vcf_path, "wb") as vcf_file:
+            vcf_file.write(
+                b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=1,length=249250621>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+1	1000000	.	T	A	100	PASS	.	GT:PS	0/1:1000000
+1	1000001	.	G	C	100	PASS	.	GT:PS	0|1:1000000
+1	1000002	.	G	T	100	PASS	.	GT:PS	1|1:1000000
+1	1000003	.	G	A	100	PASS	.	GT:PS	1|0:1000003
+"""
+            )
+        index_variant_file(vcf_path)
+
+        region = Range.parse_literal ("1:1000000-1000003").expand(10)
+        construct = GraphConstructor(region, vcf_path)
+        construct.to_gfa(B37_REF_FASTA)
+                         
+        # Use vg to test path generation
+        # Note: vg does not correctly support different phase sets in the same region       
+        gfa_path = os.path.join(tmp_path, "test.gfa")
+        construct.to_gfa(B37_REF_FASTA, gfa_path)
+        with open(gfa_path, "r") as gfa_file:
+            for name, _strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
+                print(name, nodes)
+                #assert construct.paths.get(name) == [int(n) for n in nodes], f"Path {name} does not match expected nodes"
