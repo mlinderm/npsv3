@@ -1,0 +1,13 @@
+# Target labels
+ seqlib
+# Source files and their labels
+/home/cachang/npsv3/CMakeFiles/seqlib
+/home/cachang/npsv3/CMakeFiles/seqlib.rule
+/home/cachang/npsv3/CMakeFiles/seqlib-complete.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-build.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-configure.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-download.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-install.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-mkdir.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-patch.rule
+/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-update.rule

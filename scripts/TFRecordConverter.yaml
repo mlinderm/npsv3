@@ -1,0 +1,7 @@
+# Mimic Hydra <= 1.1 by changing the working directory to the output directory
+hydra:
+  job:
+    chdir: true
+
+input: ???
+output: ???

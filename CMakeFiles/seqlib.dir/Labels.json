@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/cachang/npsv3/CMakeFiles/seqlib"
+		},
+		{
+			"file" : "/home/cachang/npsv3/CMakeFiles/seqlib.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/CMakeFiles/seqlib-complete.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-build.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-configure.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-download.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-install.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-mkdir.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-patch.rule"
+		},
+		{
+			"file" : "/home/cachang/npsv3/lib/seqlib/src/seqlib-stamp/seqlib-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"seqlib"
+		],
+		"name" : "seqlib"
+	}
+}
