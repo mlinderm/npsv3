@@ -1,10 +1,13 @@
+import itertools
 import os
 
 import odgi
+import pysam
 import pytest
 
 from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
+from npsv3.util.vcf import index_variant_file
 
 from .. import B37_REF_FASTA, HG00731_SV_VCF, HG00731_VCF, HG38_REF_FASTA, data_path
 
@@ -33,17 +36,18 @@ class TestGraphConstructionFromVCF:
             region,
             inference_vcf=data_path("12_22129565_22130387.vcf.gz"),
         )
+        #graph._graph.to_gfa()
 
-        for path in ("12", "HG002#0#12#0", "HG002#1#12#0"):
-            assert graph.has_path(path)
-        for haplotype in (0, 1):
-            assert not graph.has_path(
-                f"HG002#{haplotype}#12#1"
-            ), "VCF should translate to a single path for each haplotype"
+        # Due to local phasing (phase sets in the VCF) we expect to have 3 paths for each haplotype
+        assert graph.has_path("12"), "Reference path should be present"
+        for prefix, i in itertools.product(("HG002#0#12", "HG002#1#12"), range(3)):
+            assert graph.has_path(f"{prefix}#{i}"), f"Path {prefix}#{i} should be present"
+        assert not graph.has_path("HG002#0#12#3")
+        assert not graph.has_path("HG002#1#12#3")
 
         # Use exhaustive generation
         haplotypes = graph.all_haplotypes(
-            data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12#0", region
+            data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12", region
         )
         assert len(haplotypes) == 2, "A single isolated variant should only have two haplotypes"
         for i in range(2):
@@ -53,8 +57,9 @@ class TestGraphConstructionFromVCF:
         assert len(haplotypes[0].sequence()) == region.length - 1
         assert len(haplotypes[1].sequence()) == region.length - 1 - 822
 
-        # Variant path should match the background
-        assert graph.nodes_on_path("HG002#0#12#0") == haplotypes[1].nodes
+        # Variant path should match the background constructed from the 3 paths making up
+        # the haplotype concatenated
+        assert list(itertools.chain.from_iterable(graph.nodes_on_path(f"HG002#0#12#{i}") for i in range(3))) == haplotypes[1].nodes
 
         variant_haplotypes = graph.all_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "12", region)
         assert len(variant_haplotypes) == 2, "The reference background should generate the same number of haplotypes"
@@ -233,14 +238,23 @@ class TestGraphConstructionFromVCF:
 
 
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
-    def test_star_alleles(self):
-        region = Range("14", 77187572, 77187592)
-        graph = Graph.from_vcf(
-            B37_REF_FASTA,
-            data_path("14_77187582_77187582.vcf.gz"),
-            region,
-        )
+    def test_star_alleles(self, tmp_path):
+        vcf_path = os.path.join(tmp_path, "test.vcf.gz")
+        with pysam.BGZFile(vcf_path, "wb") as vcf_file:
+            vcf_file.write(
+                b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=14,length=107349540>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+14	77187581	.	GCC	G	603.88	PASS	.	GT	0/1
+14	77187582	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2
+"""
+            )
+        index_variant_file(vcf_path)
 
+        region = Range("14", 77187572, 77187592)
+        graph = Graph.from_vcf(B37_REF_FASTA, vcf_path, region)
         graph._graph.to_gfa()
 
         assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30

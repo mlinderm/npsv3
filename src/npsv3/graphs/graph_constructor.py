@@ -8,6 +8,7 @@ generation.
 """
 
 import itertools
+import logging
 import os
 import subprocess
 import sys
@@ -17,8 +18,10 @@ from collections import defaultdict
 from collections.abc import MutableSequence, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
+from enum import Enum, Flag, auto
 from shlex import quote
-from typing import Optional, TextIO
+from types import MappingProxyType
+from typing import Any, Optional, TextIO
 
 import pysam
 
@@ -29,6 +32,9 @@ from npsv3.variant import Variant
 # i.e., with zero size, which we need for insertions. So instead we use a sorted list as the core
 # data structure and binary search.
 
+class VariantOverlap(Flag):
+    OVERLAP = auto()
+    STAR_ALLELE = auto()
 
 class GraphConstructor:
     def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Sequence[str] | None = None):
@@ -85,59 +91,31 @@ class GraphConstructor:
                 vcf_file.subset_samples(samples)
 
             current_samples = list(vcf_file.header.samples)
-            assert samples is None or len(current_samples) == len(samples), "Sample count mismatch"
 
-            haplotypes = [self.paths[self.region.contig]] * (ploidy * len(current_samples))
+            ref_nodes = self.paths[self.region.contig]
+            polytypes  = [PolytypePaths(MappingProxyType(self.paths), ref_nodes, sample, ploidy) for sample in current_samples]
 
-            last_phased = None
-            last_phase_set = None
-
+            current_range = None
             for record in vcf_file.fetch(**self.region.pysam_fetch):
                 variant = Variant.from_pysam(record)
-                ref_path = variant_path_name(variant.vg_variant_id, 0)
 
-                # https://github.com/jltsiren/gbwt/blob/bde6858046580d1b9dbfa54f48ab187c85998ffe/src/variants.cpp#L826
-
-                # /*
-                #     First phase:
-                #     - If the current site is unphased or the ploidy changes, finish the existing haplotype.
-                #     - If the current haplotype is inactive, activate it.
-                #     - If the current haplotype has an alternate allele, append it.
-                #     - If the current site is unphased, finish the current haplotype.
-                # */
-                # /*
-                #     Second phase:
-                #     - If the current site is unphased or haploid, finish the existing haplotype.
-                #     - If the current site is haploid, skip the rest.
-                #     - If the current haplotype is inactive, activate it.
-                #     - If the current haplotype has an alternate allele, append it.
-                #     - If the current site is unphased, finish the current haplotype.
-                # */
-
-                # Replace the reference nodes with the variant nodes for alternate alleles
-                # Do so for both all alleles of the record
-                has_overlap_allele = variant._record.alts[-1] == "*"
+                # We can also have overlap alleles that are not specifically encoded in the VCF with "*", but instead
+                # are still marked with a genotype, e.g., 0/0, even it latter should formally be 0/*. These include insertions
+                # that have identical "zero width" regions
+                variant_range = variant.reference_region
+                if current_range is not None and (current_range.overlaps(variant_range) or current_range == variant_range):
+                    current_range = current_range.union(variant_range)
+                    overlap = VariantOverlap.OVERLAP | (VariantOverlap.STAR_ALLELE if record.alts[-1] == "*" else VariantOverlap(0))
+                else:
+                    current_range = variant_range
+                    assert record.alts[-1] != "*", "Star allele in non-overlapping variant"
+                    overlap = VariantOverlap(0)
 
                 for g, genotype in enumerate(record.samples.itervalues()):
-                    phased = genotype.phased
-                    indices = genotype.allele_indices
+                    polytypes[g].add_genotype(variant, genotype, overlap)
 
-                    for i, index in itertools.zip_longest(range(ploidy), indices):
-                        haplotype_idx = g * ploidy + i
-                        if has_overlap_allele and index == (variant.num_alt + 1):
-                            # This is an overlapping allele that is effectively a local phase set, so we don't need to
-                            # terminate haplotypes
-                            pass
-
-                        if index is not None and index > 0:
-                            path = variant_path_name(variant.vg_variant_id, index)
-                            haplotypes[haplotype_idx] = _replace_sublist(haplotypes[haplotype_idx], self.paths[ref_path], self.paths[path])
-
-            # Add haplotype paths to the graph
-            for i, haplotype in enumerate(haplotypes):
-                sample_idx = i // ploidy
-                haplotype_idx = i % ploidy
-                self.paths[f"{current_samples[sample_idx]}#{haplotype_idx}#{self.region.contig}#0"] = haplotype
+        for polytype in polytypes:
+            self.paths.update(polytype.gfa_paths(self.region))
 
 
     @property
@@ -383,6 +361,145 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
         # Make sure reference sequence is all upper case
         return ref_fasta.fetch(reference=region.contig, start=region.start, end=region.end).upper()
 
+# The approach in the GWVT library
+# https://github.com/jltsiren/gbwt/blob/bde6858046580d1b9dbfa54f48ab187c85998ffe/src/variants.cpp#L826
+
+
+class Phasing(Enum):
+    UNPHASED = 0
+    GLOBAL = 1
+    LOCAL = 2
+    IMPLICIT = 3 # homozygous genotypes are implicitly phased
+
+
+@dataclass
+class PhaseState:
+    phase: Phasing
+    phase_set: Any | None = None  # Phase set ID, if applicable (this is really any type use in VCF PS field)
+
+    def __eq__(self, other):
+        if isinstance(other, PhaseState):
+            return self.phase == other.phase and (self.phasing != Phasing.LOCAL or self.phase_set == other.phase_set)
+        return False
+
+    def next_state(self, variant_phase: "PhaseState"):
+        state_and_trans = _NEXT_PHASE_STATE[self.phase, variant_phase.phase]
+        if isinstance(state_and_trans, tuple):
+            next_phase, break_before, = state_and_trans
+            return PhaseState(next_phase), break_before
+        if callable(state_and_trans):
+            return state_and_trans(self, variant_phase)
+        raise ValueError
+
+
+def _compare_local_phase_sets(phase: PhaseState, variant_phase: PhaseState):
+    assert phase.phase == variant_phase.phase == Phasing.LOCAL, "Can only compare local phases"
+    return (variant_phase, variant_phase.phase_set != phase.phase_set)
+
+
+_NEXT_PHASE_STATE = {
+    (Phasing.UNPHASED, Phasing.UNPHASED): (Phasing.UNPHASED, True),
+    (Phasing.UNPHASED, Phasing.GLOBAL): (Phasing.GLOBAL, True),
+    (Phasing.UNPHASED, Phasing.LOCAL): lambda _, n: (n, True),
+    (Phasing.UNPHASED, Phasing.IMPLICIT): (Phasing.UNPHASED, False),
+    (Phasing.GLOBAL, Phasing.UNPHASED): (Phasing.UNPHASED, True),
+    (Phasing.GLOBAL, Phasing.GLOBAL): (Phasing.GLOBAL, False),
+    (Phasing.GLOBAL, Phasing.LOCAL): lambda _, n: (n, True),
+    (Phasing.GLOBAL, Phasing.IMPLICIT): (Phasing.GLOBAL, False),
+    (Phasing.LOCAL, Phasing.UNPHASED): (Phasing.UNPHASED, True),
+    (Phasing.LOCAL, Phasing.GLOBAL): (Phasing.GLOBAL, True),
+    (Phasing.LOCAL, Phasing.LOCAL): _compare_local_phase_sets,
+    (Phasing.LOCAL, Phasing.IMPLICIT): lambda c, _: (c, False),
+    (Phasing.IMPLICIT, Phasing.UNPHASED): (Phasing.UNPHASED, False),
+    (Phasing.IMPLICIT, Phasing.GLOBAL): (Phasing.GLOBAL, False),
+    (Phasing.IMPLICIT, Phasing.LOCAL): lambda _, n: (n, False),
+    (Phasing.IMPLICIT, Phasing.IMPLICIT): (Phasing.IMPLICIT, False),
+}
+
+
+class HaplotypePaths:
+    def __init__(self, ref_nodes: list[int]):
+        self.nodes = [ref_nodes[:]]
+        self.phase = PhaseState(Phasing.IMPLICIT)  # Start with implicit phasing, i.e., no breaks in the haplotype
+
+    def _insert_break(self, haplotype_idx: int, node_idx:int):
+        haplotype = self.nodes[haplotype_idx]
+        self.nodes.insert(haplotype_idx+1, haplotype[node_idx:])
+        haplotype[node_idx:] = []  # Clear the path after the break
+
+    def _find_nodes(self, nodes: list[int]):
+        """Find the index of the first occurrence of nodes in the path"""
+        for haplotype_idx, haplotype_nodes in enumerate(self.nodes):
+           if haplotype_nodes[0] <= nodes[0] <= haplotype_nodes[-1]:
+                assert nodes[-1] <= haplotype_nodes[-1], "Nodes must be within the haplotype range"
+                node_idx = haplotype_nodes.index(nodes[0])
+                if haplotype_nodes[node_idx:node_idx + len(nodes)] != nodes:
+                    raise ValueError("Nodes not found in the haplotype")
+                return (haplotype_idx, node_idx)
+        raise ValueError("Nodes not found in any haplotype")
+
+    def apply_allele(self, ref_nodes, phase: PhaseState, overlap: VariantOverlap, alt_nodes = None, variant: Variant = None):
+        # Find replacement index, allowing for imprecisely defined overlapping alleles
+        try:
+            haplotype_idx, node_idx = self._find_nodes(ref_nodes)
+        except ValueError:
+            if overlap & VariantOverlap.OVERLAP:
+                # We have likely found an overlapping (reference) allele (without an explicit * allele). Skip it.
+                if alt_nodes is not None and variant is not None:
+                    # An inconstent VCF with an alternate alllele that can't exist due to overlap
+                    logging.warning("Found non-reference allele overlapped by another non-reference allele in %s, skipping", variant.reference_region)
+                return
+            raise
+
+        if alt_nodes is not None:
+            self.nodes[haplotype_idx][node_idx:node_idx + len(ref_nodes)] = alt_nodes
+
+        next_phase, break_before = self.phase.next_state(phase)
+        if break_before:
+            self._insert_break(haplotype_idx, node_idx)
+        self.phase = next_phase
+
+    def gfa_paths(self, sample: str, chrom: int, contig: str) -> list[str]:
+        """Return dict of GFA path name -> nodes for the haplotype"""
+        return {f"{sample}#{chrom}#{contig}#{i}": nodes for i, nodes in enumerate(self.nodes)}
+
+class PolytypePaths:
+    def __init__(self, paths, ref_nodes: list[int], sample: str, max_ploidy: int = 2):
+        self.paths = paths
+        self.sample = sample
+        self.max_ploidy = max_ploidy
+        self.haplotypes = [HaplotypePaths(ref_nodes) for _ in range(max_ploidy)]
+
+    def add_genotype(self, variant: Variant, genotype: pysam.VariantRecordSample, overlap: VariantOverlap):
+        ref_nodes = self.paths[variant_path_name(variant.vg_variant_id, 0)]
+        indices = genotype.allele_indices
+        # A variant can be explicitly globally or locally phased, or implicity phased if an overlapping allele
+        # or if all alleles are the same (e.g., 0/0 genotype)
+        if genotype.phased:
+            phase_set = genotype.get("PS")
+            phase = PhaseState(Phasing.GLOBAL if phase_set is None else Phasing.LOCAL, phase_set)
+        elif overlap or len(set(indices)) == 1:
+            phase = PhaseState(Phasing.IMPLICIT)
+        else:
+            phase = PhaseState(Phasing.UNPHASED)
+
+        for i, index in itertools.zip_longest(range(self.max_ploidy), indices, fillvalue=-1):
+            if index is None:
+                continue  # Skip missing alleles
+            if VariantOverlap.STAR_ALLELE in overlap and index == variant.num_alt:
+                continue  # Don't apply "missing" * allele
+            if index != -1:
+                alt_path = variant_path_name(variant.vg_variant_id, index)
+                self.haplotypes[i].apply_allele(ref_nodes, phase, overlap, alt_nodes=self.paths[alt_path] if index > 0 else None, variant=variant)
+            else:
+                msg = "Haploid genotypes are currently not supported"
+                raise NotImplementedError(msg)
+
+    def gfa_paths(self, region):
+        paths = {}
+        for h, haplotype in enumerate(self.haplotypes):
+            paths.update(haplotype.gfa_paths(self.sample, h, region.contig))
+        return paths
 
 def variant_path_name(variant_id: str, allele: int) -> str:
     return f"_alt_{variant_id}_{allele}"
