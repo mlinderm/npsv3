@@ -140,6 +140,11 @@ class Variant:
         """Returns changed region of the reference genome, excluding any padding bases"""
         return Range(self.contig, self.start + self._padding, self.end)
 
+    @property
+    def record_reference_region(self) -> Range:
+        """Returns the region of the reference genome as defined in the VCF record, including padding bases"""
+        return Range(self.contig, self.start, self.end)
+
     def alt_reference_region(self, allele: int) -> Range:
         raise NotImplementedError
 
@@ -162,6 +167,9 @@ class Variant:
         elif isinstance(svlen, int):
             svlen = (svlen,)  # If SVLEN is Number=1, convert to sequence
         return svlen if allele is None else svlen[allele - 1]
+
+    def allele(self, allele) -> str | None:
+        return self._record.alleles[allele]
 
     @cached_property
     def vg_variant_id(self):
@@ -201,12 +209,13 @@ class _SequenceResolvedVariant(Variant):
 
     def alt_seq(self, allele) -> str | None:
         assert allele >= 1
-        alt_allele = self._record.alleles[allele]
+        # Make sure sequences are all uppercase, since pysam returns them in the same case as in the VCF
+        alt_allele = self._record.alleles[allele].upper()
         if alt_allele == "*":
             return None
         assert _VALID_BASES_RE.fullmatch(alt_allele), f"Unexpected base in sequence resolved allele {alt_allele} in region {self.reference_region}"
         # Compute per-allele padding (since is may be different than the global padding)
-        padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
+        padding = len(os.path.commonprefix([self._record.ref.upper(), alt_allele]))
         return alt_allele[padding:]
 
 

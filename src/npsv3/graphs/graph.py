@@ -2,6 +2,7 @@ import itertools
 import operator
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,11 @@ class Graph:
             og_path = os.path.join(temp_dir, "graph.og")
             # Build graph with odgi executable
             build_command = f"odgi build --sort --optimize -g {quote(gfa_path)} -o {quote(og_path)}"
-            subprocess.run(build_command, shell=True, check=True)
+            try:
+                subprocess.run(build_command, shell=True, check=True)
+            except subprocess.CalledProcessError:
+                #shutil.copy(gfa_path, "graph.gfa")
+                raise
 
             # Load graph into Python object
             self._graph = odgi.graph()
@@ -495,12 +500,6 @@ class Graph:
 
             constructor = GraphConstructor(region, merged_graph_vcf)
             constructor.to_gfa(reference_fasta, gfa_path)
-
-            # Append haplotype paths to GFA before loading
-            # with open(gfa_path, "a") as gfa_file:
-            #     for name, strand, nodes in vcf_to_paths(gfa_path, background_vcf, region):
-            #         print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)
-
 
             # Construct graph object from GFA file
             graph = cls(gfa_path, region)

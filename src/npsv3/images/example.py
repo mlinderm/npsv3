@@ -135,7 +135,7 @@ def make_graph_example_from_region(
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
         realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region.expand(cfg.pileup.variant_padding))
-        assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes for allele {allele} in region {region}"
+        assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"
         assert realign_haplotypes[0].nodes == graph.nodes_on_path(
             region.contig
         ), f"First haplotype must be the reference for region {region}"
@@ -144,6 +144,8 @@ def make_graph_example_from_region(
         with open(realign_fasta_path, "w") as fasta:
             for i, haplotype in enumerate(realign_haplotypes):
                 fasta.write(f">seq{i}\n")
+                sequence = haplotype.sequence()
+                assert sequence.isupper(), f"Sequence for haplotype {i} is not upper case in region {region}"
                 fasta.write(haplotype.sequence() + "\n")
 
         # Construct realigner once for all images for this variant,

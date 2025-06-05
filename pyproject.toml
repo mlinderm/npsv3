@@ -103,8 +103,10 @@ extend = "ruff_defaults.toml"
 extend-exclude = ["lib"]
 
 [tool.ruff.lint]
-# Don't flag `import lightning as L` or similar conventions
-extend-ignore = ["N812"] 
+extend-ignore = [
+  "S101", # Allow assert
+  "N812", # Don't flag `import lightning as L` or similar conventions
+] 
 
 [tool.ruff.lint.extend-per-file-ignores]
 "**/tests/**/*" = ["SLF001"]
