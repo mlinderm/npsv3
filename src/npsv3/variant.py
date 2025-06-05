@@ -175,6 +175,11 @@ class Variant:
     def vg_variant_id(self):
         return vg_variant_id(self._record)
 
+    @property
+    def has_star_allele(self) -> bool:
+        """Check if the variant has a symbolic allele"""
+        return "*" in self._record.alts
+
     @classmethod
     def from_pysam(cls, record: pysam.VariantRecord) -> "Variant":
         """Factory method for creating appropriate Variant objects"""

@@ -32,19 +32,24 @@ from npsv3.variant import Variant
 # i.e., with zero size, which we need for insertions. So instead we use a sorted list as the core
 # data structure and binary search.
 
-# Known limitations:
-# * We don't attempt to detect smaller homozygous variants contained within larger heterozygous variants, e.g.,
-#   a het. SV DEL. These are reported 'Found non-reference allele overlapped by another non-reference allele'. These
-#   are a frequent source of the above warnings.
-# * We can't generate correct haplotypes for variants with '*' alleles where the overlap occurs with the padding
-#   base. To do so we would need to include the padding base in the overlap detection and add paths that included
-#   the padding base.
 
 class VariantOverlap(Flag):
     OVERLAP = auto()
     STAR_ALLELE = auto()
 
 class GraphConstructor:
+    """Construct a pangenome graph from graph_vcf variants in a given region.
+
+    VCF features supported:
+    * Global phasing (|) and local phasing (|) with a PS field.
+    * Star alleles and overlapping alleles more generally. If genotypes are not explicity phases, we try to find
+      a consistent phasing of the alleles in the overlapping variants.
+
+    Known limitations:
+    * We don't attempt to change smaller homozygous variants contained within larger heterozygous variants, e.g.,
+      a het. SV DEL. These are reported 'Found non-reference allele overlapped by another non-reference allele'. These
+      are a frequent source of the above warnings.
+    """
     def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Sequence[str] | None = None):
         """Construct a graph from graph_vcf variants in region. Assumes VCF is indexed and in sorted order."""
         self.region = region
@@ -64,7 +69,20 @@ class GraphConstructor:
         """Split the reference region into spans based on variants in vcf_path."""
         with pysam.VariantFile(vcf_path, drop_samples=True) as vcf_file:
             for variant, _ in sort_variant_reference_region(vcf_file.fetch(**self.region.pysam_fetch)):
+                has_star_allele = variant.has_star_allele
                 for allele_idx, allele_len in enumerate(variant.length_change(allele=None), start=1):
+                    # When there * alleles also create paths that include the padding bases (noted with "rec" prefix).
+                    # This crudely create extra copies of some nodes, but those could be pruned later.
+                    if has_star_allele and allele_len is not None:
+                        # Find and split the corresponding span with any padding bases included
+                        alt_region = variant.record_reference_region
+                        alt = AltPath(
+                            variant_path_name(variant.vg_variant_id, allele_idx, prefix="rec"),
+                            alt_region.end,
+                            variant.allele(allele_idx), # Include all the padding bases in the sequence
+                        )
+                        self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
+                    # "Normal" allele addition without creating paths including padding bases
                     if allele_len is not None: # Ignore * alleles
                         # Find and split the corresponding span
                         alt_region = variant.alt_reference_region(allele_idx)
@@ -74,6 +92,7 @@ class GraphConstructor:
                             variant.alt_seq(allele_idx),
                         )
                         self._split_spans(alt_region, variant.vg_variant_id, alt)
+
 
     def _assign_nodes(self):
         """Assign unique node IDs to spans and their alternate alleles."""
@@ -130,7 +149,15 @@ class GraphConstructor:
                     overlap = VariantOverlap.OVERLAP | VariantOverlap.STAR_ALLELE
                 else:
                     if has_star:
-                        logging.warning("Found non-overlapping variant with * allele in %s, skipping", self.region)
+                        variant_range = variant.record_reference_region
+                        if current_range.overlaps(variant_range):
+                            # The '*' allele overlaps if we include the padding base. Add genotypes with "rec" prefix paths that include
+                            # those padding bases
+                            for g, genotype in enumerate(record.samples.itervalues()):
+                                polytypes[g].add_genotype(variant, genotype, VariantOverlap.OVERLAP | VariantOverlap.STAR_ALLELE, path_prefix="rec")
+                            current_range = current_range.union(variant_range)
+                        else:
+                            logging.warning("Found non-overlapping variant with * allele in %s, skipping", self.region)
                         continue
                     current_range = variant_range
                     overlap = VariantOverlap(0)
@@ -211,8 +238,8 @@ class GraphConstructor:
             for path, nodes in self.paths.items():
                 print("P", path, ",".join(f"{n}+" for n in nodes), "*", sep="\t", file=gfa_file)
 
-    def _split_spans(self, variant_region: Range, variant_id: str, alt: "AltPath") -> None:
-        ref_name = variant_path_name(variant_id, 0)
+    def _split_spans(self, variant_region: Range, variant_id: str, alt: "AltPath", path_prefix: str = "alt") -> None:
+        ref_name = variant_path_name(variant_id, 0, prefix=path_prefix)
         start_idx, end_idx = self.find_overlapping_spans(variant_region)
 
         if start_idx == end_idx:
@@ -295,6 +322,7 @@ class GraphConstructor:
 
 
 class ReferenceSpan:
+    """Reference span in the graph with its associated names and alternate paths"""
     def __init__(self, region: Range, source_span: Optional["ReferenceSpan"] = None):
         self.region: Range = region
         self.names: set[str] = set(source_span.names) if source_span else set()
@@ -512,8 +540,8 @@ class PolytypePaths:
         self.max_ploidy = max_ploidy
         self.haplotypes = [HaplotypePaths(ref_nodes) for _ in range(max_ploidy)]
 
-    def add_genotype(self, variant: Variant, genotype: pysam.VariantRecordSample, overlap: VariantOverlap, max_gt_permutations: int = 2):
-        ref_nodes = self.paths[variant_path_name(variant.vg_variant_id, 0)]
+    def add_genotype(self, variant: Variant, genotype: pysam.VariantRecordSample, overlap: VariantOverlap, path_prefix: str = "alt", max_gt_permutations: int = 2):
+        ref_nodes = self.paths[variant_path_name(variant.vg_variant_id, 0, prefix=path_prefix)]
         indices = genotype.allele_indices
 
         # A variant can be explicitly globally or locally phased, or implicity phased if it has a overlapping '*' 'llele
@@ -539,7 +567,7 @@ class PolytypePaths:
                     if VariantOverlap.STAR_ALLELE in overlap and variant.allele(index) == "*":
                         continue  # Don't apply explicity overlapped "*"" allele
                     if index != -1:
-                        alt_path = variant_path_name(variant.vg_variant_id, index)
+                        alt_path = variant_path_name(variant.vg_variant_id, index, prefix=path_prefix)
                         local_haplotypes[i].apply_allele(ref_nodes, phase, overlap, alt_nodes=self.paths[alt_path] if index > 0 else None, variant=variant)
                     else:
                         msg = f"Haploid genotypes are currently not supported ({variant.reference_region})"
@@ -564,8 +592,8 @@ class PolytypePaths:
         return paths
 
 
-def variant_path_name(variant_id: str, allele: int) -> str:
-    return f"_alt_{variant_id}_{allele}"
+def variant_path_name(variant_id: str, allele: int, prefix: str="alt") -> str:
+    return f"_{prefix}_{variant_id}_{allele}"
 
 
 def _nesting_reference_region_cmp(a: tuple[Variant, pysam.VariantRecord], b: tuple[Variant, pysam.VariantRecord]) -> int:
@@ -632,6 +660,7 @@ def vcf_to_paths(gfa_path: str, vcf_path: str, region: Range):
 
 
 def add_haplotypes_to_gfa(gfa_path: str, vcf_path: str, region: Range):
+    """Append haplotype paths from vcf_path in region to gfa_path"""
     with open(gfa_path, "a") as gfa_file:
         for name, strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
             print("P", name, ",".join(f"{n}{strand}" for n in nodes), "*", sep="\t", file=gfa_file)

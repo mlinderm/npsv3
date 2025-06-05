@@ -391,8 +391,8 @@ class TestGraphConstructor:
         )
         #construct.to_gfa(B37_REF_FASTA)
 
-        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,5,6,7]
-        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,7]
+        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,6,7,8]
+        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,8]
 
 
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
@@ -409,12 +409,12 @@ class TestGraphConstructor:
         )
         #construct.to_gfa(B37_REF_FASTA)
 
-        # This VCF does not explicity or implicity phase the * allee, as a result a direct translation 
+        # This VCF does not explicity or implicity phase the * allee, as a result a direct translation
         # produces incorrect paths compared the true diplotype. We can however try other permutations of
         # the unphased geneotype to find a consistent set of paths.
 
-        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,5,6]
-        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,6]
+        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,4,7,8]
+        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,8]
 
 
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
@@ -430,14 +430,14 @@ class TestGraphConstructor:
 10	62230225	.	T	A,*	.	PASS	.	GT	1/2
 """
         )
-        construct.to_gfa(B37_REF_FASTA)
+        #construct.to_gfa(B37_REF_FASTA)
 
         # The second variant doesn't actually need a star, and should instead be locally phased. But is not.
-        # Here the star indicates overlap w.r.t. to the padding base, not the actual variant. As such we don't
-        # detect the required phasing and produce incorrect paths.
+        # Here the star indicates overlap when including the padding base, not just the actual variant. To
+        # detect a consistent phasing we need to include the padding base if relevant.
 
-        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,2,5,7]
-        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,6,7]
+        assert construct.paths.get(f"HG002#0#{region.contig}#0") == [1,4,9]
+        assert construct.paths.get(f"HG002#1#{region.contig}#0") == [1,3,8,9]
 
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
