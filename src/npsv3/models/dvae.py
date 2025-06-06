@@ -280,6 +280,7 @@ class DVAE(L.LightningModule):
         super().__init__()
         self.save_hyperparameters(ignore=["encoder", "quantizer", "decoder"])
 
+        # This is where we need to change stuff
         self.encoder = encoder
         self.quantizer = quantizer
         self.decoder = decoder
@@ -333,7 +334,7 @@ class Denormalize(transforms.Transform):
         self.std = list(std)
         self.inplace = inplace
 
-    def _transform(self, image: Any, params: dict[str, Any]) -> Any:
+    def transform(self, image: Any, params: dict[str, Any]) -> Any:
         if type(image) == torch.Tensor:
             mean = torch.as_tensor(self.mean, dtype=image.dtype, device=image.device)
             std = torch.as_tensor(self.std, dtype=image.dtype, device=image.device)
