@@ -6,6 +6,9 @@ outputs/
 tmp*
 lightning_logs/
 CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
