@@ -5,6 +5,7 @@ tests/results
 outputs/
 tmp*
 lightning_logs/
+CMakeFiles/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
