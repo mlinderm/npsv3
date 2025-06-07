@@ -1,0 +1,18 @@
+hydra:
+  job:
+    chdir: true # Mimic Hydra <= 1.1 by changing the working directory to the output directory
+  help:
+    template: |-
+      == ${hydra.help.app_name} ==
+      Helper program for converting NPSV2 TFRecord files to NPSV3 webdataset files
+
+      == Config ==
+      Override anything in the config (e.g., foo.bar=value), specifically `input` and `output` paths 
+      -------
+      $CONFIG
+      
+      ${hydra.help.footer}      
+
+input: ???
+output: ???
+threads: 1
