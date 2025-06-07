@@ -2,7 +2,6 @@ import itertools
 import operator
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,7 +10,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from shlex import quote
-from typing import Union
 
 import odgi
 import pysam
@@ -22,7 +20,7 @@ from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
 from npsv3.variant import Variant
 
-HandleOrIntType = Union[odgi.handle, int]
+HandleOrIntType = odgi.handle|int
 
 # Length of SHA1 hex digest used for variants IDs by vg
 VARIANT_ID_LENGTH = 40
@@ -36,33 +34,17 @@ class Graph:
     def __init__(self, gfa_path: str, region: Range):
         with tempfile.TemporaryDirectory() as temp_dir:
             og_path = os.path.join(temp_dir, "graph.og")
+
             # Build graph with odgi executable
             build_command = f"odgi build --sort --optimize -g {quote(gfa_path)} -o {quote(og_path)}"
-            try:
-                subprocess.run(build_command, shell=True, check=True)
-            except subprocess.CalledProcessError:
-                #shutil.copy(gfa_path, "graph.gfa")
-                raise
+            subprocess.run(build_command, shell=True, check=True)
 
             # Load graph into Python object
             self._graph = odgi.graph()
             self._graph.load(og_path)
+            assert self._graph.is_optimized(), "Graph node space is not compacted"
 
         self.region = region
-
-    def _sort_and_compact(self):
-        """Topologically order nodes and compact ids into [1-max node id] space.
-
-        After this operation, nodes ids should occupy a contiguous range and
-        iterating through the nodes with `for_each_handle` will be in topological order.
-        """
-        self._graph.apply_ordering(self._graph.topological_order(), compact_ids=True)
-        # Since we change the node ids, we need to reset any cached node sets
-        # (adapted from https://stackoverflow.com/a/73131568)
-        cls = self.__class__
-        attrs = [a for a in dir(self) if isinstance(getattr(cls, a, cls), cached_property) and a in self.__dict__]
-        for a in attrs:
-            delattr(self, a)
 
     def _is_bubble(self) -> bool:
         """Return true if the graph forms a bubble, i.e., has a single source and sink node.

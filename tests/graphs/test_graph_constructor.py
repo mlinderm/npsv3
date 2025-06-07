@@ -350,7 +350,7 @@ class TestGraphConstructor:
         region = Range("18",75991730, 75992484)
         construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
-##contig=<ID=18,length=78077248> 
+##contig=<ID=18,length=78077248>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002

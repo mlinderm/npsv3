@@ -50,7 +50,7 @@ class GraphConstructor:
       a het. SV DEL. These are reported 'Found non-reference allele overlapped by another non-reference allele'. These
       are a frequent source of the above warnings.
     """
-    def __init__(self, region: Range, graph_vcf: str, haplotype_vcf: Sequence[str] | None = None):
+    def __init__(self, region: Range, graph_vcf: str):
         """Construct a graph from graph_vcf variants in region. Assumes VCF is indexed and in sorted order."""
         self.region = region
 
