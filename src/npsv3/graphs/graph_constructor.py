@@ -42,7 +42,7 @@ class GraphConstructor:
 
     VCF features supported:
     * Global phasing (|) and local phasing (|) with a PS field.
-    * Star alleles and overlapping alleles more generally. If genotypes are not explicity phases, we try to find
+    * Star alleles and alleles overlapped by a deletion more generally. If genotypes are not explicity phased, we try to find
       a consistent phasing of the alleles in the overlapping variants.
 
     Known limitations:

@@ -109,7 +109,7 @@ class TestGraphConstructionFromVCF:
     # "implicit" path that does not include the alternate allele
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
-    @pytest.mark.parametrize("region,background_vcf,inference_vcf,exp_haplotypes", [
+    @pytest.mark.parametrize(("region", "background_vcf", "inference_vcf", "exp_haplotypes"), [
         (Range("chr1", 8977700, 8977700), "chr1_8976700_8978700.vcf.gz", "chr1_8976700_8978700.sv.vcf.gz", (2,2)),
         (Range("chr1", 41824764, 41824818), "chr1_41823764_41825818.vcf.gz", "chr1_41823764_41825818.sv.vcf.gz", (3,3)),
     ])
