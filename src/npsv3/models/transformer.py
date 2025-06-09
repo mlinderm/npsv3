@@ -1,118 +1,18 @@
+import io
+import os
+from collections.abc import Sequence
+from typing import Any
+
+import hydra
 import lightning as L
 import torch
 import torch.nn.functional as F
 import webdataset as wds
 from torch import nn
 from torchvision.transforms import v2 as transforms
-from transformers import AutoImageProcessor, ViTForMaskedImageModeling, AdamW
-
-# class Residual(nn.Module):
-#     def __init__(self, in_channels, num_hiddens, num_residual_hiddens):
-#         super(Residual, self).__init__()
-#         self._block = nn.Sequential(
-#             nn.ReLU(True),
-#             nn.Conv2d(
-#                 in_channels=in_channels,
-#                 out_channels=num_residual_hiddens,
-#                 kernel_size=3,
-#                 stride=1,
-#                 padding=1,
-#                 bias=False,
-#             ),
-#             nn.ReLU(True),
-#             nn.Conv2d(in_channels=num_residual_hiddens, out_channels=num_hiddens, kernel_size=1, stride=1, bias=False),
-#         )
-
-#     def forward(self, x):
-#         return x + self._block(x)
-
-# class ResidualStack(nn.Module):
-#     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
-#         super(ResidualStack, self).__init__()
-#         self._layers = nn.ModuleList(
-#             [Residual(in_channels, num_hiddens, num_residual_hiddens) for _ in range(num_residual_layers)]
-#         )
-
-#     def forward(self, x):
-#         for layer in self._layers:
-#             x = layer(x)
-#         return F.relu(x)
-
-# class Encoder(nn.Module):
-#     def __init__(
-#         self,
-#         in_channels,
-#         num_hiddens,
-#         num_residual_layers,
-#         num_residual_hiddens,
-#         embedding_dim,
-#         strides=[4, 4],
-#         padding=[0, 0],
-#     ):
-#         super(Encoder, self).__init__()
-#         # Here is the 16x downsampling on each dimension. Alternate approaches seem to interleave downsampling with residual blocks
-#         # Could we use different downsampling factors for height and width?
-#         self._conv_1 = nn.Conv2d(
-#             in_channels=in_channels, out_channels=num_hiddens // 2, kernel_size=4, stride=strides[0], padding=padding[0]
-#         )
-#         self._conv_2 = nn.Conv2d(
-#             in_channels=num_hiddens // 2, out_channels=num_hiddens, kernel_size=4, stride=strides[1], padding=padding[1]
-#         )
-#         self._conv_3 = nn.Conv2d(in_channels=num_hiddens, out_channels=num_hiddens, kernel_size=3, stride=1, padding=1)
-#         self._residual_stack = ResidualStack(
-#             in_channels=num_hiddens,
-#             num_hiddens=num_hiddens,
-#             num_residual_layers=num_residual_layers,
-#             num_residual_hiddens=num_residual_hiddens,
-#         )
-
-#         self._pre_quant_conv = nn.Conv2d(in_channels=num_hiddens, out_channels=embedding_dim, kernel_size=1, stride=1)
-
-#     def forward(self, inputs):
-#         x = F.relu(self._conv_1(inputs))
-#         x = F.relu(self._conv_2(x))
-#         x = self._conv_3(x)
-#         x = self._residual_stack(x)
-
-#         return self._pre_quant_conv(x)
-
-
-# class Decoder(nn.Module):
-#     def __init__(
-#         self,
-#         in_channels,
-#         num_hiddens,
-#         num_residual_layers,
-#         num_residual_hiddens,
-#         out_channels,
-#         strides=[4, 4],
-#         padding=[0, 0],
-#     ):
-#         super(Decoder, self).__init__()
-#         self._conv_1 = nn.Conv2d(in_channels=in_channels, out_channels=num_hiddens, kernel_size=3, stride=1, padding=1)
-#         self._residual_stack = ResidualStack(
-#             in_channels=num_hiddens,
-#             num_hiddens=num_hiddens,
-#             num_residual_layers=num_residual_layers,
-#             num_residual_hiddens=num_residual_hiddens,
-#         )
-#         self._conv_trans_1 = nn.ConvTranspose2d(
-#             in_channels=num_hiddens, out_channels=num_hiddens // 2, kernel_size=4, stride=strides[1], padding=padding[1]
-#         )
-#         self._conv_trans_2 = nn.ConvTranspose2d(
-#             in_channels=num_hiddens // 2,
-#             out_channels=out_channels,
-#             kernel_size=4,
-#             stride=strides[0],
-#             padding=padding[0],
-#         )
-
-#     def forward(self, inputs):
-#         x = self._conv_1(inputs)
-#         x = self._residual_stack(x)
-#         x = F.relu(self._conv_trans_1(x))
-#         return self._conv_trans_2(x)
-
+from transformers import AutoImageProcessor, ViTForMaskedImageModeling, ViTConfig
+from npsv3.models.dvae import Denormalize
+    
 class RealImageDataModule(L.LightningDataModule):
     def __init__(
         self,
@@ -133,14 +33,22 @@ class RealImageDataModule(L.LightningDataModule):
         self.predict_urls = predict_urls
         self.test_urls = test_urls
 
+
         self.transforms = transforms.Compose(
             [
                 transforms.ToImage(),
-                # transforms.Resize(size=(224, 224)),
+                transforms.Resize(size=(224, 224)),
                 transforms.ToDtype(torch.float32, scale=True),  # Normalize expects float input
                 transforms.Normalize(mean=[0.5] * num_channels, std=[0.5] * num_channels),
             ]
         )
+
+
+
+        self.configuration = ViTConfig(num_channels=num_channels)
+        #self.model = ViTForMaskedImageModeling(configuration)
+
+        self.image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
 
     def make_loader(self, urls, mode="train"):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
@@ -151,12 +59,21 @@ class RealImageDataModule(L.LightningDataModule):
 
         def to_tuple(data):
             # Handle missing fields (https://webdataset.github.io/webdataset/FAQ/, issue #246)
-            return data["__key__"], data["image.npy.gz"], data.get("region.txt", data["__key__"])
+            image = data["image.npy.gz"]
+            
+            # input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False
+            pixel_values = torch.squeeze(self.image_processor(images=self.transforms(image), return_tensors="pt", input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False).pixel_values, 0)
+
+            # random masking
+            num_patches = (self.configuration.image_size // self.configuration.patch_size) ** 2
+            bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
+            
+            return pixel_values, bool_masked_pos, data["__key__"], data.get("region.txt", data["__key__"])
 
         dataset = (
             dataset.decode()
             .map(to_tuple)
-            .map_tuple(wds.utils.identity, self.transforms)
+            #.map_tuple(wds.utils.identity, self.transforms)
             .batched(self.hparams.batch_size, partial=mode != "train")
         )
 
@@ -178,24 +95,83 @@ class RealImageDataModule(L.LightningDataModule):
 
     def predict_dataloader(self):
         return self.make_loader(self.predict_urls, mode="predict")
-    
-class MiM(L.LightningModule):
-    def __init__(self, model_name: str = "google/vit-base-patch16-224-in21k") -> None:
+
+
+
+class Transformer(L.LightningModule):
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        model_name="google/vit-base-patch16-224-in21k",
+        num_channels = 7,
+    ):
         super().__init__()
         self.save_hyperparameters()
-        self.model_name = model_name
-        self.image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-        self.model = ViTForMaskedImageModeling.from_pretrained("google/vit-base-patch16-224-in21k")
-        self.learning_rate = self.hparams.learning_rate
+        configuration = ViTConfig(num_channels=num_channels)
 
-    def forward(self, image, num_patches):
-        pixel_values = self.image_processor(images=image, return_tensors="pt").pixel_values
-        return self.model(pixel_values)
+        
+        self.model = ViTForMaskedImageModeling(configuration)
 
-    def training_step(self, batch, batch_idx):
-        input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        loss, logits = self(input_ids, attention_mask, labels)
+    def forward(self, pixel_values, bool_masked_pos):
+        outputs = self.model(pixel_values, bool_masked_pos=bool_masked_pos)
+        return outputs
+    
+    def training_step(self, batch):
+        pixel_values, bool_masked_pos, *_ = batch
+        out = self(pixel_values, bool_masked_pos)
+        loss = out.loss
         self.log('train_loss', loss, prog_bar=True)
         return loss
+    
+    def configure_optimizers(self):
+        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        return { "optimizer": optimizer }
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        pixel_values, bool_masked_pos, *_ = batch
+        return self(pixel_values, bool_masked_pos)
+    
+
+
+class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
+    def __init__(self, output_dir: str, num_channels=3):
+        pattern = os.path.join(output_dir, "reconstructions-%04d.tar.gz")
+        self._writer = wds.ShardWriter(pattern, maxsize=500e6)
+        self.denormalize = transforms.Compose(
+            [
+                Denormalize(mean=[0.5] * num_channels, std=[0.5] * num_channels),
+                transforms.ToDtype(torch.uint8, scale=True),
+            ]
+        )
+
+    def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
+        images, _, keys, regions = batch
+        #print(outputs)
+        #encodings, recon_images = outputs
+        for key, real_image, recon_image, region in zip(keys, images, outputs.reconstruction, regions, strict=False):
+            sample = {
+                "__key__": key,
+                "image.npy": self.denormalize(real_image).permute(1, 2, 0).cpu().numpy(),
+                "recon_image.npy": self.denormalize(recon_image).permute(1, 2, 0).cpu().numpy(),
+                "region.txt": region,
+            }
+            self._writer.write(sample)
+
+    def on_predict_end(self, trainer, model):
+        self._writer.close()
+
+
+def reconstruct(cfg, output_dir, **kw_args):
+    dm = hydra.utils.instantiate(cfg.data)
+
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+    model = model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+    )
+
+    trainer = L.Trainer(
+        callbacks=[ReconstructionToWebDatasetCallback(output_dir, len(cfg.pileup.image_channels))], **kw_args
+    )
+    trainer.predict(model, dm)
+
+    
