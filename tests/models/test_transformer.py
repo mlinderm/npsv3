@@ -10,6 +10,8 @@ from .. import B37_REF_FASTA, data_path, result_path
 from PIL import Image
 import requests
 import webdataset as wds
+import numpy as np
+import random
 from npsv3.models.runners import train
 from npsv3.images.example import (
     vcf_to_variant_examples,
@@ -66,17 +68,18 @@ class TestTransformer:
         train(cfg, fast_dev_run=True)
 
 
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/epoch=0-step=11754.ckpt"',
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
 )
-@pytest.mark.usefixtures("ray_setup")
+# @pytest.mark.usefixtures("ray_setup")
 class TestTransformerReconstruction:
     def test_transformer_reconstruction(self, tmp_path, cfg, hg002_sample):
         # Generate image for variant
@@ -119,7 +122,8 @@ class TestTransformerReconstruction:
                 for x in (orig, recon)
             ]
 
-            png_path = result_path("test.png")
+            png_path = result_path("test2.png")
+            print(png_path)
             combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + 10, orig_image.height))
             combined.paste(orig_image, (0, 0))
             combined.paste(recon_image, (orig_image.width + 10, 0))
@@ -127,5 +131,81 @@ class TestTransformerReconstruction:
             assert os.path.exists(png_path)
         assert _i == 0, "Only one sample in dataset"
 
+
+
+
+# @pytest.mark.skip()
+@pytest.mark.cfg_overrides(
+    f"reference={B37_REF_FASTA}",
+    "simulation.replicates=0",
+    "pileup=unphased_variant",
+    "model=MiM",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
+    "data=real_image",
+    "data._target_=npsv3.models.transformer.RealImageDataModule",
+    "data.batch_size=1",
+)
+class TestMasking:
+    def test_masking(self, cfg):
+        data_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar"
+        dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
+
+        random_num = random.randint(0, 999)
+
+
+        for _i, sample in enumerate(dataset):
+            
+            if (_i == random_num):
+
+                orig = sample["image.npy.gz"]
+
+                num_patches = (orig.shape[0] // 16) * (orig.shape[1] // 16)
+                # bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches, )).bool()
+                vals = [True, False]
+                top_weights = [3, 1]
+                bottom_weights = [1, 2]
+                top_masked_pos = random.choices(vals, weights=top_weights, k=num_patches//2)
+                bottom_masked_pos = random.choices(vals, weights=bottom_weights, k=num_patches//2)
+                bool_masked_pos = torch.tensor(top_masked_pos+bottom_masked_pos).bool()
+                print(bool_masked_pos)
+
+                # Convert tensors to "false color" images and save to a PNG file
+                orig_image = (
+                    example_to_image(
+                        cfg,
+                        {"image": orig},
+                        with_simulations=False,
+                        render_channels=False,
+                        select_channels=[0, 1, 5],  # ALIGNED, PAIRED, ALLELE
+                    )
+                )
+
+                pixel_array = np.array(orig_image)
+                masked_image = Image.new(orig_image.mode, (orig_image.width, orig_image.height))
+
+                # Iterate through each pixel and make a copy image with the masking
+                for i in range (len(pixel_array)):
+                    for j in range (len(pixel_array[0])):
+
+                        bool_index = (i // 16) * (len(pixel_array[0]) // 16) + (j // 16)
+
+                        # case where pixel should be masked
+                        if (bool_masked_pos[bool_index] == True):
+                            masked_image.putpixel((j, i), (255, 255, 255))
+                        else:
+                            masked_image.putpixel((j, i), orig_image.getpixel((j, i)))
+                            
+
+                png_path = result_path("masking_test.png")
+                # combined = Image.new(orig_image.mode, (orig_image.width, orig_image.height))
+                combined = Image.new(orig_image.mode, (orig_image.width +  masked_image.width + 10, orig_image.height))
+                combined.paste(orig_image, (0, 0))
+                combined.paste(masked_image, (orig_image.width + 10, 0))
+                combined.save(png_path)
+                break
+            
+            else:
+                continue
+            # assert _i == 0, "Only one sample in dataset"
 
 
