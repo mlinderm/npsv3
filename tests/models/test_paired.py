@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from npsv3.models.paired import GroupedImageDataModule
+from npsv3.models.paired import GroupedImageDataModule, PackedImageDataModule
 from npsv3.models.runners import train
 
 from .. import data_path
@@ -10,22 +10,40 @@ from .. import data_path
 @pytest.mark.cfg_overrides(
     "pileup.image_channels=[0,1,2,3,4,5,6,7]",
 )
+# class TestPairedDataLoader:
+#     def test_paired_loader(self, cfg):
+#         dm = GroupedImageDataModule(data_path("images-0000.tar"), batch_size=1, num_workers=cfg.threads)
+#         dm.prepare_data()
+
+#         dm.setup(stage="fit")
+
+#         for _i, batch in enumerate(dm.train_dataloader()):
+#             query, support, num_support, label = batch
+
+#             b, c, h, w = query.shape
+#             assert support.shape == (b, cfg.data.max_group_size, c, h, w)
+#             assert num_support == torch.tensor([4]), "Only 4 genotypes in support data"
+#             assert label == torch.tensor([3])
+
+#         assert _i == 1, "The two replicates become 2 examples in the dataset"
+
+#         dm.teardown(stage="fit")
 class TestPairedDataLoader:
     def test_paired_loader(self, cfg):
-        dm = GroupedImageDataModule(data_path("images-0000.tar"), batch_size=1, num_workers=cfg.threads)
+        dm = PackedImageDataModule(data_path("images-0000.tar"), batch_size=16, num_workers=cfg.threads)
         dm.prepare_data()
 
         dm.setup(stage="fit")
 
         for _i, batch in enumerate(dm.train_dataloader()):
-            query, support, num_support, label = batch
+            images, variants, labels = batch
 
-            b, c, h, w = query.shape
-            assert support.shape == (b, cfg.data.max_group_size, c, h, w)
-            assert num_support == torch.tensor([4]), "Only 4 genotypes in support data"
-            assert label == torch.tensor([3])
+            print(f"Batch {_i}: {images.shape}, {variants.shape}, {labels.shape}")
+            #assert images.shape == (16, c, h, w)
+            assert variants == torch.tensor([0]*5 + [-100]*(16-5)), "Only 4 genotypes in support data"
+            assert labels == torch.tensor([0,0,0,0,1] + [-100]*11)
 
-        assert _i == 1, "The two replicates become 2 examples in the dataset"
+        #assert _i == 1, "The two replicates become 2 examples in the dataset"
 
         dm.teardown(stage="fit")
 

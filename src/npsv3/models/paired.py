@@ -28,6 +28,126 @@ def transform_images(images: np.ndarray) -> torch.Tensor:
     )
 
 
+import torch 
+from collections.abc import Generator, Iterable
+
+
+R = torch.tensor([[2,3], [2,3]])
+S = torch.tensor([[4,5], [4,5]])
+R2 = torch.tensor([[6,7], [6,7]])
+S2 = torch.tensor([[8,9], [8,9]])
+
+for i in R:
+    print(i)
+def _pack_and_pad_support(data: Iterable[tuple], batch_size = 16, padding_value=0) -> Generator[tuple, None, None]:
+    """packs real and support images into a batch with padding.
+
+    Args:
+        data (Iterable[tuple]): Iterable of (query, support, label) tuples.
+        batch_size (int, optional): Maximum images in output batch. Defaults to 16.
+        padding_value (int, optional): Padding value. Defaults to 0.
+
+    Yields:
+        Generator[tuple, None, None]: (Images list, variant_groups, labels ) tuples.
+    """
+    print("Packing and padding support images...")
+    images = [] #Images list to hold the images in the current batch
+
+    #Variants and labels lists to hold the metadata in the current batch
+    variants = []
+    labels = [] 
+
+    variant = 0 #Variant counter to keep track of the current variant index
+    num_images = 0
+    for sample in data:
+        query, support, label, *_ = sample
+        num_genotypes, num_replicates, *image_size = support.shape
+        assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
+
+        remaining_space = batch_size - num_images
+        if num_genotypes * num_replicates + 1  > remaining_space:
+            # If the current sample doesn't fit in the batch, yield the current batch.
+            
+            #Cat the images list into a tensor and add padding
+            images_tensor = torch.cat(images, dim=0)
+            print("Pre-padding shape:", images_tensor.shape)
+            padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
+            images_tensor  =  torch.nn.functional.pad(images_tensor, padding, mode='constant', value=padding_value)
+            
+            #Add padding to the variants and labels lists
+            variants += [-100] * (remaining_space)
+            labels += [-100] * (remaining_space)
+
+            final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
+            print("FINAL SHAPE:", final.shape)
+
+
+            #Clear the images list and the META data lists for the next batch
+            images.clear()
+            variants.clear()
+            labels.clear()
+
+            #Yield the current batch with padding
+            yield final
+
+        else:     
+            #Else, if the current sample fits in the batch, append it to the images list
+
+            #Append the unsqueezed query image to the images list
+            images.append(query.unsqueeze(0))
+            print("query shape:", images[-1].shape)
+            labels.append(0)  # Assuming query is always negative (label 0)
+
+            #Append the respahed support images to the images list
+            images.append(support.reshape(-1, *image_size))
+            num_images += (num_genotypes * num_replicates + 1)
+
+            #META DATA
+            variants += [variant] * (num_genotypes * num_replicates + 1)
+            variant += 1 #Increment the variant counter from foor loop
+
+            #labels G==Label(?) how do I know which support image is positive?
+            genotype_list = list(range(0, num_genotypes))
+            for genotype in genotype_list:
+                if genotype == label:
+                    labels += [1] * num_replicates
+                else:
+                    labels += [0] * num_replicates
+
+    #If the current sample is the last one, yield the current batch.
+    if len(images) != 0:
+        #Cat the images list into a tensor and add padding
+        images_tensor = torch.cat(images, dim=0)
+        print("Pre-padding shape:", images_tensor.shape)
+        padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
+        images_tensor  =  torch.nn.functional.pad(images_tensor, padding, mode='constant', value=padding_value)
+        
+        #Add padding to the variants and labels lists
+        variants = variants + [-100] * (remaining_space)
+        labels = labels + [-100] * (remaining_space)
+        
+        final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
+        print("IMAGES SHAPE:", images_tensor.shape)
+        print("VARIANTS SHAPE:", torch.tensor(variants).shape)
+        print("LABELS SHAPE:", torch.tensor(labels).shape)
+
+
+        #Clear the images list and the META data lists for the next batch
+        images.clear()
+        variants.clear()
+        labels.clear()
+
+        #Yield the current batch with padding
+
+        yield final
+
+    print("Packing and padding support images done.")
+
+
+pack_and_pad_support= wds.pipelinefilter(_pack_and_pad_support)
+
+
+
 def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value=0) -> Generator[tuple, None, None]:
     """Split support images into groups of at most `max_genotypes` images, padding with `padding_value`.
 
@@ -178,6 +298,77 @@ class GroupedImageDataModule(L.LightningDataModule):
             .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls", "__key__")
             .map_tuple(transform_images, transform_images, wds.utils.identity, wds.utils.identity)
             .compose(wrap_and_pad_support(max_genotypes=self.hparams.max_group_size, padding_value=0))
+            .batched(self.hparams.batch_size, partial=True)
+        )
+
+        return wds.WebLoader(dataset, batch_size=None, shuffle=False, num_workers=self.hparams.num_workers)
+    
+
+class PackedImageDataModule(L.LightningDataModule):
+    def __init__(self, train_urls=None, validate_urls=None, predict_urls=None, test_urls=None, batch_size=16, num_workers=1, max_group_size=6, shuffle_size=1000):
+        super().__init__()
+        self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
+
+        self.train_urls = train_urls
+        self.validate_urls = validate_urls
+        self.predict_urls = predict_urls
+        self.test_urls = test_urls
+
+    def make_loader(self, urls, mode="train"):
+        # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
+
+        dataset = wds.WebDataset(urls, shardshuffle=100 if mode == "train" else False)
+        if mode == "train":
+            dataset = dataset.shuffle(self.hparams.shuffle_size)
+        dataset = (
+            dataset
+            .decode()
+            .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls")
+            .map_tuple(transform_images, transform_images, wds.utils.identity)
+            .compose(pack_and_pad_support(batch_size=16, padding_value=0))
+            #.batched(self.hparams.batch_size, partial=False)
+        )
+
+        # We unbatch, shuffle, and rebatch to mix samples from different workers as shown in webdataset examples
+        loader = (
+            wds.WebLoader(
+                dataset,
+                batch_size=None,
+                shuffle=False,
+                num_workers=self.hparams.num_workers,
+            )
+            #.unbatched()
+        )
+        # if mode == "train":
+        #     loader = loader.shuffle(self.hparams.shuffle_size)
+        # loader = loader.batched(self.hparams.batch_size)
+
+        return loader
+
+    def train_dataloader(self):
+        return self.make_loader(self.train_urls, mode="train")
+
+    def val_dataloader(self):
+        # Make sure to return a valid dataloader, even if validation data is not available since
+        # Lightning still calls this method with zero validation steps
+        if self.validate_urls:
+            return self.make_loader(self.validate_urls or [], mode="val")
+        return data.DataLoader(EmptyDataset())
+
+    def test_dataloader(self):
+        # Make sure to return a valid dataloader, even if validation data is not available since
+        # Lightning still calls this method with zero validation steps
+        if self.test_urls:
+            return self.make_loader(self.test_urls or [], mode="test")
+        return data.DataLoader(EmptyDataset())
+
+    def predict_dataloader(self):
+        dataset = (
+            wds.WebDataset(self.predict_urls, shardshuffle=False)
+            .decode()
+            .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls", "__key__")
+            .map_tuple(transform_images, transform_images, wds.utils.identity, wds.utils.identity)
+            .compose(pack_and_pad_support(batch_size=16, padding_value=0))
             .batched(self.hparams.batch_size, partial=True)
         )
 
