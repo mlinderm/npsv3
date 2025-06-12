@@ -27,18 +27,6 @@ def transform_images(images: np.ndarray) -> torch.Tensor:
         scale=True,
     )
 
-
-import torch 
-from collections.abc import Generator, Iterable
-
-
-R = torch.tensor([[2,3], [2,3]])
-S = torch.tensor([[4,5], [4,5]])
-R2 = torch.tensor([[6,7], [6,7]])
-S2 = torch.tensor([[8,9], [8,9]])
-
-for i in R:
-    print(i)
 def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value=0) -> Generator[tuple, None, None]:
     """packs real and support images into a batch with padding.
 
