@@ -30,7 +30,8 @@ from .. import data_path
 #         dm.teardown(stage="fit")
 class TestPairedDataLoader:
     def test_paired_loader(self, cfg):
-        dm = PackedImageDataModule(data_path("images-0000.tar"), batch_size=16, num_workers=cfg.threads)
+        batch_val = 18
+        dm = PackedImageDataModule(data_path("images-0000.tar"), batch_size= batch_val, num_workers=cfg.threads)
         dm.prepare_data()
 
         dm.setup(stage="fit")
@@ -38,10 +39,10 @@ class TestPairedDataLoader:
         for _i, batch in enumerate(dm.train_dataloader()):
             images, variants, labels = batch
 
-            print(f"Batch {_i}: {images.shape}, {variants.shape}, {labels.shape}")
+            print(f"Batch: {images.shape}, {variants.shape}, {labels.shape}")
             #assert images.shape == (16, c, h, w)
-            assert variants == torch.tensor([0]*5 + [-100]*(16-5)), "Only 4 genotypes in support data"
-            assert labels == torch.tensor([0,0,0,0,1] + [-100]*11)
+            assert torch.equal(variants, torch.tensor([0]*9 + [-100]*(batch_val-9))), "Wrong number of variants in the batch"
+            assert torch.equal(labels, torch.tensor([0,0,0,0,0,0,0,1,1] + [-100]*(batch_val-9))), "Wrong number of Labels in the batch" #Two replicates of each genotype, last genotype is positive
 
         #assert _i == 1, "The two replicates become 2 examples in the dataset"
 
