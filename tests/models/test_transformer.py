@@ -5,9 +5,10 @@ import torch
 import pytest
 import lightning as L
 
-from npsv3.models.transformer import RealImageDataModule, Transformer
+from npsv3.models.transformer import RealImageDataModule, Classifier, assess_accuracy, reconstruct
 from .. import B37_REF_FASTA, data_path, result_path
 from PIL import Image
+import random
 import requests
 import webdataset as wds
 from npsv3.models.runners import train
@@ -19,7 +20,6 @@ from npsv3.images.example import (
 from omegaconf import OmegaConf
 
 from npsv3.models.dvae import EncodingToWebDatasetCallback
-from npsv3.models.transformer import RealImageDataModule, reconstruct
 
 import hydra
 
@@ -52,7 +52,7 @@ class TestRealImageDataLoader:
 
         dm.teardown(stage="fit")
 
-class TestTransformer:
+class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=MiM",
@@ -62,16 +62,100 @@ class TestTransformer:
         "data.batch_size=2",
         "trainer=transformer",
     )
-    def test_transformer(self, cfg):
+    def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
+@pytest.mark.skip()
+class TestClassifier:
+    @pytest.mark.cfg_overrides(
+        "pileup=unphased_variant",
+        "model=classifier",
+        "data=real_image",
+        "data._target_=npsv3.models.transformer.RealImageDataModule",
+        f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
+        "data.batch_size=2",
+        "trainer=transformer",
+        "pretrained_path=classifier"
+    )
+    def test_classifier(self, cfg):
+        train(cfg, fast_dev_run=True)
 
+# @pytest.mark.skip()
+class TestAccuracy:
+    @pytest.mark.cfg_overrides(
+        "pileup=unphased_variant",
+        "model=classifier",
+        "data=real_image",
+        "data._target_=npsv3.models.transformer.RealImageDataModule",
+        "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
+        "data.batch_size=1",
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=classifier,pileup=unphased_variant,trainer.max_epochs=2/epoch=1-step=20370.ckpt"'
+    )
+    def test_accuracy(self, tmp_path, cfg):
+        #Likely going to get rid of this
+        output_dir = str(tmp_path / "shards")
+        # data_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar"
+        data_path = "/home/cachang/npsv3/tests/data/unphased_variant_images-0000.tar"
+        dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
+        for _i, sample in enumerate(dataset):
+            label = sample["label.cls"]
+            # print("\nlabel:",label)
+            break
+
+        assess_accuracy(cfg, output_dir)
+
+@pytest.mark.skip()
+@pytest.mark.cfg_overrides(
+    f"reference={B37_REF_FASTA}",
+    "simulation.replicates=0",
+    "pileup=unphased_variant",
+    "data._target_=npsv3.models.transformer.RealImageDataModule",
+    "data.batch_size=1",
+)
+class TestDisplayMaskedImage:
+    def test_display_masked_image(self, cfg):
+        data_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar"
+        dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
+        image_idx = random.randint(0, 1000)
+        for _i, sample in enumerate(dataset):
+            if (_i == image_idx):
+                # print("\nlength of dataset: ",enumerate(dataset))
+                orig = sample["image.npy.gz"]
+
+                # print("\nshape: ",orig.shape)
+                num_patches = (orig.shape[0] // 16) * (orig.shape[1] // 16)
+                bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
+                # print(bool_masked_pos)
+
+                # Convert tensors to "false color" images and save to a PNG file
+                [orig_image] = [
+                    example_to_image(
+                        cfg,
+                        {"image": orig},
+                        with_simulations=False,
+                        render_channels=False,
+                        select_channels=[0, 1, 5],  # ALIGNED, PAIRED, ALLELE
+                    )
+                    # for x in (orig)
+                ]
+
+                recon_image = orig_image
+
+                png_path = result_path("test.png")
+                combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + 10, orig_image.height))
+                combined.paste(orig_image, (0, 0))
+                combined.paste(recon_image, (orig_image.width + 10, 0))
+                combined.save(png_path)
+            else: continue
+
+
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/epoch=0-step=11754.ckpt"',
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -80,21 +164,21 @@ class TestTransformer:
 class TestTransformerReconstruction:
     def test_transformer_reconstruction(self, tmp_path, cfg, hg002_sample):
         # Generate image for variant
-        output_dir = str(tmp_path) # / "shards")
-        # vcf_to_variant_examples(
-        #     cfg,
-        #     data_path("12_22127565_22132387.bam"),
-        #     hg002_sample,
-        #     data_path("12_22129565_22130387.vcf.gz"),
-        #     output_dir,
-        #     background_vcf=data_path("12_22129565_22130387.background.vcf.gz"),
-        # )
-        # images_path = os.path.join(output_dir, "images-0000.tar")
-        # assert os.path.exists(images_path)
+        output_dir = str(tmp_path / "shards")
+        vcf_to_variant_examples(
+            cfg,
+            data_path("12_22127565_22132387.bam"),
+            hg002_sample,
+            data_path("12_22129565_22130387.vcf.gz"),
+            output_dir,
+            background_vcf=data_path("12_22129565_22130387.background.vcf.gz"),
+        )
+        images_path = os.path.join(output_dir, "images-0000.tar")
+        assert os.path.exists(images_path)
 
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
-            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            f"data.predict_urls={os.path.join(output_dir, 'images-0000.tar')}",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
         reconstruct(local_cfg, output_dir, limit_predict_batches=1)
@@ -119,13 +203,11 @@ class TestTransformerReconstruction:
                 for x in (orig, recon)
             ]
 
-            png_path = result_path("test.png")
+            png_path = result_path("test_recon.png")
             combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + 10, orig_image.height))
             combined.paste(orig_image, (0, 0))
             combined.paste(recon_image, (orig_image.width + 10, 0))
             combined.save(png_path)
             assert os.path.exists(png_path)
+            # break
         assert _i == 0, "Only one sample in dataset"
-
-
-

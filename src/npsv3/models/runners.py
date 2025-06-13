@@ -1,11 +1,19 @@
 import hydra
 import lightning as L
+import torch
 from omegaconf import OmegaConf
+from npsv3.models.transformer import Classifier
 
 
 def train(cfg, output_dir=None, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
-    model = hydra.utils.instantiate(cfg.model)
+
+    if cfg.pretrained_path.path:
+        model = Classifier.load_from_checkpoint(cfg.pretrained_path.path, strict=False)
+    else: 
+        model = hydra.utils.instantiate(cfg.model)
+    
+    # model = torch.compile(model)
 
     # Overwrite existing checkpoints, instead of creating new versions
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
@@ -23,7 +31,7 @@ def train(cfg, output_dir=None, **kw_args):
         # Skip testing if no testing data provided
         limit_test_batches = 0
 
-    trainer =  hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, limit_test_batches=limit_test_batches, **kw_args)
+    trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, limit_test_batches=limit_test_batches, profiler="simple", **kw_args)
 
     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state

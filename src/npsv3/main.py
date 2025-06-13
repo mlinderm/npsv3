@@ -80,6 +80,7 @@ def main(cfg: DictConfig) -> None:
         )
     elif cfg.command == "train":
         import torch
+        torch.set_float32_matmul_precision("high")
 
         from npsv3.models.runners import train
 

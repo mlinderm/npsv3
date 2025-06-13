@@ -1,4 +1,6 @@
-_target_: npsv3.models.transformer.Transformer
+_target_: npsv3.models.transformer.MiM
+# Could we possibly edit percision here?
+# percision:
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
