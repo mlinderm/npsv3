@@ -14,8 +14,16 @@ from typing import Union, Optional, Tuple
 from torch import nn
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTPreTrainedModel, ViTModel, ViTForImageClassification
+from PIL import Image
 from npsv3.models.dvae import Denormalize
-    
+
+from dataclasses import dataclass
+
+import math
+from typing import Optional, Union, Tuple
+
+from transformers import ViTConfig, ViTModel, ViTPreTrainedModel
+
 class RealImageDataModule(L.LightningDataModule):
     def __init__(
         self,
@@ -49,7 +57,8 @@ class RealImageDataModule(L.LightningDataModule):
 
 
         self.configuration = ViTConfig(num_channels=num_channels)
-        #self.model = ViTForMaskedImageModeling(configuration)
+        # self.model = ViTForMaskedImageModeling(configuration)
+
 
         # self.image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
 
@@ -63,7 +72,6 @@ class RealImageDataModule(L.LightningDataModule):
         def to_tuple(data):
             # Handle missing fields (https://webdataset.github.io/webdataset/FAQ/, issue #246)
             image = data["image.npy.gz"]
-            
             # input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False
             # pixel_values = torch.squeeze(self.image_processor(images=self.transforms(image), return_tensors="pt", input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False).pixel_values, 0)
             pixel_values = self.transforms(image)
@@ -121,7 +129,7 @@ class MiM(L.LightningModule):
         optimizer: torch.optim.Optimizer,
         model_name="google/vit-base-patch16-224-in21k",
         num_channels = 7,
-        image_size = (96,288)
+        image_size=(96, 288)
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -389,4 +397,105 @@ def display_image(urls):
     dataset = wds.WebDataset(urls, shardshuffle=False)
     for sample in enumerate(dataset):
         image = sample["image.npy"]
-        return image
+    return image
+
+# From Hugging Face https://github.com/huggingface/transformers/blob/main/examples/pytorch/instance-segmentation/run_instance_segmentation.py#L155
+class ModelOutput:
+    class_queries_logits: torch.Tensor
+    masks_queries_logits: torch.Tensor
+
+@dataclass
+class MaskedImageModelingOutput(ModelOutput):
+    loss: Optional[torch.FloatTensor] = None
+    reconstruction: Optional[torch.FloatTensor] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+
+    @property
+    def logits(self):
+        return self.reconstruction
+
+class ViTForMaskedImageModeling(ViTPreTrainedModel):
+    def __init__(self, config: ViTConfig) -> None:
+        super().__init__(config)
+
+        self.vit = ViTModel(config, add_pooling_layer=False, use_mask_token=True)
+
+        self.decoder = nn.Sequential(
+            nn.Conv2d(
+                in_channels=config.hidden_size,
+                out_channels=config.encoder_stride**2 * config.num_channels,
+                kernel_size=1,
+            ),
+            nn.PixelShuffle(config.encoder_stride),
+        )
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        pixel_values: Optional[torch.Tensor] = None,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        interpolate_pos_encoding: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[tuple, MaskedImageModelingOutput]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if bool_masked_pos is not None and (self.config.patch_size != self.config.encoder_stride):
+            raise ValueError(
+                "When `bool_masked_pos` is provided, `patch_size` must be equal to `encoder_stride` to ensure that "
+                "the reconstructed image has the same dimensions as the input. "
+                f"Got `patch_size` = {self.config.patch_size} and `encoder_stride` = {self.config.encoder_stride}."
+            )
+
+        outputs = self.vit(
+            pixel_values,
+            bool_masked_pos=bool_masked_pos,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+            return_dict=return_dict,
+        )
+
+        sequence_output = outputs[0]
+
+        # Reshape to (batch_size, num_channels, height, width)
+        sequence_output = sequence_output[:, 1:]
+        batch_size, sequence_length, num_channels = sequence_output.shape
+        # height = math.floor(sequence_length**0.5)
+        # width = math.floor(sequence_length**0.5)
+        height = pixel_values.shape[2] // self.config.patch_size
+        width = pixel_values.shape[3] // self.config.patch_size
+        sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
+
+        # Reconstruct pixel values
+        reconstructed_pixel_values = self.decoder(sequence_output)
+
+        masked_im_loss = None
+        if bool_masked_pos is not None:
+            # size = self.config.image_size // self.config.patch_size
+            bool_masked_pos = bool_masked_pos.reshape(-1, height, width)
+            mask = (
+                bool_masked_pos.repeat_interleave(self.config.patch_size, 1)
+                .repeat_interleave(self.config.patch_size, 2)
+                .unsqueeze(1)
+                .contiguous()
+            )
+            reconstruction_loss = nn.functional.l1_loss(pixel_values, reconstructed_pixel_values, reduction="none")
+            masked_im_loss = (reconstruction_loss * mask).sum() / (mask.sum() + 1e-5) / self.config.num_channels
+
+        if not return_dict:
+            output = (reconstructed_pixel_values,) + outputs[1:]
+            return ((masked_im_loss,) + output) if masked_im_loss is not None else output
+
+        return MaskedImageModelingOutput(
+            loss=masked_im_loss,
+            reconstruction=reconstructed_pixel_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
