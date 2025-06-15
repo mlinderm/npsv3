@@ -258,8 +258,8 @@ class Graph:
     ) -> list["InferenceHaplotype"]:
         """Enumerate all possible haplotypes containing alleles in region of inference_vcf using base_path_prefix as backbone"""
         # Extract variant paths from the inference VCF
-        inference_alleles = {}
-        inference_paths_ordered = []
+        inference_alleles: dict[str,tuple[int]] = {}
+        inference_paths: set[str] = set()
         with pysam.VariantFile(inference_vcf, drop_samples=True) as vcf_file:
             for record in vcf_file.fetch(**region.pysam_fetch):
                 variant = Variant.from_pysam(record)
@@ -267,10 +267,14 @@ class Graph:
                     continue  # Variant "fell outside the graph"
                 assert record.alts is not None
 
-                inference_alleles[variant.vg_variant_id] = variant.alt_allele_indices
-                inference_paths_ordered.extend(variant_path_name(variant.vg_variant_id, allele_idx) for allele_idx in variant.allele_indices)
+                # Remove any star alleles (length None) since we don't actually infer those alleles (they are not in the graph)
+                exclude_aleleles = {i for i, sl in enumerate(variant.length_change(), 1) if sl is None}
+                include_alleles = tuple(i for i in variant.alt_allele_indices if i not in exclude_aleleles)
 
-        inference_paths = set(inference_paths_ordered)
+                inference_alleles[variant.vg_variant_id] = include_alleles
+                inference_paths.add(variant_path_name(variant.vg_variant_id, 0))
+                inference_paths.update(variant_path_name(variant.vg_variant_id, i) for i in include_alleles)
+
 
         free_nodes = set()
         for path, nodes in self.path_nodes.items():
@@ -303,7 +307,7 @@ class Graph:
             include_nodes.update(_path_from_prev(interior_prev, path_from[0]))
 
         # DFS to enumerate all possible haplotypes
-        assert self.min_node_id in include_nodes and self.max_node_id in include_nodes
+        assert self.min_node_id in include_nodes and self.max_node_id in include_nodes  # noqa: PT018
 
         haplotypes = []
 
@@ -312,7 +316,7 @@ class Graph:
 
             while True:
                 next_nodes = []
-                self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))
+                self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))  # noqa: B023
                 if len(next_nodes) == 0:
                     # Reached a tip/terminus
                     haplotypes.append(
@@ -343,11 +347,22 @@ class Graph:
                 if haplotype.paths.isdisjoint({variant_path_name(variant_id, a) for a in alt_allele_indices}):
                     haplotype.paths.add(variant_path_name(variant_id, 0))
 
-        # Sort the paths in the order of the VCF records and alleles (leveraging that
-        # inference paths are listed in allele order)
+        # Sort the paths in the order of the VCF records and alleles such that the reference path is first, i.e.,
+        # the path with only _alt_*_0 paths
         def sort_key(haplotype: InferenceHaplotype):
-            return tuple(path in haplotype.paths for path in inference_paths_ordered)
-        haplotypes.sort(key=sort_key, reverse=True)
+            key = [0] * len(inference_alleles)
+            for path in haplotype.paths:
+                variant_id = path[5:5+VARIANT_ID_LENGTH]
+                # Exploit that the variant_ids were inserted in the inference_alleleles dict in record order
+                for key_idx, ordered_variant_id in enumerate(inference_alleles):  # noqa: B007
+                    if variant_id == ordered_variant_id:
+                        break
+                allele = int(path[5+VARIANT_ID_LENGTH+1:])
+                if allele > 0:
+                    key[key_idx] |= 1 << allele - 1
+            return key
+
+        haplotypes.sort(key=sort_key)
 
         return haplotypes
 

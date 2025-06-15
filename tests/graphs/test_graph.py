@@ -233,7 +233,7 @@ class TestGraphConstructionFromVCF:
             Range("chr21", 37122424, 37122424),
         ],
     )
-    def test_observed_errors_haplotype(self, cfg, region):
+    def test_hgsvc2_observed_errors(self, cfg, region):
         graph = Graph.from_vcf(
             HG38_REF_FASTA,
             HG00731_VCF,
@@ -284,3 +284,30 @@ class TestGraphConstructionFromVCF:
 
         assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30
         assert graph.sequence_length(graph.nodes_on_path("HG002#1#14#0")) == 18
+
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.hg38.vcf.gz") or not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"), reason="Test vcfs required")
+    @pytest.mark.parametrize(
+        "region",
+        [
+            Range.parse_literal("chr1:1139780-1140337"), # '*' allele in a SV
+            Range.parse_literal("chr1:3999762-3999900"), # Mutiallelic DEL, MNV
+        ],
+    )
+    def test_dipcall_observed_errors(self, cfg, region):
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            "/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.hg38.vcf.gz",
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf="/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz",
+        )
+        graph._graph.to_gfa()
+
+        haplotypes = graph.all_haplotypes(
+            "/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz",
+            region.contig, # Use the contig as the backbone
+            region.expand(cfg.pileup.variant_padding),
+        )
+
+        assert len(haplotypes) >= 2
+        assert haplotypes[0].nodes == graph.nodes_on_path(region.contig)

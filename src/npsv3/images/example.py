@@ -135,10 +135,15 @@ def make_graph_example_from_region(
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
         realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region.expand(cfg.pileup.variant_padding))
-        assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"
-        assert realign_haplotypes[0].nodes == graph.nodes_on_path(
-            region.contig
-        ), f"First haplotype must be the reference for region {region}"
+        try:
+            assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"  # noqa: PLR2004
+            assert realign_haplotypes[0].nodes == graph.nodes_on_path(
+                region.contig
+            ), f"First haplotype must be the reference for region {region}"
+        except AssertionError:
+            graph._graph.to_gfa()
+            print(realign_haplotypes)
+            raise
 
         realign_fasta_path = os.path.join(tempdir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:

@@ -11,10 +11,12 @@ from npsv3.util.range import Range
 
 _VALID_BASES_RE = re.compile(r"[ACGTN]+", re.IGNORECASE)
 
+# Length of SHA1 hex digest used for variants IDs by vg
+VARIANT_ID_LENGTH = 40
 
 def vg_variant_id(record: pysam.VariantRecord) -> str:
     # https://github.com/vgteam/vg/blob/da34f4e54b0e64d1b741da102217c97d5333fabc/src/utility.cpp#L505
-    assert record.ref is not None and record.alts is not None
+    assert record.ref is not None and record.alts is not None  # noqa: PT018
     variant_string = f"{record.contig}\n{record.pos}\n{record.ref.upper()}\n"
     for alt in record.alts:
         if alt != "*": # Ignore "*" alleles since they are not handled by VG
@@ -98,14 +100,9 @@ class Variant:
         self._sequence_resolved = not _has_symbolic_allele(record)
         if self._sequence_resolved:
             self._padding = len(os.path.commonprefix([a for a in record.alleles if a != "*"]))
-            self._right_padding = [
-                len(os.path.commonprefix([record.ref[self._padding :][::-1], a[self._padding :][::-1]]))
-                for a in record.alts if a != "*"
-            ]
         else:
             assert len(record.alts) == 1, "Multiallelic symbolic variants not currently supported"
             self._padding = 1
-            self._right_padding = [0] * len(record.alts)
 
         if self._padding > 1:
             logging.info("Variant has more than expected number of padding bases, is the VCF normalized?")
@@ -137,7 +134,7 @@ class Variant:
 
     @property
     def reference_region(self) -> Range:
-        """Returns changed region of the reference genome, excluding any padding bases"""
+        """Returns changed region of the reference genome, excluding any "left" padding bases"""
         return Range(self.contig, self.start + self._padding, self.end)
 
     @property
@@ -162,10 +159,14 @@ class Variant:
             svlen = self._record.info.get("SVLEN", None)
         except ValueError: # PySAM seems to raise an error if field is not defined in VCF at all
             svlen = None
-        if svlen is None:
+
+        if svlen is not None:
+            # Normalize SVLEN to a tuple and set any "*" alleles to None
+            svlen = (svlen,) if isinstance(svlen, int) else svlen
+            svlen = tuple((sl if a != "*" else None) for sl, a in zip(svlen, self._record.alts, strict=False))
+        else:
             svlen = tuple(self.alt_length(i) - self.ref_length if alt != "*" else None for i, alt in enumerate(self._record.alts, start=1))
-        elif isinstance(svlen, int):
-            svlen = (svlen,)  # If SVLEN is Number=1, convert to sequence
+
         return svlen if allele is None else svlen[allele - 1]
 
     def allele(self, allele) -> str | None:
@@ -210,7 +211,8 @@ class _SequenceResolvedVariant(Variant):
             return None
         # Compute per-allele padding (since is may be different than the global padding)
         padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
-        return Range(self.contig, self.start + padding, self.end)
+        right_padding = len(os.path.commonprefix([self._record.ref[::-1], alt_allele[::-1]]))
+        return Range(self.contig, self.start + padding, self.end-right_padding)
 
     def alt_seq(self, allele) -> str | None:
         assert allele >= 1
@@ -221,8 +223,8 @@ class _SequenceResolvedVariant(Variant):
         assert _VALID_BASES_RE.fullmatch(alt_allele), f"Unexpected base in sequence resolved allele {alt_allele} in region {self.reference_region}"
         # Compute per-allele padding (since is may be different than the global padding)
         padding = len(os.path.commonprefix([self._record.ref.upper(), alt_allele]))
-        return alt_allele[padding:]
-
+        right_padding = len(os.path.commonprefix([self._record.ref[::-1], alt_allele[::-1]]))
+        return alt_allele[padding:len(alt_allele) - right_padding]
 
 class _SymbolicDeletionVariant(Variant):
     def __init__(self, record):

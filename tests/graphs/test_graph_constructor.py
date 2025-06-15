@@ -485,6 +485,25 @@ chr1	5246237	.	C	CCTTT	.	.	.	GT	0|1
         for name, nodes in expected_paths.items():
             assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
 
+    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    def test_star_allele_overlap_end_padding(self, caplog, tmp_path):
+        region = Range.parse_literal ("chr1:3999762-3999880")
+        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	3999762	6281	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	A,CTGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	.	.	SVTYPE=DEL;SVLEN=-118,0	GT	2|1
+chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
+"""
+        )
+        construct.to_gfa(HG38_REF_FASTA)
+        print(caplog.text)
+        assert len(caplog.records) == 0
+        
+
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
     def test_mixed_alleles(self, tmp_path):
         region = Range.parse_literal ("1:1000000-1000006")

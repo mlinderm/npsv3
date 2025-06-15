@@ -26,7 +26,7 @@ from typing import Optional, TextIO
 import pysam
 
 from npsv3.util.range import Range
-from npsv3.variant import Variant
+from npsv3.variant import VARIANT_ID_LENGTH, Variant
 
 # We would like to use the interval tree library, but it doesn't support "null" intervals,
 # i.e., with zero size, which we need for insertions. So instead we use a sorted list as the core
@@ -71,27 +71,32 @@ class GraphConstructor:
             for variant, _ in sort_variant_reference_region(vcf_file.fetch(**self.region.pysam_fetch)):
                 has_star_allele = variant.has_star_allele
                 for allele_idx, allele_len in enumerate(variant.length_change(allele=None), start=1):
-                    # When there * alleles also create paths that include the padding bases (noted with "rec" prefix).
-                    # This crudely create extra copies of some nodes, but those could be pruned later.
-                    if has_star_allele and allele_len is not None:
-                        # Find and split the corresponding span with any padding bases included
-                        alt_region = variant.record_reference_region
-                        alt = AltPath(
-                            variant_path_name(variant.vg_variant_id, allele_idx, prefix="rec"),
-                            alt_region.end,
-                            variant.allele(allele_idx), # Include all the padding bases in the sequence
-                        )
-                        self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
-                    # "Normal" allele addition without creating paths including padding bases
-                    if allele_len is not None: # Ignore * alleles
-                        # Find and split the corresponding span
-                        alt_region = variant.alt_reference_region(allele_idx)
-                        alt = AltPath(
-                            variant_path_name(variant.vg_variant_id, allele_idx),
-                            alt_region.end,
-                            variant.alt_seq(allele_idx),
-                        )
-                        self._split_spans(alt_region, variant.vg_variant_id, alt)
+                    try:
+                        # When there * alleles also create paths that include the padding bases (noted with "rec" prefix).
+                        # This crudely create extra copies of some nodes, but those could be pruned later by removing
+                        # the "rec" paths and then any nodes that are no longer referenced in any path.
+                        if has_star_allele and allele_len is not None:
+                            # Find and split the corresponding reference span (which includes the padding bases)
+                            alt_region = variant.record_reference_region #TODO: Should this be based on the alternative alle?
+                            alt = AltPath(
+                                variant_path_name(variant.vg_variant_id, allele_idx, prefix="rec"),
+                                alt_region.end,
+                                variant.allele(allele_idx), # Include all the padding bases in the sequence
+                            )
+                            self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
+                        # "Normal" allele addition without padding bases
+                        if allele_len is not None: # Ignore * alleles
+                            # Find and split the corresponding span
+                            alt_region = variant.alt_reference_region(allele_idx)
+                            alt = AltPath(
+                                variant_path_name(variant.vg_variant_id, allele_idx),
+                                alt_region.end,
+                                variant.alt_seq(allele_idx),
+                            )
+                            self._split_spans(alt_region, variant.vg_variant_id, alt)
+                    except Exception as e:
+                        e.add_note(f"in variant spanning {variant.reference_region} and allele {allele_idx}") # Python 3.11+ (alternately use e.args)
+                        raise
 
 
     def _assign_nodes(self):
@@ -109,6 +114,31 @@ class GraphConstructor:
                 self.paths[name].append(span.node_id)
             for alt in span.alts:
                 self.paths[alt.name].append(alt.node_id)
+
+        # Extend trimmed alternate paths to match the end points of the reference path. TODO this needs to go
+        # both directions. We probably want to partially construct the graph first to figure this out.
+        for name, nodes in self.paths.items():
+            if not name.startswith("_"):
+                continue # Skip paths that aren't variants, e.g., _alt_...
+            allele = int(name[5+VARIANT_ID_LENGTH+1:])
+            if allele > 0:
+                # If the target span for this alt path is within is its associated reference nodes, extend its nodes to the end of the reference path.
+                # This ensures that each variant (reference and alternate) paths span equilvalent portions of the graph.
+                span_idx, alt_path = self.find_node_span(nodes[-1])
+                assert span_idx is not None and span_idx < len(self.spans) - 1 and alt_path is not None  # noqa: PT018
+                if len(span.region) == 0 and alt.target == span.region.start:
+                    target_span = self.spans[span_idx + 1]
+                else:
+                    target_span = self.spans[self.find_target_span(alt_path.target)]
+                # If the target span id is in the references nodes, extend the alternate path to include those nodes to the end
+                ref_path = name[:5+VARIANT_ID_LENGTH] + "_0"
+                ref_nodes = self.paths[ref_path]
+                try:
+                    ref_nodes_index = ref_nodes.index(target_span.node_id)
+                    self.paths[name].extend(ref_nodes[ref_nodes_index:])
+                except ValueError:
+                    pass
+
 
     def _extract_haplotypes(self, vcf_path: str, samples: Sequence[str] | None=None, ploidy=2):
         """Extract haplotypes from vcf_path for samples as paths in the graph"""
@@ -190,6 +220,16 @@ class GraphConstructor:
     def find_target_span(self, target_start: int) -> int:
         """Find the leftmost span that starts at the target position, including any null regions"""
         return bisect_left(self.spans, target_start, key=span_between_point_key)
+
+    def find_node_span(self, node: int) -> "tuple[int|None,AltPath|None]":
+        """Find the span or alternate path with the given node ID."""
+        for i, span in enumerate(self.spans):
+            if span.node_id == node:
+                return (i,None)
+            for alt in span.alts:
+                if alt.node_id == node:
+                    return (i,alt)
+        return (None,None)
 
     def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout):
         """Write the graph in GFA format to out_file using reference sequence from ref_fasta."""
@@ -567,6 +607,7 @@ class PolytypePaths:
                     if VariantOverlap.STAR_ALLELE in overlap and variant.allele(index) == "*":
                         continue  # Don't apply explicity overlapped "*"" allele
                     if index != -1:
+                        # TODO: Remove shared prefix/suffix from ref_nodes and alt_nodes
                         alt_path = variant_path_name(variant.vg_variant_id, index, prefix=path_prefix)
                         local_haplotypes[i].apply_allele(ref_nodes, phase, overlap, alt_nodes=self.paths[alt_path] if index > 0 else None, variant=variant)
                     else:
