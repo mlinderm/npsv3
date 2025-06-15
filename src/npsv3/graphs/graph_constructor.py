@@ -115,24 +115,37 @@ class GraphConstructor:
             for alt in span.alts:
                 self.paths[alt.name].append(alt.node_id)
 
-        # Extend trimmed alternate paths to match the end points of the reference path. TODO this needs to go
-        # both directions. We probably want to partially construct the graph first to figure this out.
+        # Extend trimmed alternate paths to match the beginning and end points of the reference path.
         for name, nodes in self.paths.items():
             if not name.startswith("_"):
                 continue # Skip paths that aren't variants, e.g., _alt_...
             allele = int(name[5+VARIANT_ID_LENGTH+1:])
             if allele > 0:
-                # If the target span for this alt path is within is its associated reference nodes, extend its nodes to the end of the reference path.
-                # This ensures that each variant (reference and alternate) paths span equilvalent portions of the graph.
+                # Extend the alternate path to match the start and end of the reference paths, i.e.
+                # make sure the paths span equivalent portions of the graph.
+                ref_path = name[:5+VARIANT_ID_LENGTH] + "_0"
+                ref_nodes = self.paths[ref_path]
+
+                span_idx, alt_path = self.find_node_span(nodes[0])
+                assert span_idx is not None and span_idx > 0 and alt_path is not None  # noqa: PT018
+                target_span = self.spans[span_idx - 1]
+                # If the preceding span id is in the references nodes, extend the alternate path to include those nodes to the beginning
+                # of the reference path
+                try:
+                    ref_nodes_index = ref_nodes.index(target_span.node_id)
+                    self.paths[name][:0] = ref_nodes[:ref_nodes_index + 1] # Insert elements at the beginning of the list
+                except ValueError:
+                    pass
+
                 span_idx, alt_path = self.find_node_span(nodes[-1])
                 assert span_idx is not None and span_idx < len(self.spans) - 1 and alt_path is not None  # noqa: PT018
-                if len(span.region) == 0 and alt.target == span.region.start:
+                span_region = self.spans[span_idx].region
+                if len(span_region) == 0 and alt_path.target == span_region.start:
                     target_span = self.spans[span_idx + 1]
                 else:
                     target_span = self.spans[self.find_target_span(alt_path.target)]
+
                 # If the target span id is in the references nodes, extend the alternate path to include those nodes to the end
-                ref_path = name[:5+VARIANT_ID_LENGTH] + "_0"
-                ref_nodes = self.paths[ref_path]
                 try:
                     ref_nodes_index = ref_nodes.index(target_span.node_id)
                     self.paths[name].extend(ref_nodes[ref_nodes_index:])
