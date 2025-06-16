@@ -1,1 +1,0 @@
-/bin/c++ -fPIC -flto -shared  -o _native.cpython-39-x86_64-linux-gnu.so CMakeFiles/_native.dir/src/npsv3/bindings.cpp.o CMakeFiles/_native.dir/src/npsv3/realigner.cpp.o  -Wl,-rpath,/home/cachang/npsv3/lib/seqlib/htslib lib/seqlib/src/libseqlib.a lib/seqlib/htslib/libhts.so lib/seqlib/bwa/libbwa.a /usr/lib64/libz.so /usr/lib64/liblzma.so /usr/lib64/libbz2.so 

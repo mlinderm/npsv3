@@ -35,12 +35,12 @@ RESULT_DIR = os.path.join(os.path.dirname(__file__), "results")
 
 HG00731_VCF = _first_existing(
     "/data/HG00731.freeze4.alt.passing.training.hg38.vcf.gz",
-    "/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.alt.passing.training.hg38.vcf.gz",
+    "/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00731.freeze4.alt.passing.training.hg38.vcf.gz",
 )
 
 HG00731_SV_VCF = _first_existing(
     "/data/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
-    "/storage/mlinderman/projects/sv/npsv3-experiments/training/HGSVC2_training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
+    "/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
 )
 
 SYNDIP_VCF = _first_existing(

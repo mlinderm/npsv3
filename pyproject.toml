@@ -104,9 +104,30 @@ extend = "ruff_defaults.toml"
 extend-exclude = ["lib"]
 
 [tool.ruff.lint]
-# Don't flag `import lightning as L` or similar conventions
-extend-ignore = ["N812"] 
+extend-ignore = [
+  "S101", # Allow assert
+  "N812", # Don't flag `import lightning as L` or similar conventions
+] 
 
 [tool.ruff.lint.extend-per-file-ignores]
 "**/tests/**/*" = ["SLF001"]
 
+# Define "standalone" environment for running the NPSV2-NPSV3 TFRecordConverter script
+[tool.hatch.envs.tfrecordconverter]
+template = "tfrecordconverter"
+skip-install = true
+dependencies = [
+  "hydra-core",
+  "hydra-submitit-launcher",
+  "tensorflow-cpu",
+  "webdataset>=0.2.100",
+  "tqdm",
+]
+
+[tool.hatch.envs.tfrecordconverter.env-vars]
+PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION = "python" # Since we are using NPSV2's outdated pb definition
+PYTHONPATH = "{root}/scripts" # Make npsv2_phy import available
+TF_CPP_MIN_LOG_LEVEL = "3" # Suppress warnings
+
+[tool.hatch.envs.tfrecordconverter.scripts]
+convert = "python scripts/TFRecordConverter.py {args}"
