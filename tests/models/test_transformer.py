@@ -3,16 +3,14 @@ import io
 
 import torch
 import pytest
-import lightning as L
 
-from npsv3.models.transformer import RealImageDataModule, Classifier, assess_accuracy, reconstruct
+from npsv3.models.transformer import RealImageDataModule, assess_accuracy, reconstruct
 from .. import B37_REF_FASTA, data_path, result_path
 from PIL import Image
 import random
 import requests
 import webdataset as wds
 import numpy as np
-import random
 from npsv3.models.runners import train
 from npsv3.images.example import (
     vcf_to_variant_examples,
@@ -20,10 +18,6 @@ from npsv3.images.example import (
 )
 
 from omegaconf import OmegaConf
-
-from npsv3.models.dvae import EncodingToWebDatasetCallback
-
-import hydra
 
 def torch_decode(key, data):
     # Use custom decoder to eliminate a warning with torch.load about weights_only
@@ -62,6 +56,7 @@ class TestMiM:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
+        "checkpoint=full_train",
         "trainer=transformer",
     )
     def test_MiM(self, cfg):
@@ -77,7 +72,7 @@ class TestClassifier:
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
         "trainer=transformer",
-        "pretrained_path=classifier"
+        "pretrained=classifier"
     )
     def test_classifier(self, cfg):
         train(cfg, fast_dev_run=True)
@@ -91,20 +86,12 @@ class TestAccuracy:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=classifier,pileup=unphased_variant,trainer.max_epochs=2/epoch=1-step=20370.ckpt"'
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=3/full_train.ckpt"'
     )
     def test_accuracy(self, tmp_path, cfg):
         #Likely going to get rid of this
         output_dir = str(tmp_path / "shards")
-        # data_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar"
-        data_path = "/home/cachang/npsv3/tests/data/unphased_variant_images-0000.tar"
-        dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
-        for _i, sample in enumerate(dataset):
-            label = sample["label.cls"]
-            # print("\nlabel:",label)
-            break
-
-        assess_accuracy(cfg, output_dir)
+        assess_accuracy(cfg, output_dir, limit_predict_batches=100)
 
 @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
@@ -162,7 +149,7 @@ class TestDisplayMaskedImage:
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
 )
-# @pytest.mark.usefixtures("ray_setup")
+@pytest.mark.usefixtures("ray_setup")
 class TestTransformerReconstruction:
     def test_transformer_reconstruction(self, tmp_path, cfg, hg002_sample):
         # Generate image for variant
@@ -217,7 +204,7 @@ class TestTransformerReconstruction:
 
 
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",

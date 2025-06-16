@@ -8,15 +8,17 @@ from npsv3.models.transformer import Classifier
 def train(cfg, output_dir=None, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
 
-    if cfg.pretrained_path.path:
-        model = Classifier.load_from_checkpoint(cfg.pretrained_path.path, strict=False)
+    if cfg.pretrained.path:
+        # print("pretrained loaded")
+        model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)
     else: 
         model = hydra.utils.instantiate(cfg.model)
     
     # model = torch.compile(model)
 
     # Overwrite existing checkpoints, instead of creating new versions
-    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
+    # print("\ncheckpoint name:",cfg.checkpoint.name)
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, filename=cfg.checkpoint.name, enable_version_counter=False)
 
     if cfg.data.validate_urls:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
