@@ -8,6 +8,9 @@ import torch
 import webdataset as wds
 from dataclasses import dataclass
 from typing import Union, Optional, Tuple
+from PIL import Image
+import numpy as np
+from tests import result_path
 from torch import nn
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTPreTrainedModel, ViTModel, ViTForImageClassification
@@ -45,7 +48,7 @@ class RealImageDataModule(L.LightningDataModule):
 
 
 
-        self.configuration = ViTConfig(num_channels=num_channels)
+        self.configuration = ViTConfig(num_channels=num_channels, patch_size=16)
         # self.model = ViTForMaskedImageModeling(configuration)
 
 
@@ -75,8 +78,6 @@ class RealImageDataModule(L.LightningDataModule):
             bottom_masked_pos = random.choices(vals, weights=bottom_weights, k=num_patches//2)
             # bool_masked_pos = torch.tensor(top_masked_pos+bottom_masked_pos).bool()
             bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
-
-            # print(bool_masked_pos)
             
             label = data["label.cls"]
             if label > 0:
@@ -353,7 +354,11 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         )
 
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
-        images, _, keys, regions, label = batch
+        images, bool_masked_pos, keys, regions, label = batch
+
+        # comment out to make more efficient
+        generate_mask_visual(bool_masked_pos, 16)
+
         #print(outputs)
         #encodings, recon_images = outputs
         for key, real_image, recon_image, region, in zip(keys, images, outputs.reconstruction, regions, strict=False):
@@ -387,3 +392,26 @@ def reconstruct(cfg, output_dir, **kw_args):
 #     for sample in enumerate(dataset):
 #         image = sample["image.npy"]
 #     return image
+
+
+
+
+def generate_mask_visual(bool_masked_pos, patch_size):
+
+    print(bool_masked_pos)
+    
+    mask = Image.new("RGB", (288, 96))
+    pixel_array = np.array(mask)
+
+    for i in range (len(pixel_array)):
+        for j in range (len(pixel_array[0])):
+            bool_index = (i // patch_size) * (len(pixel_array[0]) // patch_size) + (j // patch_size)
+            # case where pixel should be masked
+            if (bool_masked_pos[0][bool_index] == True):
+                mask.putpixel((j, i), (255, 255, 255))
+            else:
+                mask.putpixel((j, i), (0, 0, 0))
+
+    # png_path = "/home/apezza/npsv3/tests/results/mask.png"
+    png_path = result_path("mask.png")
+    mask.save(png_path)

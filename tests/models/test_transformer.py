@@ -112,7 +112,7 @@ class TestDisplayMaskedImage:
                 orig = sample["image.npy.gz"]
 
                 # print("\nshape: ",orig.shape)
-                num_patches = (orig.shape[0] // 16) * (orig.shape[1] // 16)
+                num_patches = (orig.shape[0] // cfg.model.patch_size) * (orig.shape[1] // cfg.model.patch_size)
                 bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
                 # print(bool_masked_pos)
 
@@ -138,13 +138,15 @@ class TestDisplayMaskedImage:
             else: continue
 
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
+    "model.patch_size=16",
     '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
+    # '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/checkpoint=full_train,data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -153,21 +155,21 @@ class TestDisplayMaskedImage:
 class TestTransformerReconstruction:
     def test_transformer_reconstruction(self, tmp_path, cfg, hg002_sample):
         # Generate image for variant
-        output_dir = str(tmp_path / "shards")
-        vcf_to_variant_examples(
-            cfg,
-            data_path("12_22127565_22132387.bam"),
-            hg002_sample,
-            data_path("12_22129565_22130387.vcf.gz"),
-            output_dir,
-            background_vcf=data_path("12_22129565_22130387.background.vcf.gz"),
-        )
-        images_path = os.path.join(output_dir, "images-0000.tar")
-        assert os.path.exists(images_path)
+        output_dir = str(tmp_path) # / "shards")
+        # vcf_to_variant_examples(
+        #     cfg,
+        #     data_path("12_22127565_22132387.bam"),
+        #     hg002_sample,
+        #     data_path("12_22129565_22130387.vcf.gz"),
+        #     output_dir,
+        #     background_vcf=data_path("12_22129565_22130387.background.vcf.gz"),
+        # )
+        # images_path = os.path.join(output_dir, "images-0000.tar")
+        # assert os.path.exists(images_path)
 
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
-            f"data.predict_urls={os.path.join(output_dir, 'images-0000.tar')}",
+            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
         reconstruct(local_cfg, output_dir, limit_predict_batches=1)
@@ -191,17 +193,27 @@ class TestTransformerReconstruction:
                 )
                 for x in (orig, recon)
             ]
+            mask = Image.open(result_path("mask.png"))
+            pixel_array = np.array(mask)
 
-            png_path = result_path("test_recon.png")
-            combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + 10, orig_image.height))
+            for i in range (len(pixel_array)):
+                for j in range (len(pixel_array[0])):
+                    bool_index = (i // cfg.model.patch_size) * (len(pixel_array[0]) // cfg.model.patch_size) + (j // cfg.model.patch_size)
+                    # case where pixel should be masked
+                    if (mask.getpixel((j, i)) == (255, 255, 255)):
+                        pass
+                    else:
+                        mask.putpixel((j, i), orig_image.getpixel((j, i)))
+
+
+            png_path = result_path("test_recon3.png")
+            combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + mask.width + 20, orig_image.height))
             combined.paste(orig_image, (0, 0))
-            combined.paste(recon_image, (orig_image.width + 10, 0))
+            combined.paste(mask, (orig_image.width + 10, 0))
+            combined.paste(recon_image, (orig_image.width + 10 + mask.width + 10, 0))
             combined.save(png_path)
-            assert os.path.exists(png_path)
             # break
         assert _i == 0, "Only one sample in dataset"
-
-
 
 
 @pytest.mark.skip()
@@ -222,14 +234,13 @@ class TestMasking:
 
         random_num = random.randint(0, 999)
 
-
         for _i, sample in enumerate(dataset):
             
             if (_i == random_num):
 
                 orig = sample["image.npy.gz"]
 
-                num_patches = (orig.shape[0] // 16) * (orig.shape[1] // 16)
+                num_patches = (orig.shape[0] // cfg.model.patch_size) * (orig.shape[1] // cfg.model.patch_size)
                 # bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches, )).bool()
                 vals = [True, False]
                 top_weights = [3, 1]
@@ -257,7 +268,7 @@ class TestMasking:
                 for i in range (len(pixel_array)):
                     for j in range (len(pixel_array[0])):
 
-                        bool_index = (i // 16) * (len(pixel_array[0]) // 16) + (j // 16)
+                        bool_index = (i // cfg.model.patch_size) * (len(pixel_array[0]) // cfg.model.patch_size) + (j // cfg.model.patch_size)
 
                         # case where pixel should be masked
                         if (bool_masked_pos[bool_index] == True):
@@ -277,5 +288,3 @@ class TestMasking:
             else:
                 continue
             # assert _i == 0, "Only one sample in dataset"
-
-
