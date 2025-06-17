@@ -1,0 +1,9 @@
+_target_: npsv3.models.paired.PackedImageDataModule
+train_urls: null
+validate_urls: null
+predict_urls: null
+test_urls: null
+batch_size: 16
+num_workers: ${threads}
+max_group_size: 6
+shuffle_size: 1000

@@ -45,16 +45,18 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
     labels = [] 
 
     variant = 0 #Variant counter to keep track of the current variant index
-    num_images = 0
+    num_images = 0 #Keeps track of how many images are in images[]. This does not equal len(images)
     remaining_space = batch_size
     for sample in data:
         query, support, label, *_ = sample
         num_genotypes, num_replicates, *image_size = support.shape
+        print("THIS SAMPLE HAS ", num_genotypes * num_replicates + 1, " IMAGES")
         assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
+
         remaining_space = batch_size - num_images
-        if num_genotypes * num_replicates + 1  > remaining_space:
+        if num_genotypes * num_replicates + 1  > remaining_space and len(images) > 0:
             # If the current sample doesn't fit in the batch, yield the current batch.
-            
+            assert len(images) == len(variants), "Missmatch of images and variants"
             #Cat the images list into a tensor and add padding
             images_tensor = torch.cat(images, dim=0)
             padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
@@ -66,42 +68,47 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
 
             final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
 
-
             #Clear the images list and the META data lists for the next batch
+            
             images.clear()
             variants.clear()
             labels.clear()
 
             #Yield the current batch with padding
+            num_images = 0
             yield final
 
-        else:     
-            #Else, if the current sample fits in the batch, append it to the images list
+             
+        #Append the current sample to the images list
+        #Append the unsqueezed query image to the images list
+        images.append(query.unsqueeze(0))
+        #print("Unsqueezed query = ", query.unsqueeze(0).shape)
+        #print("Normal query = ", query.shape)
+        labels.append(0)  # Assuming query is always negative (label 0)
 
-            #Append the unsqueezed query image to the images list
-            images.append(query.unsqueeze(0))
-            labels.append(0)  # Assuming query is always negative (label 0)
+        #Append the respahed support images to the images list
+        images.append(support.reshape(-1, *image_size))
+        #print("RESHAPED SUPPORT = ", support.reshape(-1, *image_size).shape)
+        #print("Normal SUPPORT = ", support.shape)
+        num_images += ((num_genotypes * num_replicates) + 1)
+        
 
-            #Append the respahed support images to the images list
-            images.append(support.reshape(-1, *image_size))
-            num_images += (num_genotypes * num_replicates + 1)
+        #META DATA
+        variants += [variant] * ((num_genotypes * num_replicates) + 1)
+        variant += 1 #Increment the variant counter from foor loop
 
-            #META DATA
-            variants += [variant] * (num_genotypes * num_replicates + 1)
-            variant += 1 #Increment the variant counter from foor loop
-
-            #labels G==Label(?) how do I know which support image is positive?
-            genotype_list = list(range(0, num_genotypes))
-            for genotype in genotype_list:
-                if genotype == label:
-                    labels += [1] * num_replicates
-                else:
-                    labels += [0] * num_replicates
+        #labels G==Label
+        genotype_list = list(range(0, num_genotypes))
+        for genotype in genotype_list:
+            if genotype == label:
+                labels += [1] * num_replicates
+            else:
+                labels += [0] * num_replicates
     
     remaining_space = batch_size - num_images
     #YIELD
-    #If images is not empty after the loop, yield the last batch
-    if len(images) != 0:        
+    #If images is not empty after the loop and there's enough space, yield the last batch
+    if remaining_space>= 0 and len(images)>0:        
         #Cat the images list into a tensor and add padding
         images_tensor = torch.cat(images, dim=0)
         padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
@@ -119,6 +126,7 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         variants.clear()
         labels.clear()
 
+        num_images = 0
         #Yield the current batch with padding
         yield final
 
@@ -348,7 +356,7 @@ class PackedImageDataModule(L.LightningDataModule):
             .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls", "__key__")
             .map_tuple(transform_images, transform_images, wds.utils.identity, wds.utils.identity)
             .compose(pack_and_pad_support(batch_size=self.batch_size, padding_value=0))
-            .batched(self.hparams.batch_size, partial=True)
+            #.batched(self.hparams.batch_size, partial=True)
         )
 
         return wds.WebLoader(dataset, batch_size=None, shuffle=False, num_workers=self.hparams.num_workers)
@@ -440,6 +448,160 @@ class MaximizingPredictor(nn.Module):
         # TODO: Should this use masked_metric?
         return torch.argmax(metric, dim=1)
 
+class PackedVariant(L.LightningModule):
+    def __init__(
+        self,
+        encoder: nn.Module,
+        metric: nn.Module,
+        loss: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        predictor: nn.Module,
+        max_group_size=6,
+    ):
+        super().__init__()
+
+        self.save_hyperparameters(ignore=["encoder", "metric"])
+
+        self.encoder = encoder
+        self.metric = metric
+        self.loss = loss
+        self.predictor = predictor
+
+        self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        self.test_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+
+        self.example_input_array = (torch.zeros(1, self.encoder.num_channels, 100, 300), torch.zeros(1, max_group_size, self.encoder.num_channels, 100, 300))
+
+    def on_train_start(self) -> None:
+        # Reset validation metrics at the start of training to avoid effects of sanity batches
+        self.val_acc.reset()
+
+    def forward(self, query, support):
+        print("FORWARD PASS")
+        print("Test QUERY", query.shape)
+        print("Test Support", support.shape)
+        
+
+        query_embeddings = self.encoder(query)
+        
+        # support: [num_groups, group_size, C, H, W]
+        # Flatten group and batch dims into one batch dimension
+        B, G, C, H, W = support.shape
+        support_flat = support.view(B * G, C, H, W)
+        support_encoded_flat = self.encoder(support_flat)
+        # Reshape back to [B, G, embedding_dim]
+        support_embeddings = support_encoded_flat.view(B, G, -1)
+        
+        print("Query Embedings", query_embeddings.shape)
+        print("Support Embeddings", support_embeddings.shape)
+        metric = self.metric(query_embeddings, support_embeddings)
+        print("call to metric")
+        return (metric, query_embeddings, support_embeddings)
+
+
+    def _model_step(self, batch, batch_idx):
+        """
+        Performs a single forward pass and computes loss and predictions.
+
+        Args:
+            batch (Tuple): A batch of data containing:
+                - Images: (B, C, H, W) query images + support images flattened
+                - variants: (B,) variant index for each image in the batch
+                - labels: (B,) true index of the correct support image for each variant group
+
+        Returns:
+            Tuple:
+                - loss (Tensor): Scalar loss value.
+                - preds (Tensor): Predicted class index for each query (B,).
+                - label (Tensor): Ground truth labels (B,).
+        """
+        print("model step")
+        # Unpack the batch
+        images, variants, labels = batch
+
+        print(f"Batch: {images.shape}, {variants.shape}, {labels.shape}")       
+        unique_variants = torch.unique_consecutive(variants)
+        if unique_variants[-1] == -100: #If the last index is padding we discard it
+            unique_variants = unique_variants[:-1] 
+
+        # Get the index of the first image for each variant which is the query image and extract the embeddings
+        first_indices = torch.cat([
+            (variants == v).nonzero(as_tuple=True)[0][:1]
+            for v in unique_variants
+        ])
+        query = images[first_indices]
+
+        support = []
+        for v in unique_variants:
+            # Find all indices for this variant
+            indices = (variants == v).nonzero(as_tuple=True)[0]
+            
+            # Remove the first one (query)
+            support_indices = indices[1:]
+            # Get support embeddings for this variant
+            support_group = images[support_indices]
+            support.append(support_group)
+
+        support = torch.stack(support)
+        #print("MY QUERY", query.shape)
+        #print("MY Support", support.shape)
+        print("Calling forward from model step...")
+        # Compute metric
+        # Forward pass: compute similarity metric between query and support embeddings by passing the batch to forward
+        metric, query_embeddings, support_embeddings = self(query,support)
+        print("continue model step")
+
+        # --- Create a mask to indicate valid support positions ---
+        padding_start_idx = (variants == -100).nonzero(as_tuple=True)[0][0]
+        mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
+
+        # --- Compute loss and predictions ---
+        # Custom loss function may use embeddings and mask
+        
+        loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings)
+
+        # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
+        preds = self.predictor(metric, mask)
+
+        print("loss", loss.shape)
+        print("preds", preds.shape)
+        return (loss, preds, labels)
+
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, preds, label = self._model_step(batch, batch_idx)
+
+        self.log("train_loss", loss, prog_bar=True)
+        self.train_acc(preds, label)
+        self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, preds, label = self._model_step(batch, batch_idx)
+
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.val_acc(preds, label)
+        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, preds, label = self._model_step(batch, batch_idx)
+
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.test_acc(preds, label)
+        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        print("predict")
+        metric, *_ = self(batch)
+        return metric, batch
+    def configure_optimizers(self):
+        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        return { "optimizer": optimizer }
+    
+
 class GroupedVariant(L.LightningModule):
     def __init__(
         self,
@@ -470,21 +632,29 @@ class GroupedVariant(L.LightningModule):
         self.val_acc.reset()
 
     def forward(self, query, support):
+        print("FORWARD PASS")
+        print("Test QUERY", query.shape)
+        print("Test Support", support.shape)
         query_embeddings = self.encoder(query)
 
         # https://github.com/pytorch/pytorch/issues/1927#issuecomment-1245392571
         support = support.transpose(0, 1)
         support_embeddings = torch.stack([self.encoder(s) for s in support], dim=0)
         support_embeddings = support_embeddings.transpose(0, 1)
-
+        print("Query Embedings", query_embeddings.shape)
+        print("Support Embeddings", support_embeddings.shape)
         metric = self.metric(query_embeddings, support_embeddings)
-
+        print("Call to metric")
         return (metric, query_embeddings, support_embeddings)
 
     def _model_step(self, batch, batch_idx):
+        print("MODEL STEP")
         query, support, num_support, label, *_ = batch
+        print(f"Batch: {query.shape}, {support.shape}, {num_support.shape}")
+        print("FORWARD FROM MODEL")
         metric, query_embeddings, support_embeddings = self(query, support)
 
+        print("continue model step")
         # Create a mask for the valid support images in each group by filling ones out to the
         # last valid support image (via "exclusive cumsum")
         mask = torch.zeros(metric.shape, dtype=torch.long, device=metric.device)
