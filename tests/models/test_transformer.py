@@ -52,6 +52,7 @@ class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=MiM",
+        "model.patch_size=16",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",

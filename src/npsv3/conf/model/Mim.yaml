@@ -1,7 +1,0 @@
-_target_: npsv3.models.transformer.Mim
-patch_size: 16
-optimizer:
-  _target_: torch.optim.Adam
-  _partial_: true
-  lr: 0.001
-  amsgrad: false

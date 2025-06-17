@@ -119,12 +119,14 @@ class MiM(L.LightningModule):
         optimizer: torch.optim.Optimizer,
         model_name="google/vit-base-patch16-224-in21k",
         num_channels = 7,
-        image_size=(96, 288)
+        image_size=(96, 288),
+        patch_size=16,
+        encoder_stride=16
     ):
         super().__init__()
         self.save_hyperparameters()
         # configuration = ViTConfig(num_channels=num_channels)
-        configuration = ViTConfig(num_channels=num_channels, image_size=image_size)
+        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, patch_size=patch_size, encoder_stride=encoder_stride)
 
         
         self.model = ViTForMaskedImageModeling(configuration)
@@ -397,8 +399,6 @@ def reconstruct(cfg, output_dir, **kw_args):
 
 
 def generate_mask_visual(bool_masked_pos, patch_size):
-
-    print(bool_masked_pos)
     
     mask = Image.new("RGB", (288, 96))
     pixel_array = np.array(mask)
