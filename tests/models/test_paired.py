@@ -43,7 +43,7 @@ class TestPackedVariant:
     "model=paired_packed_inception_contrastive",
     f"data.train_urls={data_path('images-0000.tar')}",
     f"data.validate_urls={data_path('images-0000.tar')}",
-    "data.batch_size=11",
+    "data.batch_size=10",
     "trainer=paired",
     "data=packed_images",
     )
