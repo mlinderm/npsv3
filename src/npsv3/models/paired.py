@@ -43,14 +43,12 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
     #Variants and labels lists to hold the metadata in the current batch
     variants = []
     labels = [] 
-
-    variant = 0 #Variant counter to keep track of the current variant index
+    
     num_images = 0 #Keeps track of how many images are in images[]. This does not equal len(images)
     remaining_space = batch_size
     for sample in data:
         query, support, label, *_ = sample
         num_genotypes, num_replicates, *image_size = support.shape
-        print("THIS SAMPLE HAS ", num_genotypes * num_replicates + 1, " IMAGES")
         assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
 
         remaining_space = batch_size - num_images
@@ -82,20 +80,15 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         #Append the current sample to the images list
         #Append the unsqueezed query image to the images list
         images.append(query.unsqueeze(0))
-        #print("Unsqueezed query = ", query.unsqueeze(0).shape)
-        #print("Normal query = ", query.shape)
         labels.append(0)  # Assuming query is always negative (label 0)
 
         #Append the respahed support images to the images list
         images.append(support.reshape(-1, *image_size))
-        #print("RESHAPED SUPPORT = ", support.reshape(-1, *image_size).shape)
-        #print("Normal SUPPORT = ", support.shape)
-        num_images += ((num_genotypes * num_replicates) + 1)
         
 
         #META DATA
-        variants += [variant] * ((num_genotypes * num_replicates) + 1)
-        variant += 1 #Increment the variant counter from foor loop
+        variants += [num_images] * ((num_genotypes * num_replicates) + 1)
+        num_images += ((num_genotypes * num_replicates) + 1)
 
         #labels G==Label
         genotype_list = list(range(0, num_genotypes))
@@ -428,16 +421,13 @@ class ContrastiveLoss(nn.Module):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, distances: torch.Tensor, label: torch.Tensor, query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
-        print("Distances", distances.shape[0]) 
+    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
         label_pair = nn.functional.one_hot(label, distances.shape[0])
-        print("LABEL", label)
-        print("Label Pair", label_pair)
-        
+
         loss = label_pair * torch.square(distances) + (1.0 - label_pair) * torch.square(
             torch.clamp(self.margin - distances, min=0)
         )
-        return torch.mean(loss)
+        return torch.mean(loss[:, mask])
 
 class NPairsLoss(nn.Module):
     def __init__(self, l2_reg=0.002):
@@ -462,16 +452,17 @@ class MinimizingPredictor(nn.Module):
         masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
         # TODO: Should this use masked_metric?
         print("Metric", metric)
-        return torch.argmin(metric)
+        print("Masked Metric", masked_metric)
+        return torch.argmin(masked_metric)
 
 class MaximizingPredictor(nn.Module):
     def __init__(self):
         super(MaximizingPredictor, self).__init__()
 
     def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
+        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))[1:]
         # TODO: Should this use masked_metric?
-        return torch.argmax(metric, dim=1)
+        return torch.argmax(masked_metric)
 
 class PackedVariant(L.LightningModule):
     def __init__(
@@ -506,42 +497,26 @@ class PackedVariant(L.LightningModule):
     def forward(self, batch):
 
         images, variants, labels = batch 
-
         images_embeddings = self.encoder(images)
 
-        support_embeddings = images_embeddings
-        
         #Separate query and support embeddings
-        unique_variants = torch.unique_consecutive(variants)
+        
+        #Removing padding
+        #query_embeddings = images_embeddings[torch.masked_select(variants, variants != -100)]
+        #support_embeddings = images_embeddings[ :query_embeddings.size()[0]]
 
-        if unique_variants[-1] == -100: #If the last index is padding we discard it
-            unique_variants = unique_variants[:-1] 
-
-        #Get the index of the first image for each variant which is the query image and extract the embeddings
-        first_indices = torch.cat([
-            (variants == v).nonzero(as_tuple=True)[0][:1]
-            for v in unique_variants
-        ])
-        query_mask = []
-
-        for i in range(len(first_indices)):
-            if i + 1 < len(first_indices):
-                query_mask.append([first_indices[i].item()] * (first_indices[i+1].item() - first_indices[i].item()))
-            else:
-                query_mask.append([first_indices[i].item()] * (images_embeddings.shape[0] - first_indices[i].item()))
-
-        query_mask = torch.tensor([item for sublist in query_mask for item in sublist]) #So that lenght of query = lenght of supports
-        query_embeddings = images_embeddings[query_mask]
-
-        print("QUERY EMBEDDINGS", query_embeddings.shape)
-        print("Support EMBEDDINGS", support_embeddings.shape)
+        #Not removing paddings
+        query_embeddings = images_embeddings[torch.masked_select(variants, variants != -100)]
+        padding = (0,) * (2 * len(images_embeddings.shape) - 1) + (images_embeddings.size()[0]- query_embeddings.size()[0],)
+        query_embeddings  =  torch.nn.functional.pad(query_embeddings, padding, mode='constant', value=0)
+        support_embeddings = images_embeddings
 
         # We would want to generalize this to any metric, here we use dot product as an example
         batched_dot = torch.vmap(torch.dot)
         metric = batched_dot(query_embeddings, support_embeddings)
         return (metric, query_embeddings, support_embeddings)
 
-        self.metric(query_embeddings, support_embeddings)
+        #self.metric(query_embeddings, support_embeddings)
 
 
     def _model_step(self, batch, batch_idx):
@@ -561,28 +536,40 @@ class PackedVariant(L.LightningModule):
                 - label (Tensor): Ground truth labels (B,).
         """
         # Unpack the batch    
+        images, variants, labels = batch
 
         # Compute metric
         # Forward pass: compute similarity metric between query and support embeddings by passing the batch to forward
         metric, query_embeddings, support_embeddings = self(batch)
 
-        images, variants, labels = batch
+        print("METRIC", metric)
         
         # Can I just not pass a mask??
         padding_start_idx = (variants == -100).nonzero(as_tuple=True)[0][0]
         mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
 
+        #mask = torch.arange(len(torch.masked_select(variants, variants != -100)), device=torch.masked_select(variants, variants != -100).device) < padding_start_idx
+
+
         # --- Compute loss and predictions ---
         # Custom loss function may use embeddings and mask
-        print("METRIC", metric.shape)
-        labels = torch.masked_select(labels, labels!= -100)
-        loss = self.loss(metric, labels, query_embeddings, support_embeddings)
-
+        
+        loss = self.loss(metric, labels[mask], mask, query_embeddings, support_embeddings)
+        print("LOSS", loss)
         # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
+        
         preds = self.predictor(metric, mask)
-        print("Loss", loss)
-        print("preds", preds)
-        print(metric[preds.item()])
+
+        print("Preds", preds)
+        uniques, counts = variants.unique(return_counts=True)
+        for i, (v, c) in enumerate(zip(uniques, counts)):
+            if v == -100:
+                continue
+            v_mask = (variants == v)
+            # Example prediction
+            pred = torch.argmax(metric[v_mask][1:])
+            print("loop metric", metric[v_mask][1:])
+            print("Loop preds", pred)
 
         return (loss, preds, labels)
 
@@ -612,7 +599,6 @@ class PackedVariant(L.LightningModule):
 
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        print("predict")
         metric, *_ = self(batch)
         return metric, batch
     def configure_optimizers(self):
@@ -659,20 +645,13 @@ class GroupedVariant(L.LightningModule):
         support = support.transpose(0, 1)
         support_embeddings = torch.stack([self.encoder(s) for s in support], dim=0)
         support_embeddings = support_embeddings.transpose(0, 1)
-        print("Query Embedings", query_embeddings.shape)
-        print("Support Embeddings", support_embeddings.shape)
         metric = self.metric(query_embeddings, support_embeddings)
-        print("Call to metric")
+
         return (metric, query_embeddings, support_embeddings)
 
     def _model_step(self, batch, batch_idx):
-        print("MODEL STEP")
         query, support, num_support, label, *_ = batch
-        print(f"Batch: {query.shape}, {support.shape}, {num_support.shape}")
-        print("FORWARD FROM MODEL")
         metric, query_embeddings, support_embeddings = self(query, support)
-
-        print("continue model step")
         # Create a mask for the valid support images in each group by filling ones out to the
         # last valid support image (via "exclusive cumsum")
         mask = torch.zeros(metric.shape, dtype=torch.long, device=metric.device)

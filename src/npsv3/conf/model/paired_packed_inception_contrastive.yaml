@@ -13,5 +13,5 @@ optimizer:
   _partial_: true
   lr: 0.001
 predictor:
-  _target_: npsv3.models.paired.MinimizingPredictor
+  _target_: npsv3.models.paired.MaximizingPredictor
 max_group_size: ${data.max_group_size}
