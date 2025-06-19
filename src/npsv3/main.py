@@ -96,14 +96,14 @@ def main(cfg: DictConfig) -> None:
         if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
             OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
-        train(cfg, output_dir=output, limit_train_batches=10)
+        train(cfg, output_dir=output, limit_train_batches=100)
         # TODO: Create link to the best model to serve as the final model
 
     elif cfg.command == "full_train":
         import torch
         torch.set_float32_matmul_precision("high")
 
-        from npsv3.models.runners import train
+        from npsv3.models.runners import train, assess_accuracy
 
         torch.set_num_threads(cfg.threads)
 
@@ -114,15 +114,19 @@ def main(cfg: DictConfig) -> None:
             output = hydra.utils.to_absolute_path(cfg.output)
 
         OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
         if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
             OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
         pretraining_model = cfg.model
-        train(cfg, output_dir=output, limit_train_batches=1.0)
+        print(cfg.data.train_urls)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=100)
         OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
-        # OmegaConf.update(cfg, "pretrained.path", f"/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_={cfg.data._target_},data.batch_size={cfg.data.batch_size},data={cfg.data},model=MiM,pileup={cfg.pileup},trainer.max_epochs={cfg.trainer.max_epochs}/full_train.ckpt", merge=False)
-        OmegaConf.update(cfg, "pretrained.path", f"/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs={cfg.trainer.max_epochs}/full_train.ckpt", merge=False)
-        train(cfg, output_dir=output, limit_train_batches=1.0)
+        print("\ncheckpoint path:",ckpt_path)
+        OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
+        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}", merge=False)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=100)
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
         # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
 
     elif cfg.command == "test":

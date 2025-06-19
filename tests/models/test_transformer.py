@@ -72,6 +72,7 @@ class TestClassifier:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
+        # "data.pin_memory=False",
         "trainer=transformer",
         "pretrained=classifier"
     )
@@ -87,12 +88,12 @@ class TestAccuracy:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=3/full_train.ckpt"'
+        # "data.pin_memory=False",
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=16,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/full_train-step=40740.ckpt"'
     )
     def test_accuracy(self, tmp_path, cfg):
-        #Likely going to get rid of this
-        output_dir = str(tmp_path / "shards")
-        assess_accuracy(cfg, output_dir, limit_predict_batches=100)
+        # output_dir = str(tmp_path / "shards")
+        assess_accuracy(cfg, limit_predict_batches=100)
 
 @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
@@ -139,14 +140,14 @@ class TestDisplayMaskedImage:
             else: continue
 
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
     "model.patch_size=16",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=16,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/pretrained_mim-step=50925.ckpt"',
     # '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/checkpoint=full_train,data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
