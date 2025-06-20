@@ -62,7 +62,7 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
             
             #Add padding to the variants and labels lists
             variants += [-100] * (remaining_space)
-            labels += [-100] * (remaining_space)
+            #labels += [-100] * (remaining_space)
 
             final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
 
@@ -80,7 +80,7 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         #Append the current sample to the images list
         #Append the unsqueezed query image to the images list
         images.append(query.unsqueeze(0))
-        labels.append(0)  # Assuming query is always negative (label 0)
+        #labels.append(0)  # Assuming query is always negative (label 0)
 
         #Append the respahed support images to the images list
         images.append(support.reshape(-1, *image_size))
@@ -88,15 +88,19 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
 
         #META DATA
         variants += [num_images] * ((num_genotypes * num_replicates) + 1)
-        num_images += ((num_genotypes * num_replicates) + 1)
 
         #labels G==Label
         genotype_list = list(range(0, num_genotypes))
+        index = num_images
         for genotype in genotype_list:
             if genotype == label:
-                labels += [1] * num_replicates
+                labels.append(index)
+                break
             else:
-                labels += [0] * num_replicates
+                index += num_replicates
+
+        num_images += ((num_genotypes * num_replicates) + 1)
+
     
     remaining_space = batch_size - num_images
     #YIELD
@@ -109,7 +113,7 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         
         #Add padding to the variants and labels lists
         variants += [-100] * (remaining_space)
-        labels += [-100] * (remaining_space)
+        #labels += [-100] * (remaining_space)
 
         final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
 
@@ -423,10 +427,11 @@ class ContrastiveLoss(nn.Module):
 
     def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
         label_pair = nn.functional.one_hot(label, distances.shape[0])
-
+        print("LABEL PAIR", label_pair)
         loss = label_pair * torch.square(distances) + (1.0 - label_pair) * torch.square(
             torch.clamp(self.margin - distances, min=0)
         )
+        print("LOSS", loss)
         return torch.mean(loss[:, mask])
 
 class NPairsLoss(nn.Module):
@@ -460,7 +465,7 @@ class MaximizingPredictor(nn.Module):
         super(MaximizingPredictor, self).__init__()
 
     def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))[1:]
+        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))[1:] #This [1: ] only accounts for 1 variant, needs to be generalized more, this corresponds to ignoring the query when computing the predictions
         # TODO: Should this use masked_metric?
         return torch.argmax(masked_metric)
 
@@ -472,7 +477,7 @@ class PackedVariant(L.LightningModule):
         loss: nn.Module,
         optimizer: torch.optim.Optimizer,
         predictor: nn.Module,
-        max_group_size=6,
+        max_group_size=10,
     ):
         super().__init__()
 
@@ -541,10 +546,8 @@ class PackedVariant(L.LightningModule):
         # Compute metric
         # Forward pass: compute similarity metric between query and support embeddings by passing the batch to forward
         metric, query_embeddings, support_embeddings = self(batch)
-
-        print("METRIC", metric)
         
-        # Can I just not pass a mask??
+        # Mask padding
         padding_start_idx = (variants == -100).nonzero(as_tuple=True)[0][0]
         mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
 
@@ -554,13 +557,12 @@ class PackedVariant(L.LightningModule):
         # --- Compute loss and predictions ---
         # Custom loss function may use embeddings and mask
         
-        loss = self.loss(metric, labels[mask], mask, query_embeddings, support_embeddings)
-        print("LOSS", loss)
+        loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings)
         # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
         
-        preds = self.predictor(metric, mask)
+        #preds = self.predictor(metric, mask)
 
-        print("Preds", preds)
+        preds2 = []
         uniques, counts = variants.unique(return_counts=True)
         for i, (v, c) in enumerate(zip(uniques, counts)):
             if v == -100:
@@ -568,8 +570,9 @@ class PackedVariant(L.LightningModule):
             v_mask = (variants == v)
             # Example prediction
             pred = torch.argmax(metric[v_mask][1:])
-            print("loop metric", metric[v_mask][1:])
-            print("Loop preds", pred)
+            preds2.append(pred)
+        preds = torch.stack(preds2)
+        
 
         return (loss, preds, labels)
 

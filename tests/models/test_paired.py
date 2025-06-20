@@ -23,7 +23,7 @@ class TestPairedDataLoader:
             images, variants, labels = batch
             print(f"Batch: {images.shape}, {variants.shape}, {labels.shape}")
             assert torch.equal(variants, torch.tensor([0]*9 + [-100]*(batch_val-9))), "Wrong number of variants in the batch"
-            assert torch.equal(labels, torch.tensor([0,0,0,0,0,0,0,1,1] + [-100]*(batch_val-9))), "Wrong number of Labels in the batch" #Two replicates of each genotype, last genotype is positive
+            assert torch.equal(labels, torch.tensor([6])), "Wrong labels"
 
         dm.teardown(stage="fit")
 
