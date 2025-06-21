@@ -206,13 +206,15 @@ class _SequenceResolvedVariant(Variant):
 
     def alt_reference_region(self, allele) -> Range | None:
         assert allele >= 1
-        alt_allele = self._record.alleles[allele]
+        alt_allele = self._record.alleles[allele].upper()
         if alt_allele == "*":
             return None
-        # Compute per-allele padding (since is may be different than the global padding)
-        padding = len(os.path.commonprefix([self._record.ref, alt_allele]))
-        right_padding = len(os.path.commonprefix([self._record.ref[::-1], alt_allele[::-1]]))
-        return Range(self.contig, self.start + padding, self.end-right_padding)
+        # Compute per-allele padding (since is may be different than the global padding). Start with
+        # the "right" side to effectively left-align the variant.
+        ref_allele = self._record.ref.upper()
+        right_padding = len(os.path.commonprefix([ref_allele[::-1], alt_allele[::-1]]))
+        left_padding = len(os.path.commonprefix([ref_allele[:len(ref_allele)-right_padding], alt_allele[:len(alt_allele)-right_padding]]))
+        return Range(self.contig, self.start + left_padding, self.end-right_padding)
 
     def alt_seq(self, allele) -> str | None:
         assert allele >= 1

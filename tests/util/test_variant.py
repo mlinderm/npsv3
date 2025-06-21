@@ -17,6 +17,20 @@ def _write_vcf(tmp_path, vcf: bytes) -> str:
     return vcf_path
 
 class TestStarAlleleVariant:
+    def test_padded_allele(self, tmp_path):
+        vcf_path = _write_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+chr1	1650664	.	CTTTTT	C,CTTTT	.	.	SVTYPE=DEL;SVLEN=-5,-1	GT	1|2
+"""
+        )
+        record = next(pysam.VariantFile(vcf_path, "r"))
+        variant = Variant.from_pysam(record)
+        assert variant.alt_reference_region(2) == Range("chr1", 1650664, 1650665)
+
     def test_star_allele(self, tmp_path):
         vcf_path = _write_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">

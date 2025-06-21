@@ -318,15 +318,18 @@ class Graph:
                 next_nodes = []
                 self._graph.follow_edges(node, False, lambda n: next_nodes.append(n))  # noqa: B023
                 if len(next_nodes) == 0:
-                    # Reached a tip/terminus
-                    haplotypes.append(
-                        InferenceHaplotype(
-                            self,
-                            path,
-                            set(itertools.chain.from_iterable(self.node_paths[node] for node in path))
-                            & inference_paths,
-                        )
-                    )
+                    # Reached a tip/terminus. Identify the relevant inference variant paths present in this haplotype. We label
+                    # haplotypes with the unique nodes that distinguish that haplotype (those not present in the reference path)
+                    node_set = set(path)
+                    var_paths = set()
+                    for var_id, alleles in inference_alleles.items():
+                        ref_set = self.path_nodes[variant_path_name(var_id, 0)]
+                        for a in alleles:
+                            alt_path = variant_path_name(var_id, a)
+                            if self.path_nodes[alt_path].difference(ref_set).issubset(node_set):
+                                var_paths.add(alt_path)
+                    #var_paths = { inf_path for inf_path in inference_paths if self.path_nodes[inf_path].issubset(node_set) }
+                    haplotypes.append(InferenceHaplotype(self, path, var_paths))
                     return
 
                 recurse_nodes = [n for n in next_nodes if self._graph.get_id(n) in include_nodes]

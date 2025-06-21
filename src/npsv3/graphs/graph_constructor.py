@@ -84,6 +84,7 @@ class GraphConstructor:
                                 variant.allele(allele_idx), # Include all the padding bases in the sequence
                             )
                             self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
+
                         # "Normal" allele addition without padding bases
                         if allele_len is not None: # Ignore * alleles
                             # Find and split the corresponding span
@@ -115,7 +116,9 @@ class GraphConstructor:
             for alt in span.alts:
                 self.paths[alt.name].append(alt.node_id)
 
-        # Extend trimmed alternate paths to match the beginning and end points of the reference path.
+        # Extend trimmed (padding removed) alternate paths to match the beginning and end points of the reference path. We need to
+        # do this because we maintain a single reference path for each variant, as opposed to an allele-specific refererence path.
+        # The result should be that the reference and alternate paths begin and end at the same points in the graph.
         for name, nodes in self.paths.items():
             if not name.startswith("_"):
                 continue # Skip paths that aren't variants, e.g., _alt_...
@@ -169,7 +172,6 @@ class GraphConstructor:
                 # We can also have overlap alleles that are not specifically encoded in the VCF with "*", but instead
                 # are still marked with a genotype, e.g., 0/0, even it latter should formally be 0/*. These include insertions
                 # that have identical "zero width" regions
-
                 has_star = False
                 try:
                     star_idx = record.alleles.index("*")
@@ -244,7 +246,7 @@ class GraphConstructor:
                     return (i,alt)
         return (None,None)
 
-    def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout):
+    def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout) -> None:
         """Write the graph in GFA format to out_file using reference sequence from ref_fasta."""
         ref_seq = _reference_sequence(ref_fasta, self.region)
 
@@ -483,7 +485,7 @@ class Phasing(Enum):
 class PhaseState:
     """Phase state for a genotype, including local phase set (PS) if applicable"""
     phase: Phasing
-    phase_set: int | None = None  # Phase set ID, if applicable (this is really any type used in VCF PS field)
+    phase_set: int | None = None  # Phase set ID, if applicable (this is really any type used in the VCF PS field)
 
     def __eq__(self, other):
         if isinstance(other, PhaseState):

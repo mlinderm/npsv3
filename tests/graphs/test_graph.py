@@ -276,7 +276,7 @@ class TestGraphConstructionFromVCF:
 14	77187581	.	GCC	G	603.88	PASS	.	GT	0/1
 14	77187582	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2
 """
-        )
+        )  # fmt: skip
 
         region = Range("14", 77187572, 77187592)
         graph = Graph.from_vcf(B37_REF_FASTA, vcf_path, region)
@@ -286,12 +286,20 @@ class TestGraphConstructionFromVCF:
         assert graph.sequence_length(graph.nodes_on_path("HG002#1#14#0")) == 18
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
-    @pytest.mark.skipif(not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.hg38.vcf.gz") or not os.path.exists("/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"), reason="Test vcfs required")
+    @pytest.mark.skipif(
+        not os.path.exists(
+            "/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.hg38.vcf.gz"
+        )
+        or not os.path.exists(
+            "/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"
+        ),
+        reason="Test vcfs required",
+    )
     @pytest.mark.parametrize(
         "region",
         [
-            Range.parse_literal("chr1:1139780-1140337"), # '*' allele in a SV
-            Range.parse_literal("chr1:3999762-3999900"), # Mutiallelic DEL, MNV
+            Range.parse_literal("chr1:1139780-1140337"),  # '*' allele in a SV
+            Range.parse_literal("chr1:3999762-3999900"),  # Mutiallelic DEL, MNV
         ],
     )
     def test_dipcall_observed_errors(self, cfg, region):
@@ -305,9 +313,10 @@ class TestGraphConstructionFromVCF:
 
         haplotypes = graph.all_haplotypes(
             "/storage/mlinderman/projects/sv/npsv3-experiments/resources/hg002v1.1.dipcall.passing.sv.hg38.vcf.gz",
-            region.contig, # Use the contig as the backbone
+            region.contig,  # Use the contig as the backbone
             region.expand(cfg.pileup.variant_padding),
         )
 
         assert len(haplotypes) >= 2
+        print(haplotypes, graph.nodes_on_path(region.contig))
         assert haplotypes[0].nodes == graph.nodes_on_path(region.contig)
