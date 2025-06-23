@@ -5,6 +5,7 @@ import hydra
 import random
 import lightning as L
 import torch
+import time
 import webdataset as wds
 from dataclasses import dataclass
 from typing import Union, Optional, Tuple
@@ -72,7 +73,6 @@ class RealImageDataModule(L.LightningDataModule):
             pixel_values = self.transforms(image)
             # print("\npixel values shape: ",pixel_values.shape)
 
-            # random masking
             num_patches = (pixel_values.shape[1] // self.configuration.patch_size) * (pixel_values.shape[2] // self.configuration.patch_size)
             vals = [True, False]
             top_weights = [3, 1]
@@ -90,10 +90,9 @@ class RealImageDataModule(L.LightningDataModule):
                 bool_masked_pos = data_driven_masking(pixel_values, num_patches, self.configuration.patch_size, init_bool_mask_pos)
             
             label = data["label.cls"]
-            if label > 0:
-                label = 1
             # print("\nloaded label: ",label)
-            return pixel_values, bool_masked_pos, data["__key__"], data.get("region.txt", data["__key__"]), label
+
+            return pixel_values, bool_masked_pos, data["__key__"], data.get("region.txt", data["__key__"]), 0 if label == 0 else 1
 
         dataset = (
             dataset.decode()
@@ -109,6 +108,13 @@ class RealImageDataModule(L.LightningDataModule):
             worker_init_fn = torch.set_num_threads(1)
 
         # We unbatch, shuffle, and rebatch to mix samples from different workers as shown in webdataset examples
+        pin_memory = False
+        worker_init_fn=None
+        if torch.cuda.is_available():
+            pin_memory = True
+            worker_init_fn=torch.set_num_threads(1)
+
+        # print("\npin memory?", pin_memory)
         loader = wds.WebLoader(
             dataset,
             batch_size=None,
@@ -136,7 +142,6 @@ class MiM(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        model_name="google/vit-base-patch16-224-in21k",
         num_channels = 7,
         image_size=(96, 288),
         patch_size=16,
@@ -356,7 +361,7 @@ def torch_decode(key, data):
         stream = io.BytesIO(data)
         return torch.load(stream, weights_only=True, map_location='cpu')
 
-def assess_accuracy(cfg, output_dir, **kw_args):
+def assess_accuracy(cfg, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
     data_path = cfg.data.predict_urls
     model_cls = hydra.utils.get_class(cfg.model._target_)

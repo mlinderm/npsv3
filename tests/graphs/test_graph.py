@@ -1,10 +1,13 @@
+import itertools
 import os
 
 import odgi
+import pysam
 import pytest
 
 from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
+from npsv3.util.vcf import index_variant_file
 
 from .. import B37_REF_FASTA, HG00731_SV_VCF, HG00731_VCF, HG38_REF_FASTA, data_path
 
@@ -22,6 +25,17 @@ def assert_topological_order(graph: odgi.graph):
 
     graph.for_each_handle(check_node)
 
+
+def _write_vcf(tmp_path, vcf: bytes) -> str:
+    """Return GraphConstructor for VCF as literal string in `expand`ed region."""
+    vcf_path = os.path.join(tmp_path, "test.vcf.gz")
+    with pysam.BGZFile(vcf_path, "wb") as vcf_file:
+        vcf_file.write(vcf)
+    index_variant_file(vcf_path)
+
+    return vcf_path
+
+
 class TestGraphConstructionFromVCF:
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
     def test_simple_haplotype(self):
@@ -33,18 +47,17 @@ class TestGraphConstructionFromVCF:
             region,
             inference_vcf=data_path("12_22129565_22130387.vcf.gz"),
         )
+        # graph._graph.to_gfa()
 
-        for path in ("12", "HG002#0#12#0", "HG002#1#12#0"):
-            assert graph.has_path(path)
-        for haplotype in (0, 1):
-            assert not graph.has_path(
-                f"HG002#{haplotype}#12#1"
-            ), "VCF should translate to a single path for each haplotype"
+        # Due to local phasing (phase sets in the VCF) we expect to have 3 paths for each haplotype
+        assert graph.has_path("12"), "Reference path should be present"
+        for prefix, i in itertools.product(("HG002#0#12", "HG002#1#12"), range(3)):
+            assert graph.has_path(f"{prefix}#{i}"), f"Path {prefix}#{i} should be present"
+        assert not graph.has_path("HG002#0#12#3")
+        assert not graph.has_path("HG002#1#12#3")
 
         # Use exhaustive generation
-        haplotypes = graph.all_haplotypes(
-            data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12#0", region
-        )
+        haplotypes = graph.all_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "HG002#0#12", region)
         assert len(haplotypes) == 2, "A single isolated variant should only have two haplotypes"
         for i in range(2):
             assert haplotypes[i].paths == {f"_alt_553e586e2a8e7c2fd70661fec7b529c5453a9b45_{i}"}
@@ -53,8 +66,12 @@ class TestGraphConstructionFromVCF:
         assert len(haplotypes[0].sequence()) == region.length - 1
         assert len(haplotypes[1].sequence()) == region.length - 1 - 822
 
-        # Variant path should match the background
-        assert graph.nodes_on_path("HG002#0#12#0") == haplotypes[1].nodes
+        # Variant path should match the background constructed from the 3 paths making up
+        # the haplotype concatenated
+        assert (
+            list(itertools.chain.from_iterable(graph.nodes_on_path(f"HG002#0#12#{i}") for i in range(3)))
+            == haplotypes[1].nodes
+        )
 
         variant_haplotypes = graph.all_haplotypes(data_path("12_22129565_22130387.vcf.gz"), "12", region)
         assert len(variant_haplotypes) == 2, "The reference background should generate the same number of haplotypes"
@@ -104,10 +121,18 @@ class TestGraphConstructionFromVCF:
     # "implicit" path that does not include the alternate allele
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
-    @pytest.mark.parametrize("region,background_vcf,inference_vcf,exp_haplotypes", [
-        (Range("chr1", 8977700, 8977700), "chr1_8976700_8978700.vcf.gz", "chr1_8976700_8978700.sv.vcf.gz", (2,2)),
-        (Range("chr1", 41824764, 41824818), "chr1_41823764_41825818.vcf.gz", "chr1_41823764_41825818.sv.vcf.gz", (3,3)),
-    ])
+    @pytest.mark.parametrize(
+        ("region", "background_vcf", "inference_vcf", "exp_haplotypes"),
+        [
+            (Range("chr1", 8977700, 8977700), "chr1_8976700_8978700.vcf.gz", "chr1_8976700_8978700.sv.vcf.gz", (2, 2)),
+            (
+                Range("chr1", 41824764, 41824818),
+                "chr1_41823764_41825818.vcf.gz",
+                "chr1_41823764_41825818.sv.vcf.gz",
+                (3, 3),
+            ),
+        ],
+    )
     def test_adjacent_variant_haplotype(self, cfg, region, background_vcf, inference_vcf, exp_haplotypes):
         graph = Graph.from_vcf(
             HG38_REF_FASTA,
@@ -117,7 +142,11 @@ class TestGraphConstructionFromVCF:
         )
         graph._graph.to_gfa()
         for allele, exp_haplotypes_allele in enumerate(exp_haplotypes):
-            haplotypes = graph.all_haplotypes(data_path(inference_vcf), f"HG00731#{allele}#{region.contig}#0", region.expand(cfg.pileup.variant_padding))
+            haplotypes = graph.all_haplotypes(
+                data_path(inference_vcf),
+                f"HG00731#{allele}#{region.contig}#0",
+                region.expand(cfg.pileup.variant_padding),
+            )
             assert len(haplotypes) == exp_haplotypes_allele, f"Unexpected number of haplotypes for allele {allele}"
 
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
@@ -141,8 +170,14 @@ class TestGraphConstructionFromVCF:
         # HG00731#1#chr1 is comprised of multiple paths, so shortest path should link these paths, minimizing
         # the number of reference bases required. In this case the only difference is now a 1|0 DEL.
         shortest_second_chrom_path = graph.shortest_path("HG00731#1#chr1")
-        assert set(first_chrom_path) - set(shortest_second_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_1"]
-        assert set(shortest_second_chrom_path) - set(first_chrom_path) == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_0"]
+        assert (
+            set(first_chrom_path) - set(shortest_second_chrom_path)
+            == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_1"]
+        )
+        assert (
+            set(shortest_second_chrom_path) - set(first_chrom_path)
+            == graph.path_nodes["_alt_962c481d8368e20de391e2a3265d6e6c9fd77761_0"]
+        )
 
         for backbone in ("chr1", "HG00731#0#chr1#0", "HG00731#1#chr1"):
             haplotypes = graph.all_haplotypes(
@@ -180,11 +215,8 @@ class TestGraphConstructionFromVCF:
         for h in (2, 3):
             assert len(del_nodes & set(haplotypes[h].nodes)) == 0
 
-
     @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
-    @pytest.mark.skipif(
-        not HG00731_VCF or not HG00731_SV_VCF, reason="HG00731 VCFs required"
-    )
+    @pytest.mark.skipif(not HG00731_VCF or not HG00731_SV_VCF, reason="HG00731 VCFs required")
     @pytest.mark.parametrize(
         "region",
         [
@@ -193,7 +225,7 @@ class TestGraphConstructionFromVCF:
             # Range("chr1", 1075570, 1075670),
             # Range("chr1", 1978993, 1979167),
             # Range("chr1", 2689931, 2689931),
-            #Range("chr1", 6012135, 6012135),
+            # Range("chr1", 6012135, 6012135),
             # Range("chr1", 12858834, 12858933),
             # Range("chr1", 29553648, 29553842), # Region overlaps N's, should generally be excluded
             # Range("chr1", 38618549, 38620153),
@@ -208,7 +240,7 @@ class TestGraphConstructionFromVCF:
             region.expand(cfg.pileup.graph_flank),
             inference_vcf=HG00731_SV_VCF,
         )
-        #graph._graph.to_gfa()
+        # graph._graph.to_gfa()
         assert graph.is_bubble_path(region.contig), "Graph must form bubble for reference paths"
 
         haplotypes = graph.all_haplotypes(
@@ -217,30 +249,37 @@ class TestGraphConstructionFromVCF:
             region.expand(cfg.pileup.variant_padding),
         )
         assert len(haplotypes) > 1
-        assert (
-            len(haplotypes[0].sequence()) == graph.region.length
-        ), "With reference background, first haplotype should match reference length"
+        assert len(haplotypes[0].sequence()) == graph.region.length, (
+            "With reference background, first haplotype should match reference length"
+        )
         assert haplotypes[0].nodes == graph.nodes_on_path(region.contig)
 
-
         backgrounds = [
-            graph.all_haplotypes(HG00731_SV_VCF, f"HG00731#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding))
+            graph.all_haplotypes(
+                HG00731_SV_VCF, f"HG00731#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding)
+            )
             for i in range(2)
         ]
         for allele, background in enumerate(backgrounds):
             base_path_nodes = graph.shortest_path(f"HG00731#{allele}#{region.contig}")
-            assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1, f"No path matches backbone for allele {allele}"
-
+            assert sum(haplotype.nodes == base_path_nodes for haplotype in background) == 1, (
+                f"No path matches backbone for allele {allele}"
+            )
 
     @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
-    def test_star_alleles(self):
-        region = Range("14", 77187572, 77187592)
-        graph = Graph.from_vcf(
-            B37_REF_FASTA,
-            data_path("14_77187582_77187582.vcf.gz"),
-            region,
+    def test_star_alleles(self, tmp_path):
+        vcf_path = _write_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=14,length=107349540>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+14	77187581	.	GCC	G	603.88	PASS	.	GT	0/1
+14	77187582	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2
+"""
         )
 
+        region = Range("14", 77187572, 77187592)
+        graph = Graph.from_vcf(B37_REF_FASTA, vcf_path, region)
         graph._graph.to_gfa()
 
         assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30

@@ -72,6 +72,7 @@ class TestClassifier:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
+        # "data.pin_memory=False",
         "trainer=transformer",
         "pretrained=classifier"
     )
@@ -91,9 +92,8 @@ class TestAccuracy:
         '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=32,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/full_train-step=10185.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
-        #Likely going to get rid of this
-        output_dir = str(tmp_path / "shards")
-        assess_accuracy(cfg, output_dir, limit_predict_batches=100)
+        # output_dir = str(tmp_path / "shards")
+        assess_accuracy(cfg, limit_predict_batches=100)
 
 @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
@@ -140,15 +140,20 @@ class TestDisplayMaskedImage:
             else: continue
 
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
     "model.patch_size=16",
+<<<<<<< HEAD
     "data.mask_scheme=[\"random\", 50]",
     '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data=real_image,model.patch_size=16,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_mim-step=203700.ckpt"',
+=======
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=16,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/pretrained_mim-step=50925.ckpt"',
+    # '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/checkpoint=full_train,data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/"',
+>>>>>>> fea0c4f053b7b0a78672b08f0d7601b2d2cd0d89
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",

@@ -3,7 +3,7 @@ import lightning as L
 import torch
 from omegaconf import OmegaConf
 from lightning.pytorch.callbacks import TQDMProgressBar
-from npsv3.models.transformer import Classifier
+from npsv3.models.transformer import Classifier, LabelsToWebDatasetCallback
 
 
 def train(cfg, output_dir=None, **kw_args):
@@ -15,8 +15,6 @@ def train(cfg, output_dir=None, **kw_args):
     else: 
         model = hydra.utils.instantiate(cfg.model)
         model = torch.compile(model)
-    
-    # model = torch.compile(model)
 
     # Overwrite existing checkpoints, instead of creating new versions
     # print("\ncheckpoint name:",cfg.checkpoint.name)
@@ -43,3 +41,14 @@ def train(cfg, output_dir=None, **kw_args):
     trainer.fit(model=model, datamodule=dm)
 
     return checkpoint_callback.best_model_path
+
+def assess_accuracy(cfg, ckpt_path, **kw_args):
+    dm = hydra.utils.instantiate(cfg.data)
+    data_path = cfg.data.predict_urls
+    model = Classifier.load_from_checkpoint(ckpt_path, strict=False)
+    
+    trainer = L.Trainer(
+        # I believe "callbacks" means that something runs after each iteration of the trainer
+        callbacks=[LabelsToWebDatasetCallback(data_path), TQDMProgressBar(refresh_rate=50)], **kw_args
+    )
+    trainer.predict(model, dm)

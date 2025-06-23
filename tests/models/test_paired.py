@@ -20,8 +20,8 @@ class TestPairedDataLoader:
         for _i, batch in enumerate(dm.train_dataloader()):
             query, support, num_support, label = batch
 
-            assert query.shape == (1, len(cfg.pileup.image_channels), cfg.pileup.image_height, cfg.pileup.image_width)
-            assert support.shape == (1, 6, len(cfg.pileup.image_channels), cfg.pileup.image_height, cfg.pileup.image_width)
+            b, c, h, w = query.shape
+            assert support.shape == (b, cfg.data.max_group_size, c, h, w)
             assert num_support == torch.tensor([4]), "Only 4 genotypes in support data"
             assert label == torch.tensor([3])
 
