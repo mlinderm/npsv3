@@ -28,6 +28,7 @@ class RealImageDataModule(L.LightningDataModule):
         batch_size=16,
         num_workers=1,
         shuffle_size=1000,
+        masking_scheme={"random": 50}
         # pin_memory=False
     ):
         super().__init__()
@@ -37,7 +38,9 @@ class RealImageDataModule(L.LightningDataModule):
         self.validate_urls = validate_urls
         self.predict_urls = predict_urls
         self.test_urls = test_urls
+        self.masking_scheme = masking_scheme
 
+        # print("\nmasking scheme:",self.masking_scheme)
 
         self.transforms = transforms.Compose(
             [
@@ -131,7 +134,7 @@ class MiM(L.LightningModule):
         num_channels = 7,
         image_size=(96, 288),
         patch_size=16,
-        encoder_stride=16
+        encoder_stride=16,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -309,37 +312,40 @@ def torch_decode(key, data):
         stream = io.BytesIO(data)
         return torch.load(stream, weights_only=True, map_location='cpu')
 
-def assess_accuracy(cfg, **kw_args):
-    dm = hydra.utils.instantiate(cfg.data)
-    data_path = cfg.data.predict_urls
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-    )
+# def assess_accuracy(cfg, **kw_args):
+#     dm = hydra.utils.instantiate(cfg.data)
+#     data_path = cfg.data.predict_urls
+#     model_cls = hydra.utils.get_class(cfg.model._target_)
+#     model = model_cls.load_from_checkpoint(
+#         cfg.model.checkpoint,
+#     )
     
-    trainer = L.Trainer(
-        # I believe "callbacks" means that something runs after each iteration of the trainer
-        callbacks=[LabelsToWebDatasetCallback(data_path)], **kw_args
-    )
-    return trainer.predict(model, dm)
+#     trainer = L.Trainer(
+#         # I believe "callbacks" means that something runs after each iteration of the trainer
+#         callbacks=[LabelsToWebDatasetCallback(data_path)], **kw_args
+#     )
+#     return trainer.predict(model, dm)
 
 class LabelsToWebDatasetCallback(L.pytorch.callbacks.Callback):
     def __init__(self, data_path: str, num_channels=3):
-        # This will be a list containing the predictions which I will average to get the accuracy
+        # This will be a list containing the predictions which we will average to get the accuracy
         self.predictions = []
         self.dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
 
     #I believe this is an override for the default function that allows us to execute some code each prediction
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
+        for logits in outputs.logits:
+            self.predictions.append(torch.argmax(logits).item())
 
         #This is a function/area we could look into to change
-        self.predictions.append(torch.argmax(outputs.logits, dim=1)[0].item())
+        # print(outputs)
+        # self.predictions.append(torch.argmax(outputs.logits, dim=1)[0].item())
         
         # self.predictions.append(0)
         # print("label: ",label)
 
     def on_predict_end(self, trainer, model):
-        # print(self.predictions)
+        print(f"\nAssessing accuracy of {len(self.predictions)} predictions")
         correct = 0
         for i, sample in enumerate(self.dataset):
             if i >= len(self.predictions): break
@@ -405,9 +411,6 @@ def reconstruct(cfg, output_dir, **kw_args):
 #         image = sample["image.npy"]
 #     return image
 
-
-
-
 def generate_mask_visual(bool_masked_pos, patch_size):
     
     mask = Image.new("RGB", (288, 96))
@@ -422,6 +425,6 @@ def generate_mask_visual(bool_masked_pos, patch_size):
             else:
                 mask.putpixel((j, i), (0, 0, 0))
 
-    # png_path = "/home/apezza/npsv3/tests/results/mask.png"
-    png_path = result_path("mask.png")
+    png_path = "/home/apezza/npsv3/tests/results/mask.png"
+    # png_path = result_path("mask.png")
     mask.save(png_path)

@@ -9,10 +9,11 @@ from npsv3.models.transformer import Classifier, LabelsToWebDatasetCallback
 
 
 def train(cfg, output_dir=None, **kw_args):
+    # print("\nmasking scheme:",cfg.model.masking_scheme)
     dm = hydra.utils.instantiate(cfg.data)
 
     if cfg.pretrained.path:
-        # print("pretrained loaded")
+        # print(f"\npretrained loaded from {cfg.pretrained.path}")
         model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)
     else: 
         model = hydra.utils.instantiate(cfg.model)
@@ -51,6 +52,7 @@ def train(cfg, output_dir=None, **kw_args):
 def assess_accuracy(cfg, ckpt_path, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
     data_path = cfg.data.predict_urls
+    print("\n",ckpt_path)
     model = Classifier.load_from_checkpoint(ckpt_path, strict=False)
     
     trainer = L.Trainer(
