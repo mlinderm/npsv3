@@ -1,1 +1,1 @@
-name: "full_train"
+name: "pretrained_mim-{step}"

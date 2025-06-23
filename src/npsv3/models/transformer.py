@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Union, Optional, Tuple
 from PIL import Image
 import numpy as np
+# For debugging only
 from tests import result_path
 from torch import nn
 from torchvision.transforms import v2 as transforms
@@ -27,6 +28,7 @@ class RealImageDataModule(L.LightningDataModule):
         batch_size=16,
         num_workers=1,
         shuffle_size=1000,
+        mask_scheme=["random", 50]
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["train_urls", "validate_urls", "predict_urls", "test_urls"])
@@ -35,6 +37,7 @@ class RealImageDataModule(L.LightningDataModule):
         self.validate_urls = validate_urls
         self.predict_urls = predict_urls
         self.test_urls = test_urls
+        self.mask_scheme=mask_scheme
 
 
         self.transforms = transforms.Compose(
@@ -76,8 +79,15 @@ class RealImageDataModule(L.LightningDataModule):
             bottom_weights = [1, 2]
             top_masked_pos = random.choices(vals, weights=top_weights, k=num_patches//2)
             bottom_masked_pos = random.choices(vals, weights=bottom_weights, k=num_patches//2)
-            # bool_masked_pos = torch.tensor(top_masked_pos+bottom_masked_pos).bool()
-            bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
+
+
+            init_bool_mask_pos = torch.rand(num_patches) < self.mask_scheme[1] / 100
+
+            if self.mask_scheme[0] == "random":
+                bool_masked_pos = init_bool_mask_pos
+            # performance?
+            if self.mask_scheme[0] == "data_driven":
+                bool_masked_pos = data_driven_masking(pixel_values, num_patches, self.configuration.patch_size, init_bool_mask_pos)
             
             label = data["label.cls"]
             if label > 0:
@@ -92,12 +102,21 @@ class RealImageDataModule(L.LightningDataModule):
             .batched(self.hparams.batch_size, partial=mode != "train")
         )
 
+        pin_memory = False
+        worker_init_fn = None
+        if torch.cuda.is_available():
+            pin_memory = True
+            worker_init_fn = torch.set_num_threads(1)
+
         # We unbatch, shuffle, and rebatch to mix samples from different workers as shown in webdataset examples
         loader = wds.WebLoader(
             dataset,
             batch_size=None,
             shuffle=False,
             num_workers=self.hparams.num_workers,
+            pin_memory=pin_memory,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=True
         ).unbatched()
         if mode == "train":
             loader = loader.shuffle(self.hparams.shuffle_size)
@@ -121,14 +140,12 @@ class MiM(L.LightningModule):
         num_channels = 7,
         image_size=(96, 288),
         patch_size=16,
-        encoder_stride=16
+        encoder_stride=16,
     ):
         super().__init__()
         self.save_hyperparameters()
         # configuration = ViTConfig(num_channels=num_channels)
         configuration = ViTConfig(num_channels=num_channels, image_size=image_size, patch_size=patch_size, encoder_stride=encoder_stride)
-
-        
         self.model = ViTForMaskedImageModeling(configuration)
 
     def forward(self, pixel_values, bool_masked_pos):
@@ -147,13 +164,51 @@ class MiM(L.LightningModule):
         return { "optimizer": optimizer }
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        pixel_values, bool_masked_pos, *_ = batch
-        # num_patches = (pixel_values.shape[1] // 16) * (pixel_values.shape[2] // 16)
-        # bool_masked_pos = torch.zeros(108)
+        # pixel_values, bool_masked_pos, *_ = batch
 
-        out = self(pixel_values, bool_masked_pos)
-        print("\nloss: ",out.loss)
-        return out
+        # out = self(pixel_values, bool_masked_pos)
+        # print("\nloss: ",out.loss)
+        # return out
+
+
+        # AI Generated
+        pixel_values, bool_masked_pos, *_ = batch
+        outputs = self(pixel_values, bool_masked_pos)
+
+        reconstructed = outputs.logits  # (B, C, H, W)
+
+        print("\nLoss on reconstruct: ", outputs.loss)
+
+        # Resize bool_masked_pos from patch-wise to pixel-wise if needed
+        # But if you're using ViT and your output is already image-shaped, you can just:
+        #   - Use bool_masked_pos to compute a patch-wise mask
+        #   - Upsample it to match the image size
+
+        # Construct final image with reconstructed content only at masked positions
+        # Assume patch size and image size align (i.e., divisible)
+        B, C, H, W = pixel_values.shape
+        patch_size = self.hparams.patch_size
+        num_patches_h = H // patch_size
+        num_patches_w = W // patch_size
+
+        # Convert patch-wise mask to pixel-wise mask
+        bool_masked_pos_reshaped = bool_masked_pos.view(B, num_patches_h, num_patches_w)
+        mask_upsampled = bool_masked_pos_reshaped.repeat_interleave(patch_size, dim=1).repeat_interleave(patch_size, dim=2)
+        mask_upsampled = mask_upsampled.unsqueeze(1)  # (B, 1, H, W)
+
+        # Apply mask: reconstruct only masked pixels
+        final_reconstruction = torch.where(mask_upsampled.bool(), reconstructed, pixel_values)
+
+        return {
+            "original": pixel_values,
+            "masked_pos": bool_masked_pos,
+            "reconstructed_only": reconstructed,
+            "final_reconstruction": final_reconstruction
+        }
+
+
+
+
     
 #Adapted from: https://github.com/huggingface/transformers/blob/v4.52.3/src/transformers/models/vit/modeling_vit.py#L592
 class ModelOutput:
@@ -260,14 +315,16 @@ class Classifier(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        model_path="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt",
+        model_path="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=128,data=real_image,model.patch_size=8,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/full_train.ckpt",
         num_channels = 7,
-        image_size = (96,288),
-        num_labels = 2
+        image_size = (96, 288),
+        num_labels = 2,
+        patch_size=16,
+        encoder_stride=16
     ):
         super().__init__()
         self.save_hyperparameters()
-        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, num_labels=num_labels)
+        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, num_labels=num_labels, patch_size=patch_size, encoder_stride=encoder_stride)
         self.model = ViTForImageClassification(configuration)
 
     def forward(self, pixel_values, labels):
@@ -361,9 +418,14 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         # comment out to make more efficient
         generate_mask_visual(bool_masked_pos, 16)
 
+
+
+        recon_images = outputs["final_reconstruction"]
+
         #print(outputs)
-        #encodings, recon_images = outputs
-        for key, real_image, recon_image, region, in zip(keys, images, outputs.reconstruction, regions, strict=False):
+        # encodings, recon_images = outputs
+
+        for key, real_image, recon_image, region, in zip(keys, images, recon_images, regions, strict=False):
             sample = {
                 "__key__": key,
                 "image.npy": self.denormalize(real_image).permute(1, 2, 0).cpu().numpy(),
@@ -415,3 +477,24 @@ def generate_mask_visual(bool_masked_pos, patch_size):
     # png_path = "/home/apezza/npsv3/tests/results/mask.png"
     png_path = result_path("mask.png")
     mask.save(png_path)
+
+
+def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
+
+    patches_per_row = len(pixel_values[0][0]) // patch_size
+    patches_per_col = len(pixel_values[0]) // patch_size
+
+    for i in range (len(i_bool_mask_pos)):
+        if (i_bool_mask_pos[i] == False): continue
+
+        patch_coord = (i % patches_per_row, i // patches_per_row)
+        patch_col, patch_row = patch_coord
+
+        pixel_col = patch_col * patch_size
+        pixel_row = patch_row * patch_size
+
+        if (pixel_values[0][pixel_row][pixel_col] == -1.0):
+            i_bool_mask_pos[i] = False
+
+    return i_bool_mask_pos
+

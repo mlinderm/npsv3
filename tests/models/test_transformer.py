@@ -52,22 +52,22 @@ class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=MiM",
-        "model.patch_size=16",
+        "model.patch_size=8",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
-        "checkpoint=full_train",
         "trainer=transformer",
     )
     def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 class TestClassifier:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
+        "model.patch_size=8",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
@@ -83,11 +83,12 @@ class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
+        "model.patch_size=32",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=3/full_train.ckpt"'
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=32,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/full_train-step=10185.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
         #Likely going to get rid of this
@@ -146,8 +147,8 @@ class TestDisplayMaskedImage:
     "pileup=unphased_variant",
     "model=MiM",
     "model.patch_size=16",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
-    # '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/checkpoint=full_train,data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/"',
+    "data.mask_scheme=[\"random\", 50]",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data=real_image,model.patch_size=16,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_mim-step=203700.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -223,6 +224,7 @@ class TestTransformerReconstruction:
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
+    "model.patch_size=8",
     '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=5/epoch=4-step=58770.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",

@@ -7,3 +7,4 @@ num_channels: ${len:${pileup.image_channels}}
 batch_size: 16
 num_workers: ${threads}
 shuffle_size: 1000
+mask_scheme: ["random", 50]
