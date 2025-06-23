@@ -1,4 +1,5 @@
 _target_: npsv3.models.transformer.Classifier
+patch_size: 16
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
