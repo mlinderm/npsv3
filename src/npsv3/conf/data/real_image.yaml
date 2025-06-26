@@ -3,9 +3,9 @@ train_urls: null
 validate_urls: null
 predict_urls: null
 test_urls: null
-masking_scheme: {"random": 50}
 num_channels: ${len:${pileup.image_channels}}
 batch_size: 16
+patch_size: 16
 num_workers: ${threads}
 shuffle_size: 1000
 mask_scheme: ["random", 50]

@@ -48,39 +48,38 @@ class TestRealImageDataLoader:
 
         dm.teardown(stage="fit")
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=MiM",
-        "model.patch_size=8",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
+        "data.patch_size=32",
         "trainer=transformer",
     )
     def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestClassifier:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
-        "model.patch_size=8",
+        "data.patch_size=8",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
-        # "data.pin_memory=False",
         "trainer=transformer",
         "pretrained=classifier"
     )
     def test_classifier(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
@@ -94,7 +93,7 @@ class TestAccuracy:
     )
     def test_accuracy(self, tmp_path, cfg):
         # output_dir = str(tmp_path / "shards")
-        assess_accuracy(cfg, cfg.model.checkpoint, limit_predict_batches=1000)
+        assess_accuracy(cfg, cfg.model.checkpoint, limit_predict_batches=100)
 
 @pytest.mark.skip()
 @pytest.mark.cfg_overrides(

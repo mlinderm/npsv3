@@ -121,12 +121,12 @@ def main(cfg: DictConfig) -> None:
 
         pretraining_model = cfg.model
         # print(cfg.data.train_urls)
-        ckpt_path = train(cfg, output_dir=output, limit_train_batches=100)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=10)
         OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
         # print("\ncheckpoint path:",ckpt_path)
         OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
         OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}", merge=False)
-        ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=10)
         assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
         # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
 
@@ -139,7 +139,7 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
 
         ckpt_path = cfg.pretrained.path
-        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1000)
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
 
     elif cfg.command == "test":
         import torch
