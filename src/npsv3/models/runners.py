@@ -9,6 +9,8 @@ from npsv3.models.transformer import Classifier, LabelsToWebDatasetCallback
 def train(cfg, output_dir=None, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
 
+    OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
+
     if cfg.pretrained.path:
         # print("pretrained loaded")
         model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)

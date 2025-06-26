@@ -29,7 +29,8 @@ class RealImageDataModule(L.LightningDataModule):
         batch_size=16,
         num_workers=1,
         shuffle_size=1000,
-        mask_scheme=["random", 50]
+        patch_size = 16,
+        mask_scheme=["random", 20]
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["train_urls", "validate_urls", "predict_urls", "test_urls"])
@@ -74,14 +75,13 @@ class RealImageDataModule(L.LightningDataModule):
             # print("\npixel values shape: ",pixel_values.shape)
 
             num_patches = (pixel_values.shape[1] // self.configuration.patch_size) * (pixel_values.shape[2] // self.configuration.patch_size)
-            vals = [True, False]
-            top_weights = [3, 1]
-            bottom_weights = [1, 2]
-            top_masked_pos = random.choices(vals, weights=top_weights, k=num_patches//2)
-            bottom_masked_pos = random.choices(vals, weights=bottom_weights, k=num_patches//2)
 
+            # number of patches we want to mask
+            num_masked = int(self.mask_scheme[1] / 100 * num_patches)
+            selected_indices = torch.randperm(num_patches)[:num_masked]
 
-            init_bool_mask_pos = torch.rand(num_patches) < self.mask_scheme[1] / 100
+            init_bool_mask_pos = torch.zeros(num_patches, dtype=torch.bool)
+            init_bool_mask_pos[selected_indices] = True
 
             if self.mask_scheme[0] == "random":
                 bool_masked_pos = init_bool_mask_pos
@@ -145,12 +145,11 @@ class MiM(L.LightningModule):
         num_channels = 7,
         image_size=(96, 288),
         patch_size=16,
-        encoder_stride=16,
     ):
         super().__init__()
         self.save_hyperparameters()
         # configuration = ViTConfig(num_channels=num_channels)
-        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, patch_size=patch_size, encoder_stride=encoder_stride)
+        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, patch_size=patch_size, encoder_stride=patch_size)
         self.model = ViTForMaskedImageModeling(configuration)
 
     def forward(self, pixel_values, bool_masked_pos):
@@ -320,16 +319,14 @@ class Classifier(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        model_path="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=128,data=real_image,model.patch_size=8,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/full_train.ckpt",
         num_channels = 7,
         image_size = (96, 288),
         num_labels = 2,
-        patch_size=16,
-        encoder_stride=16
+        patch_size=16
     ):
         super().__init__()
         self.save_hyperparameters()
-        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, num_labels=num_labels, patch_size=patch_size, encoder_stride=encoder_stride)
+        configuration = ViTConfig(num_channels=num_channels, image_size=image_size, num_labels=num_labels, patch_size=patch_size, encoder_stride=patch_size)
         self.model = ViTForImageClassification(configuration)
 
     def forward(self, pixel_values, labels):
@@ -461,7 +458,6 @@ def reconstruct(cfg, output_dir, **kw_args):
 #     for sample in enumerate(dataset):
 #         image = sample["image.npy"]
 #     return image
-
 
 
 

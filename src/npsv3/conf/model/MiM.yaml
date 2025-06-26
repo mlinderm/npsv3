@@ -1,7 +1,16 @@
 _target_: npsv3.models.transformer.MiM
 patch_size: 16
-# Could we possibly edit percision here?
-# percision:
+
+# optimizer:
+#   _target_: torch.optim.Adamw
+#   _partial_: true
+#   lr: 0.001
+#   betas: [0.9, 0.999]
+#   eps: 1e-8
+#   weight_decay: 0.01
+#   amsgrad: false
+
+
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
