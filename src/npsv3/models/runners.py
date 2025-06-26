@@ -3,16 +3,17 @@ import lightning as L
 import torch
 from omegaconf import OmegaConf
 from lightning.pytorch.callbacks import TQDMProgressBar
-from npsv3.models.transformer import Classifier, LabelsToWebDatasetCallback
+from npsv3.models.transformer import Classifier, ModelAssessmentCallback
 
 
 def train(cfg, output_dir=None, **kw_args):
+    # print("\nmasking scheme:",cfg.model.masking_scheme)
     dm = hydra.utils.instantiate(cfg.data)
 
     OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
 
     if cfg.pretrained.path:
-        # print("pretrained loaded")
+        # print(f"\npretrained loaded from {cfg.pretrained.path}")
         model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)
     else: 
         model = hydra.utils.instantiate(cfg.model)
@@ -46,11 +47,11 @@ def train(cfg, output_dir=None, **kw_args):
 
 def assess_accuracy(cfg, ckpt_path, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
-    data_path = cfg.data.predict_urls
+    print("\n",ckpt_path)
     model = Classifier.load_from_checkpoint(ckpt_path, strict=False)
     
     trainer = L.Trainer(
         # I believe "callbacks" means that something runs after each iteration of the trainer
-        callbacks=[LabelsToWebDatasetCallback(data_path), TQDMProgressBar(refresh_rate=50)], **kw_args
+        callbacks=[ModelAssessmentCallback(), TQDMProgressBar(refresh_rate=50)], **kw_args
     )
     trainer.predict(model, dm)

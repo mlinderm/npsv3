@@ -4,14 +4,14 @@ import io
 import torch
 import pytest
 
-from npsv3.models.transformer import RealImageDataModule, assess_accuracy, reconstruct
+from npsv3.models.transformer import RealImageDataModule, reconstruct
 from .. import B37_REF_FASTA, data_path, result_path
 from PIL import Image
 import random
 import requests
 import webdataset as wds
 import numpy as np
-from npsv3.models.runners import train
+from npsv3.models.runners import train, assess_accuracy
 from npsv3.images.example import (
     vcf_to_variant_examples,
     example_to_image
@@ -48,43 +48,43 @@ class TestRealImageDataLoader:
 
         dm.teardown(stage="fit")
 
+# @pytest.mark.skip()
 class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=MiM",
-        "model.patch_size=16",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
+        "data.patch_size=32",
         "trainer=transformer",
     )
     def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestClassifier:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
-        "model.patch_size=8",
+        "data.patch_size=8",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
-        # "data.pin_memory=False",
         "trainer=transformer",
         "pretrained=classifier"
     )
     def test_classifier(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
-        "model.patch_size=32",
+        "data.patch_size=32",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
@@ -93,7 +93,7 @@ class TestAccuracy:
     )
     def test_accuracy(self, tmp_path, cfg):
         # output_dir = str(tmp_path / "shards")
-        assess_accuracy(cfg, limit_predict_batches=100)
+        assess_accuracy(cfg, cfg.model.checkpoint, limit_predict_batches=100)
 
 @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
@@ -114,7 +114,7 @@ class TestDisplayMaskedImage:
                 orig = sample["image.npy.gz"]
 
                 # print("\nshape: ",orig.shape)
-                num_patches = (orig.shape[0] // cfg.model.patch_size) * (orig.shape[1] // cfg.model.patch_size)
+                num_patches = (orig.shape[0] // cfg.data.patch_size) * (orig.shape[1] // cfg.data.patch_size)
                 bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
                 # print(bool_masked_pos)
 
@@ -200,7 +200,7 @@ class TestTransformerReconstruction:
 
             for i in range (len(pixel_array)):
                 for j in range (len(pixel_array[0])):
-                    bool_index = (i // cfg.model.patch_size) * (len(pixel_array[0]) // cfg.model.patch_size) + (j // cfg.model.patch_size)
+                    bool_index = (i // cfg.data.patch_size) * (len(pixel_array[0]) // cfg.data.patch_size) + (j // cfg.data.patch_size)
                     # case where pixel should be masked
                     if (mask.getpixel((j, i)) == (255, 255, 255)):
                         pass
@@ -243,7 +243,7 @@ class TestMasking:
 
                 orig = sample["image.npy.gz"]
 
-                num_patches = (orig.shape[0] // cfg.model.patch_size) * (orig.shape[1] // cfg.model.patch_size)
+                num_patches = (orig.shape[0] // cfg.data.patch_size) * (orig.shape[1] // cfg.data.patch_size)
                 # bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches, )).bool()
                 vals = [True, False]
                 top_weights = [3, 1]
@@ -271,7 +271,7 @@ class TestMasking:
                 for i in range (len(pixel_array)):
                     for j in range (len(pixel_array[0])):
 
-                        bool_index = (i // cfg.model.patch_size) * (len(pixel_array[0]) // cfg.model.patch_size) + (j // cfg.model.patch_size)
+                        bool_index = (i // cfg.data.patch_size) * (len(pixel_array[0]) // cfg.data.patch_size) + (j // cfg.data.patch_size)
 
                         # case where pixel should be masked
                         if (bool_masked_pos[bool_index] == True):

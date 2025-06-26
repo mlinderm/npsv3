@@ -12,7 +12,7 @@ from typing import Union, Optional, Tuple
 from PIL import Image
 import numpy as np
 # For debugging only
-from tests import result_path
+# from tests import result_path
 from torch import nn
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTPreTrainedModel, ViTModel, ViTForImageClassification
@@ -28,6 +28,7 @@ class RealImageDataModule(L.LightningDataModule):
         num_channels=3,
         batch_size=16,
         num_workers=1,
+        patch_size=16,
         shuffle_size=1000,
         patch_size = 16,
         mask_scheme=["random", 20]
@@ -41,6 +42,7 @@ class RealImageDataModule(L.LightningDataModule):
         self.test_urls = test_urls
         self.mask_scheme=mask_scheme
 
+        # print("\nmasking scheme:",self.masking_scheme)
 
         self.transforms = transforms.Compose(
             [
@@ -53,11 +55,8 @@ class RealImageDataModule(L.LightningDataModule):
 
 
 
-        self.configuration = ViTConfig(num_channels=num_channels, patch_size=16)
+        self.configuration = ViTConfig(num_channels=num_channels, patch_size=self.hparams.patch_size)
         # self.model = ViTForMaskedImageModeling(configuration)
-
-
-        # self.image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
 
     def make_loader(self, urls, mode="train"):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
@@ -107,13 +106,6 @@ class RealImageDataModule(L.LightningDataModule):
             pin_memory = True
             worker_init_fn = torch.set_num_threads(1)
 
-        # We unbatch, shuffle, and rebatch to mix samples from different workers as shown in webdataset examples
-        pin_memory = False
-        worker_init_fn=None
-        if torch.cuda.is_available():
-            pin_memory = True
-            worker_init_fn=torch.set_num_threads(1)
-
         # print("\npin memory?", pin_memory)
         loader = wds.WebLoader(
             dataset,
@@ -148,7 +140,6 @@ class MiM(L.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        # configuration = ViTConfig(num_channels=num_channels)
         configuration = ViTConfig(num_channels=num_channels, image_size=image_size, patch_size=patch_size, encoder_stride=patch_size)
         self.model = ViTForMaskedImageModeling(configuration)
 
@@ -358,54 +349,28 @@ def torch_decode(key, data):
         stream = io.BytesIO(data)
         return torch.load(stream, weights_only=True, map_location='cpu')
 
-def assess_accuracy(cfg, **kw_args):
-    dm = hydra.utils.instantiate(cfg.data)
-    data_path = cfg.data.predict_urls
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-    )
-    
-    trainer = L.Trainer(
-        # I believe "callbacks" means that something runs after each iteration of the trainer
-        callbacks=[LabelsToWebDatasetCallback(data_path)], **kw_args
-    )
-    return trainer.predict(model, dm)
-
-class LabelsToWebDatasetCallback(L.pytorch.callbacks.Callback):
-    def __init__(self, data_path: str, num_channels=3):
-        # This will be a list containing the predictions which I will average to get the accuracy
-        self.predictions = []
-        self.dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
+class ModelAssessmentCallback(L.pytorch.callbacks.Callback):
+    def __init__(self):
+        self.results = []
 
     #I believe this is an override for the default function that allows us to execute some code each prediction
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
-
-        #This is a function/area we could look into to change
-        self.predictions.append(torch.argmax(outputs.logits, dim=1)[0].item())
-        
-        # self.predictions.append(0)
-        # print("label: ",label)
-
+        images, bool_masked_pos, keys, regions, label = batch
+        for i, logits in enumerate(outputs.logits):
+            if label[i].item() == torch.argmax(logits).item():
+                self.results.append(1)
+            else: 
+                self.results.append(0)
+  
     def on_predict_end(self, trainer, model):
-        # print(self.predictions)
-        correct = 0
-        for i, sample in enumerate(self.dataset):
-            if i >= len(self.predictions): break
-            label = 1 if sample["label.cls"] > 0 else 0
-            # print("Real Label: ", sample["label.cls"], "      Normalized Real label: ", label, "       Prediction: ", self.predictions[i])
-
-            if label == self.predictions[i]:
-                correct+=1
-            # else: print("Real Label: ", sample["label.cls"], "      Normalized Real label: ", label, "       Prediction: ", self.predictions[i])
-        print("\nAccuracy:",correct/len(self.predictions))
+        print(f"\nAssessing accuracy of {len(self.results)} predictions")
+        correct = sum(self.results)
+        print("\nAccuracy:",correct/len(self.results))
 
 
 class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
     def __init__(self, output_dir: str, num_channels=3):
-        # print("\noutput directory:",output_dir)
         pattern = os.path.join(output_dir, "reconstructions-%04d.tar.gz")
-        # print("\nreconstructed pattern:", pattern)
         self._writer = wds.ShardWriter(pattern, maxsize=500e6)
         self.denormalize = transforms.Compose(
             [
@@ -424,7 +389,6 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
 
         recon_images = outputs["final_reconstruction"]
 
-        #print(outputs)
         # encodings, recon_images = outputs
 
         for key, real_image, recon_image, region, in zip(keys, images, recon_images, regions, strict=False):
@@ -459,8 +423,6 @@ def reconstruct(cfg, output_dir, **kw_args):
 #         image = sample["image.npy"]
 #     return image
 
-
-
 def generate_mask_visual(bool_masked_pos, patch_size):
     
     mask = Image.new("RGB", (288, 96))
@@ -475,10 +437,9 @@ def generate_mask_visual(bool_masked_pos, patch_size):
             else:
                 mask.putpixel((j, i), (0, 0, 0))
 
-    # png_path = "/home/apezza/npsv3/tests/results/mask.png"
-    png_path = result_path("mask.png")
+    png_path = "/home/apezza/npsv3/tests/results/mask.png"
+    # png_path = result_path("mask.png")
     mask.save(png_path)
-
 
 def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
 
@@ -498,4 +459,3 @@ def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
             i_bool_mask_pos[i] = False
 
     return i_bool_mask_pos
-
