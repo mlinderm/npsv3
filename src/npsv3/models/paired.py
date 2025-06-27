@@ -1,3 +1,4 @@
+
 from collections.abc import Generator, Iterable
 
 import hydra
@@ -27,6 +28,23 @@ def transform_images(images: np.ndarray) -> torch.Tensor:
         scale=True,
     )
 
+def pack_yield_support(images, labels, variants, remaining_space, padding_value=0):
+    """Helper function to yield a batch of images with padding. 
+    Helps to avoid code duplication in the main packing function."""
+
+    # If the current sample doesn't fit in the batch, yield the current batch
+    #Cat the images list into a tensor and add padding
+    images_tensor = torch.cat(images, dim=0)
+    padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
+    images_tensor  =  torch.nn.functional.pad(images_tensor, padding, mode='constant', value=padding_value)
+    
+    #Add padding to the variants and labels lists
+    variants += [-100] * (remaining_space)
+    labels += [-100] * (remaining_space)
+
+    return (images_tensor, torch.tensor(variants), torch.tensor(labels))
+    
+
 def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value=0) -> Generator[tuple, None, None]:
     """packs real and support images into a batch with padding.
 
@@ -49,38 +67,29 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
     for sample in data:
         query, support, label, *_ = sample
         num_genotypes, num_replicates, *image_size = support.shape
+        if num_replicates > 1:
+            print("num_replicates", num_replicates)
         assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
 
         remaining_space = batch_size - num_images
         if num_genotypes * num_replicates + 1  > remaining_space and len(images) > 0:
             # If the current sample doesn't fit in the batch, yield the current batch.
-            assert len(images) == len(variants), "Missmatch of images and variants"
-            #Cat the images list into a tensor and add padding
-            images_tensor = torch.cat(images, dim=0)
-            padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
-            images_tensor  =  torch.nn.functional.pad(images_tensor, padding, mode='constant', value=padding_value)
-            
-            #Add padding to the variants and labels lists
-            variants += [-100] * (remaining_space)
-            #labels += [-100] * (remaining_space)
-
-            final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
+            assert num_images == len(variants), "Missmatch of images and variants"
+            final = pack_yield_support(images, labels, variants, remaining_space, padding_value)
 
             #Clear the images list and the META data lists for the next batch
-            
             images.clear()
             variants.clear()
             labels.clear()
+            num_images = 0
 
             #Yield the current batch with padding
-            num_images = 0
             yield final
 
              
         #Append the current sample to the images list
         #Append the unsqueezed query image to the images list
         images.append(query.unsqueeze(0))
-        #labels.append(0)  # Assuming query is always negative (label 0)
 
         #Append the respahed support images to the images list
         images.append(support.reshape(-1, *image_size))
@@ -89,41 +98,33 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         #META DATA
         variants += [num_images] * ((num_genotypes * num_replicates) + 1)
 
-        #labels G==Label
+        #labels
+        #l = [0] #Query image
+        labels.append(0) #Query label
         genotype_list = list(range(0, num_genotypes))
-        index = num_images
         for genotype in genotype_list:
             if genotype == label:
-                labels.append(index)
-                break
+                labels += [1] * (num_replicates)
             else:
-                index += num_replicates
-
+                labels += [0] * (num_replicates)
+        
+        #labels.append(l) #Padding the labels to be batch_size to work with stacking  
         num_images += ((num_genotypes * num_replicates) + 1)
 
     
     remaining_space = batch_size - num_images
     #YIELD
     #If images is not empty after the loop and there's enough space, yield the last batch
-    if remaining_space>= 0 and len(images)>0:        
-        #Cat the images list into a tensor and add padding
-        images_tensor = torch.cat(images, dim=0)
-        padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
-        images_tensor  =  torch.nn.functional.pad(images_tensor, padding, mode='constant', value=padding_value)
-        
-        #Add padding to the variants and labels lists
-        variants += [-100] * (remaining_space)
-        #labels += [-100] * (remaining_space)
-
-        final = (images_tensor, torch.tensor(variants), torch.tensor(labels))
-
+    if remaining_space>= num_images and len(images)>0:  
+        assert num_images == len(variants), "Missmatch of images and variants"
+        final = pack_yield_support(images, labels, variants, remaining_space, padding_value)
 
         #Clear the images list and the META data lists for the next batch
         images.clear()
         variants.clear()
         labels.clear()
-
         num_images = 0
+
         #Yield the current batch with padding
         yield final
 
@@ -426,13 +427,14 @@ class ContrastiveLoss(nn.Module):
         self.margin = margin
 
     def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
-        label_pair = nn.functional.one_hot(label, distances.shape[0])
-        print("LABEL PAIR", label_pair)
-        loss = label_pair * torch.square(distances) + (1.0 - label_pair) * torch.square(
-            torch.clamp(self.margin - distances, min=0)
+        #label_pair = nn.functional.one_hot(label, distances.shape[0])
+        label_pair = label[mask]
+        loss = label_pair * torch.square(distances[mask]) + (1.0 - label_pair) * torch.square(
+            torch.clamp(self.margin - distances[mask], min=0)
         )
-        print("LOSS", loss)
-        return torch.mean(loss[:, mask])
+
+        return torch.mean(loss)
+        #return torch.mean(loss[:, mask])
 
 class NPairsLoss(nn.Module):
     def __init__(self, l2_reg=0.002):
@@ -456,8 +458,6 @@ class MinimizingPredictor(nn.Module):
     def forward(self, metric, mask):
         masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
         # TODO: Should this use masked_metric?
-        print("Metric", metric)
-        print("Masked Metric", masked_metric)
         return torch.argmin(masked_metric)
 
 class MaximizingPredictor(nn.Module):
@@ -468,6 +468,27 @@ class MaximizingPredictor(nn.Module):
         masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))[1:] #This [1: ] only accounts for 1 variant, needs to be generalized more, this corresponds to ignoring the query when computing the predictions
         # TODO: Should this use masked_metric?
         return torch.argmax(masked_metric)
+
+def accuracy_func(preds, labels):
+    """
+    Computes accuracy for a batch of predictions and labels.
+
+    Args:
+        preds (torch.Tensor): One hot encoding of predicted class for all images (B,).
+        labels (torch.Tensor): truth labels (B,).
+
+    Returns:
+        torch.Tensor: Accuracy as a scalar tensor.
+    """
+    # Assuming predictions and labels are 1D tensors of same shape
+    pred_is_one = preds == 1
+    label_is_one = labels == 1
+
+    hits = (pred_is_one & label_is_one).sum()
+    total_predictions_as_one = pred_is_one.sum()
+
+    # To avoid division by zero
+    return hits.float() / total_predictions_as_one.float() if total_predictions_as_one > 0 else torch.tensor(0.0)
 
 class PackedVariant(L.LightningModule):
     def __init__(
@@ -488,20 +509,24 @@ class PackedVariant(L.LightningModule):
         self.loss = loss
         self.predictor = predictor
 
-        self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
-        self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
-        self.test_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        self.train_acc = 0
+        self.val_acc = 0 
+        self.test_acc = 0
+
+        # self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        # self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
+        # self.test_acc = Accuracy(task="multiclass", num_classes=max_group_size)
 
         # test = tuple([torch.zeros(8, self.encoder.num_channels, 100, 300),  torch.tensor([   0,    0,    0,    1,    1,    1,    -100,    -100]), torch.tensor([   0,    0,    1,    0,    0,    1, -100, -100] )])
         # self.example_input_array = (test,)
 
     def on_train_start(self) -> None:
         # Reset validation metrics at the start of training to avoid effects of sanity batches
-        self.val_acc.reset()
+        #self.val_acc.reset()
+        self.val_acc = 0
 
     def forward(self, batch):
-
-        images, variants, labels = batch 
+        images, variants, labels = batch         
         images_embeddings = self.encoder(images)
 
         #Separate query and support embeddings
@@ -520,7 +545,6 @@ class PackedVariant(L.LightningModule):
         batched_dot = torch.vmap(torch.dot)
         metric = batched_dot(query_embeddings, support_embeddings)
         return (metric, query_embeddings, support_embeddings)
-
         #self.metric(query_embeddings, support_embeddings)
 
 
@@ -548,7 +572,11 @@ class PackedVariant(L.LightningModule):
         metric, query_embeddings, support_embeddings = self(batch)
         
         # Mask padding
-        padding_start_idx = (variants == -100).nonzero(as_tuple=True)[0][0]
+        padding_positions = (variants == -100).nonzero(as_tuple=True)[0]
+        if len(padding_positions) > 0:
+            padding_start_idx = padding_positions[0]
+        else:
+            padding_start_idx = len(variants)
         mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
 
         #mask = torch.arange(len(torch.masked_select(variants, variants != -100)), device=torch.masked_select(variants, variants != -100).device) < padding_start_idx
@@ -558,10 +586,10 @@ class PackedVariant(L.LightningModule):
         # Custom loss function may use embeddings and mask
         
         loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings)
+        print("LOSS", loss)
         # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
         
         #preds = self.predictor(metric, mask)
-
         preds2 = []
         uniques, counts = variants.unique(return_counts=True)
         for i, (v, c) in enumerate(zip(uniques, counts)):
@@ -569,18 +597,20 @@ class PackedVariant(L.LightningModule):
                 continue
             v_mask = (variants == v)
             # Example prediction
-            pred = torch.argmax(metric[v_mask][1:])
-            preds2.append(pred)
-        preds = torch.stack(preds2)
+            pred = torch.argmax(metric[v_mask][1:]) #Ignore the first element, which is the query image
+            preds2.append(nn.functional.one_hot(pred+1, c)) #Add 1 to the prediction to account for the query image being at index 0
+        preds = torch.cat(preds2)
+        # print("PREDICTIONS", preds) #Turn predictions into one-hot encoding
+        # print("LABELS", labels)
         
 
-        return (loss, preds, labels)
+        return (loss, preds, labels[mask])
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label = self._model_step(batch, batch_idx)
-
         self.log("train_loss", loss, prog_bar=True)
-        self.train_acc(preds, label)
+        self.train_acc = accuracy_func(preds, label)
+        print("TRAIN ACC", self.train_acc)
         self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss
@@ -589,7 +619,9 @@ class PackedVariant(L.LightningModule):
         loss, preds, label = self._model_step(batch, batch_idx)
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.val_acc(preds, label)
+        #self.val_acc(preds, label)
+        self.val_acc = accuracy_func(preds, label)
+        print("VAL ACC", self.val_acc)
         self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
 
 
@@ -597,13 +629,14 @@ class PackedVariant(L.LightningModule):
         loss, preds, label = self._model_step(batch, batch_idx)
 
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.test_acc(preds, label)
+        self.test_acc = accuracy_func(preds, label)
         self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
 
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         metric, *_ = self(batch)
         return metric, batch
+    
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
         return { "optimizer": optimizer }
@@ -639,9 +672,6 @@ class GroupedVariant(L.LightningModule):
         self.val_acc.reset()
 
     def forward(self, query, support):
-        print("FORWARD PASS")
-        print("Test QUERY", query.shape)
-        print("Test Support", support.shape)
         query_embeddings = self.encoder(query)
 
         # https://github.com/pytorch/pytorch/issues/1927#issuecomment-1245392571
