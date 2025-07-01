@@ -68,7 +68,7 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         query, support, label, *_ = sample
         num_genotypes, num_replicates, *image_size = support.shape
         if num_replicates > 1:
-            print("num_replicates", num_replicates)
+            print("\nNUM replicates", num_replicates)
         assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
 
         remaining_space = batch_size - num_images
@@ -197,7 +197,6 @@ def _wrap_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value=
             num_support = len(indices)
             padding = (0, 0) * len(image_size) + (0, max_genotypes - num_support)
             for j in range(replicates):
-                print(query.shape, support.shape)
                 yield query, torch.nn.functional.pad(
                     support[indices, j],
                     padding,
@@ -215,6 +214,9 @@ class EmptyDataset(data.Dataset):
 
     def __iter__(self):
         return iter(())
+    
+    def __len__(self):
+        return 0
 
 
 class GroupedImageDataModule(L.LightningDataModule):
@@ -343,6 +345,7 @@ class PackedImageDataModule(L.LightningDataModule):
     def test_dataloader(self):
         # Make sure to return a valid dataloader, even if validation data is not available since
         # Lightning still calls this method with zero validation steps
+        print(self.test_urls)
         if self.test_urls:
             return self.make_loader(self.test_urls or [], mode="test")
         return data.DataLoader(EmptyDataset())
@@ -382,24 +385,29 @@ class InceptionEncoder(nn.Module):
 class EuclideanDistanceMetric(nn.Module):
     def __init__(self):
         super(EuclideanDistanceMetric, self).__init__()
-        self.batched_distance = torch.vmap(torch.cdist)
-
+        self.batched_distance = torch.cdist
     def forward(self, query_embeddings, support_embeddings):
-        return torch.squeeze(
-            self.batched_distance(
-                torch.nn.functional.normalize(query_embeddings, p=2, dim=-1), 1,
-                torch.nn.functional.normalize(support_embeddings, p=2, dim=-1),
-            ),
-            dim=1,
-        )
+        query = torch.nn.functional.normalize(query_embeddings, p=2, dim=-1)
+        support = torch.nn.functional.normalize(support_embeddings, p=2, dim=-1)
+        
+        # Compute distance between corresponding rows
+        distances = torch.norm(query - support, dim=-1)  # shape: (B,)
+        return distances
 
 class DotProductSimilarityMetric(nn.Module):
     def __init__(self):
         super(DotProductSimilarityMetric, self).__init__()
-        self.batched_dot = torch.vmap(torch.mv)
 
     def forward(self, query_embeddings, support_embeddings):
-        return self.batched_dot(support_embeddings, query_embeddings)
+        # Ensure inputs are the same shape
+        assert query_embeddings.shape == support_embeddings.shape, \
+            f"Shape mismatch: {query_embeddings.shape} vs {support_embeddings.shape}"
+        
+        query_embeddings = torch.nn.functional.normalize(query_embeddings, p=2, dim=-1)
+        support_embeddings = torch.nn.functional.normalize(support_embeddings, p=2, dim=-1)
+
+        similarity = torch.sum(query_embeddings * support_embeddings, dim=-1)  # shape: (B,)
+        return similarity
 
 class ContrastiveLoss(nn.Module):
     """
@@ -426,48 +434,97 @@ class ContrastiveLoss(nn.Module):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
-        #label_pair = nn.functional.one_hot(label, distances.shape[0])
+    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor, variants):
         label_pair = label[mask]
         loss = label_pair * torch.square(distances[mask]) + (1.0 - label_pair) * torch.square(
             torch.clamp(self.margin - distances[mask], min=0)
         )
 
         return torch.mean(loss)
-        #return torch.mean(loss[:, mask])
 
 class NPairsLoss(nn.Module):
     def __init__(self, l2_reg=0.002):
         super(NPairsLoss, self).__init__()
         self.l2_reg = l2_reg
 
-    def forward(self, metric, label, mask, query_embeddings, support_embeddings):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
-        loss = nn.functional.cross_entropy(masked_metric, label, reduction="mean")
+    def forward(self, metric, label, mask, query_embeddings, support_embeddings, variants):
+        # Apply mask to filter valid entries
+        metric = metric[mask]                  # (B_valid, S)
+        label = label[mask]                    # (B_valid,)
+        query_embeddings = query_embeddings[mask]        # (B_valid, D)
+        support_embeddings = support_embeddings[mask]    # (B_valid, S, D)
+        variants = variants[mask] 
 
-        masked_support = torch.where(mask, torch.square(support_embeddings).sum(dim=2),  support_embeddings.new_full([], 0))
-        return loss + 0.25*self.l2_reg*(
-            torch.mean(torch.torch.square(query_embeddings).sum(dim=1)) +
-            torch.mean(masked_support)
-        )
+        # Cross-entropy loss on similarity scores
+        loss = []
+        uniques, counts = variants.unique(return_counts=True)
+        for i, (v, c) in enumerate(zip(uniques, counts)):
+            v_mask = (variants == v)
+            loss.append( torch.nn.functional.cross_entropy(metric[v_mask][1:], label[v_mask][1:].float(), reduction="mean"))
+        
+
+        return torch.mean(torch.stack(loss)) #+ reg_term
+    
+class InfoNCE(nn.Module):
+    def __init__(self, temperature=0.07):
+        super(InfoNCE, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, metric, label, mask, query_embeddings, support_embeddings):
+        # Apply mask to filter valid entries
+        metric = metric[mask]                  # (B_valid, S)
+        label = label[mask]                    # (B_valid,)
+        query_embeddings = query_embeddings[mask]        # (B_valid, D)
+        support_embeddings = support_embeddings[mask]
+        variants = variants[mask] 
+           # (B_valid, S, D)
+
+        # Scale the similarity scores by the temperature
+        scaled_metric = metric / self.temperature
+
+
+        # Cross-entropy loss on similarity scores
+        loss = []
+        uniques, counts = variants.unique(return_counts=True)
+        for i, (v, c) in enumerate(zip(uniques, counts)):
+            v_mask = (variants == v)
+            loss.append( torch.nn.functional.cross_entropy(metric[v_mask][1:], label[v_mask][1:].float(), reduction="mean"))
+        
+
+        return torch.mean(torch.stack(loss))
+
 
 class MinimizingPredictor(nn.Module):
     def __init__(self):
         super(MinimizingPredictor, self).__init__()
 
-    def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
-        # TODO: Should this use masked_metric?
-        return torch.argmin(masked_metric)
+    def forward(self, metric, variants):
+        preds2 = []
+        uniques, counts = variants.unique(return_counts=True)
+        for i, (v, c) in enumerate(zip(uniques, counts)):
+            if v == -100:
+                continue
+            v_mask = (variants == v)
+            # Example prediction
+            pred = torch.argmin(metric[v_mask][1:]) #Ignore the first element, which is the query image
+            preds2.append(nn.functional.one_hot(pred+1, c)) #Add 1 to the prediction to account for the query image being at index 0
+        return torch.cat(preds2)
 
 class MaximizingPredictor(nn.Module):
     def __init__(self):
         super(MaximizingPredictor, self).__init__()
 
-    def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))[1:] #This [1: ] only accounts for 1 variant, needs to be generalized more, this corresponds to ignoring the query when computing the predictions
-        # TODO: Should this use masked_metric?
-        return torch.argmax(masked_metric)
+    def forward(self, metric, variants):
+        preds2 = []
+        uniques, counts = variants.unique(return_counts=True)
+        for i, (v, c) in enumerate(zip(uniques, counts)):
+            if v == -100:
+                continue
+            v_mask = (variants == v)
+            # Example prediction
+            pred = torch.argmax(metric[v_mask][1:]) #Ignore the first element, which is the query image
+            preds2.append(nn.functional.one_hot(pred+1, c)) #Add 1 to the prediction to account for the query image being at index 0
+        return torch.cat(preds2)
 
 def accuracy_func(preds, labels):
     """
@@ -542,10 +599,11 @@ class PackedVariant(L.LightningModule):
         support_embeddings = images_embeddings
 
         # We would want to generalize this to any metric, here we use dot product as an example
-        batched_dot = torch.vmap(torch.dot)
-        metric = batched_dot(query_embeddings, support_embeddings)
+        # batched_dot = torch.vmap(torch.dot)
+       
+        metric = self.metric(query_embeddings, support_embeddings)
         return (metric, query_embeddings, support_embeddings)
-        #self.metric(query_embeddings, support_embeddings)
+        
 
 
     def _model_step(self, batch, batch_idx):
@@ -571,6 +629,7 @@ class PackedVariant(L.LightningModule):
         # Forward pass: compute similarity metric between query and support embeddings by passing the batch to forward
         metric, query_embeddings, support_embeddings = self(batch)
         
+        
         # Mask padding
         padding_positions = (variants == -100).nonzero(as_tuple=True)[0]
         if len(padding_positions) > 0:
@@ -579,29 +638,20 @@ class PackedVariant(L.LightningModule):
             padding_start_idx = len(variants)
         mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
 
-        #mask = torch.arange(len(torch.masked_select(variants, variants != -100)), device=torch.masked_select(variants, variants != -100).device) < padding_start_idx
-
-
         # --- Compute loss and predictions ---
         # Custom loss function may use embeddings and mask
+
+        print("\nVariants", variants)
         
-        loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings)
-        print("LOSS", loss)
+        loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings, variants)
+        print("\nLOSS", loss)
         # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
         
         #preds = self.predictor(metric, mask)
-        preds2 = []
-        uniques, counts = variants.unique(return_counts=True)
-        for i, (v, c) in enumerate(zip(uniques, counts)):
-            if v == -100:
-                continue
-            v_mask = (variants == v)
-            # Example prediction
-            pred = torch.argmax(metric[v_mask][1:]) #Ignore the first element, which is the query image
-            preds2.append(nn.functional.one_hot(pred+1, c)) #Add 1 to the prediction to account for the query image being at index 0
-        preds = torch.cat(preds2)
-        # print("PREDICTIONS", preds) #Turn predictions into one-hot encoding
-        # print("LABELS", labels)
+        preds = self.predictor(metric, variants)
+        print("\nPREDS", preds)
+        print("\nMETRIC", metric)
+        print("\nLABELS", labels[mask])
         
 
         return (loss, preds, labels[mask])
@@ -610,7 +660,7 @@ class PackedVariant(L.LightningModule):
         loss, preds, label = self._model_step(batch, batch_idx)
         self.log("train_loss", loss, prog_bar=True)
         self.train_acc = accuracy_func(preds, label)
-        print("TRAIN ACC", self.train_acc)
+        print("\nTRAIN ACC", self.train_acc)
         self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss
@@ -621,7 +671,7 @@ class PackedVariant(L.LightningModule):
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         #self.val_acc(preds, label)
         self.val_acc = accuracy_func(preds, label)
-        print("VAL ACC", self.val_acc)
+        print("\nVAL ACC", self.val_acc)
         self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
 
 

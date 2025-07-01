@@ -1,3 +1,21 @@
+# _target_: npsv3.models.paired.PackedVariant
+# encoder:
+#   _target_: npsv3.models.paired.InceptionEncoder
+#   num_channels: 8
+#   projection_size: 512
+# metric:
+#   _target_: npsv3.models.paired.DotProductSimilarityMetric
+# loss:
+#   _target_: npsv3.models.paired.NPairsLoss
+#   #margin: 1.0
+# optimizer:
+#   _target_: torch.optim.Adam
+#   _partial_: true
+#   lr: 0.001
+# predictor:
+#   _target_: npsv3.models.paired.MaximizingPredictor
+# max_group_size: ${data.max_group_size}
+
 _target_: npsv3.models.paired.PackedVariant
 encoder:
   _target_: npsv3.models.paired.InceptionEncoder
@@ -13,5 +31,5 @@ optimizer:
   _partial_: true
   lr: 0.001
 predictor:
-  _target_: npsv3.models.paired.MaximizingPredictor
+  _target_: npsv3.models.paired.MinimizingPredictor
 max_group_size: ${data.max_group_size}

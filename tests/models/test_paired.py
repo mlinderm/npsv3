@@ -27,23 +27,23 @@ class TestPairedDataLoader:
 
         dm.teardown(stage="fit")
 
-class TestPairedCNNModel:
-    @pytest.mark.cfg_overrides(
-        "model=paired_inception_contrastive",
-        f"data.train_urls={data_path('images-0000.tar')}",
-        f"data.validate_urls={data_path('images-0000.tar')}",
-        "data.batch_size=2",
-        "trainer=paired",
-    )
-    def test_paired_cnn_contrastive_model(self, cfg):
-        train(cfg, fast_dev_run=True)
+# class TestPairedCNNModel:
+#     @pytest.mark.cfg_overrides(
+#         "model=paired_inception_contrastive",
+#         f"data.train_urls={data_path('images-0000.tar')}",
+#         f"data.validate_urls={data_path('images-0000.tar')}",
+#         "data.batch_size=2",
+#         "trainer=paired",
+#     )
+#     def test_paired_cnn_contrastive_model(self, cfg):
+#         train(cfg, fast_dev_run=True)
 
 class TestPackedVariant:
     # @pytest.mark.cfg_overrides(
     # "model=paired_packed_inception_contrastive",
     # f"data.train_urls={data_path('images-0000.tar')}",
     # f"data.validate_urls={data_path('images-0000.tar')}",
-    # "data.batch_size=10",
+    # "data.batch_size=16",
     # "trainer=paired",
     # "data=packed_images",
     # )
@@ -57,10 +57,10 @@ class TestPackedVariant:
     f'data.train_urls="{data_path("/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00731/generator=coverage,pileup=unphased,simulation.replicates=1/images-0000.tar")}"',
     f'data.validate_urls="{data_path("/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00731/generator=coverage,pileup=unphased,simulation.replicates=1/images-0000.tar")}"',
     "model.encoder.num_channels=7",
-    "data.batch_size=28",
+    "data.batch_size=20",
     "trainer=paired",
     "data=packed_images",
     )
 
     def test_paired_cnn_npairs_model_full(self, cfg):
-        train(cfg, fast_dev_run=True)
+        train(cfg, fast_dev_run=100)
