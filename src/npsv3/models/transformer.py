@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from typing import Union, Optional, Tuple
 from PIL import Image
 import numpy as np
-# For debugging only
-# from tests import result_path
 from torch import nn
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTPreTrainedModel, ViTModel, ViTForImageClassification
@@ -25,12 +23,11 @@ class RealImageDataModule(L.LightningDataModule):
         validate_urls=None,
         predict_urls=None,
         test_urls=None,
-        num_channels=3,
         batch_size=16,
         num_workers=1,
         patch_size=16,
         shuffle_size=1000,
-        patch_size = 16,
+        num_channels=3,
         mask_scheme=["random", 20]
     ):
         super().__init__()
@@ -42,21 +39,15 @@ class RealImageDataModule(L.LightningDataModule):
         self.test_urls = test_urls
         self.mask_scheme=mask_scheme
 
-        # print("\nmasking scheme:",self.masking_scheme)
-
         self.transforms = transforms.Compose(
             [
                 transforms.ToImage(),
-                # transforms.Resize(size=(224, 224)),
                 transforms.ToDtype(torch.float32, scale=True),  # Normalize expects float input
                 transforms.Normalize(mean=[0.5] * num_channels, std=[0.5] * num_channels),
             ]
         )
 
-
-
         self.configuration = ViTConfig(num_channels=num_channels, patch_size=self.hparams.patch_size)
-        # self.model = ViTForMaskedImageModeling(configuration)
 
     def make_loader(self, urls, mode="train"):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
@@ -68,10 +59,7 @@ class RealImageDataModule(L.LightningDataModule):
         def to_tuple(data):
             # Handle missing fields (https://webdataset.github.io/webdataset/FAQ/, issue #246)
             image = data["image.npy.gz"]
-            # input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False
-            # pixel_values = torch.squeeze(self.image_processor(images=self.transforms(image), return_tensors="pt", input_data_format="channels_first", do_normalize=False, do_rescale=False, do_resize=False).pixel_values, 0)
             pixel_values = self.transforms(image)
-            # print("\npixel values shape: ",pixel_values.shape)
 
             num_patches = (pixel_values.shape[1] // self.configuration.patch_size) * (pixel_values.shape[2] // self.configuration.patch_size)
 
@@ -96,7 +84,6 @@ class RealImageDataModule(L.LightningDataModule):
         dataset = (
             dataset.decode()
             .map(to_tuple)
-            #.map_tuple(wds.utils.identity, self.transforms)
             .batched(self.hparams.batch_size, partial=mode != "train")
         )
 
@@ -106,7 +93,6 @@ class RealImageDataModule(L.LightningDataModule):
             pin_memory = True
             worker_init_fn = torch.set_num_threads(1)
 
-        # print("\npin memory?", pin_memory)
         loader = wds.WebLoader(
             dataset,
             batch_size=None,
@@ -159,14 +145,6 @@ class MiM(L.LightningModule):
         return { "optimizer": optimizer }
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        # pixel_values, bool_masked_pos, *_ = batch
-
-        # out = self(pixel_values, bool_masked_pos)
-        # print("\nloss: ",out.loss)
-        # return out
-
-
-        # AI Generated
         pixel_values, bool_masked_pos, *_ = batch
         outputs = self(pixel_values, bool_masked_pos)
 
@@ -174,13 +152,6 @@ class MiM(L.LightningModule):
 
         print("\nLoss on reconstruct: ", outputs.loss)
 
-        # Resize bool_masked_pos from patch-wise to pixel-wise if needed
-        # But if you're using ViT and your output is already image-shaped, you can just:
-        #   - Use bool_masked_pos to compute a patch-wise mask
-        #   - Upsample it to match the image size
-
-        # Construct final image with reconstructed content only at masked positions
-        # Assume patch size and image size align (i.e., divisible)
         B, C, H, W = pixel_values.shape
         patch_size = self.hparams.patch_size
         num_patches_h = H // patch_size
@@ -201,10 +172,6 @@ class MiM(L.LightningModule):
             "final_reconstruction": final_reconstruction
         }
 
-
-
-
-    
 #Adapted from: https://github.com/huggingface/transformers/blob/v4.52.3/src/transformers/models/vit/modeling_vit.py#L592
 class ModelOutput:
     class_queries_logits: torch.Tensor
@@ -275,16 +242,13 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
         batch_size, sequence_length, num_channels = sequence_output.shape
         height = pixel_values.shape[2]//self.config.patch_size
         width = pixel_values.shape[3]//self.config.patch_size
-        # print("\nsequence output shape: ",sequence_output.shape,"\npixel values shape: ", pixel_values.shape,"\nheight: ",height,"\nwidth: ",width)
         sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
 
         # Reconstruct pixel values
         reconstructed_pixel_values = self.decoder(sequence_output)
-        # print("\n sequence output:", sequence_output, "\nreconstructed pixel values:",reconstructed_pixel_values,"\n")
 
         masked_im_loss = None
         if bool_masked_pos is not None:
-            # size = self.config.image_size // self.config.patch_size
             bool_masked_pos = bool_masked_pos.reshape(-1, height, width)
             mask = (
                 bool_masked_pos.repeat_interleave(self.config.patch_size, 1)
@@ -313,7 +277,7 @@ class Classifier(L.LightningModule):
         num_channels = 7,
         image_size = (96, 288),
         num_labels = 2,
-        patch_size=16
+        patch_size=32
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -321,9 +285,6 @@ class Classifier(L.LightningModule):
         self.model = ViTForImageClassification(configuration)
 
     def forward(self, pixel_values, labels):
-        # print("\npixel value shape: ",pixel_values.shape)
-        # print("\nlabel shape: ",labels.shape)
-        # print("\nlabel val:",labels)
         outputs = self.model(pixel_values, labels=labels)
         return outputs
     
@@ -369,7 +330,7 @@ class ModelAssessmentCallback(L.pytorch.callbacks.Callback):
 
 
 class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
-    def __init__(self, output_dir: str, num_channels=3):
+    def __init__(self, output_dir: str, mask_path, num_channels=3,):
         pattern = os.path.join(output_dir, "reconstructions-%04d.tar.gz")
         self._writer = wds.ShardWriter(pattern, maxsize=500e6)
         self.denormalize = transforms.Compose(
@@ -378,14 +339,13 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
                 transforms.ToDtype(torch.uint8, scale=True),
             ]
         )
+        self.mask_path=mask_path
 
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
         images, bool_masked_pos, keys, regions, label = batch
 
         # comment out to make more efficient
-        generate_mask_visual(bool_masked_pos, 16)
-
-
+        generate_mask_visual(bool_masked_pos, 16, self.mask_path)
 
         recon_images = outputs["final_reconstruction"]
 
@@ -404,7 +364,7 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         self._writer.close()
 
 
-def reconstruct(cfg, output_dir, **kw_args):
+def reconstruct(cfg, output_dir, mask_path, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
 
     model_cls = hydra.utils.get_class(cfg.model._target_)
@@ -413,17 +373,18 @@ def reconstruct(cfg, output_dir, **kw_args):
     )
 
     trainer = L.Trainer(
-        callbacks=[ReconstructionToWebDatasetCallback(output_dir, len(cfg.pileup.image_channels))], **kw_args
+        callbacks=[ReconstructionToWebDatasetCallback(output_dir, mask_path, len(cfg.pileup.image_channels))], **kw_args,
     )
     trainer.predict(model, dm)
 
-# def display_image(urls):
-#     dataset = wds.WebDataset(urls, shardshuffle=False)
-#     for sample in enumerate(dataset):
-#         image = sample["image.npy"]
-#     return image
+def display_image(urls):
+    dataset = wds.WebDataset(urls, shardshuffle=False)
+    for sample in enumerate(dataset):
+        image = sample["image.npy"]
+    return image
 
-def generate_mask_visual(bool_masked_pos, patch_size):
+# Need to either remove this because it's only for testing or change the png path to a non-user path
+def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
     
     mask = Image.new("RGB", (288, 96))
     pixel_array = np.array(mask)
@@ -436,10 +397,8 @@ def generate_mask_visual(bool_masked_pos, patch_size):
                 mask.putpixel((j, i), (255, 255, 255))
             else:
                 mask.putpixel((j, i), (0, 0, 0))
-
-    png_path = "/home/apezza/npsv3/tests/results/mask.png"
-    # png_path = result_path("mask.png")
-    mask.save(png_path)
+                
+    mask.save(mask_path)
 
 def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
 

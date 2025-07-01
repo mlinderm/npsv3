@@ -12,10 +12,7 @@ import requests
 import webdataset as wds
 import numpy as np
 from npsv3.models.runners import train, assess_accuracy
-from npsv3.images.example import (
-    vcf_to_variant_examples,
-    example_to_image
-)
+from npsv3.images.example import example_to_image
 
 from omegaconf import OmegaConf
 
@@ -63,7 +60,7 @@ class TestMiM:
     def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 class TestClassifier:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
@@ -79,66 +76,21 @@ class TestClassifier:
     def test_classifier(self, cfg):
         train(cfg, fast_dev_run=True)
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
-        "data.patch_size=32",
+        "data.patch_size=16",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data=real_image,model.patch_size=32,model=MiM,pileup=unphased_variant,trainer.max_epochs=1/full_train-step=10185.ckpt"',
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW/full_train-step=101850.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
         # output_dir = str(tmp_path / "shards")
         assess_accuracy(cfg, cfg.model.checkpoint, limit_predict_batches=100)
-
-@pytest.mark.skip()
-@pytest.mark.cfg_overrides(
-    f"reference={B37_REF_FASTA}",
-    "simulation.replicates=0",
-    "pileup=unphased_variant",
-    "data._target_=npsv3.models.transformer.RealImageDataModule",
-    "data.batch_size=1",
-)
-class TestDisplayMaskedImage:
-    def test_display_masked_image(self, cfg):
-        data_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar"
-        dataset = wds.WebDataset(data_path, shardshuffle=False).decode(torch_decode)
-        image_idx = random.randint(0, 1000)
-        for _i, sample in enumerate(dataset):
-            if (_i == image_idx):
-                # print("\nlength of dataset: ",enumerate(dataset))
-                orig = sample["image.npy.gz"]
-
-                # print("\nshape: ",orig.shape)
-                num_patches = (orig.shape[0] // cfg.data.patch_size) * (orig.shape[1] // cfg.data.patch_size)
-                bool_masked_pos = torch.randint(low=0, high=2, size=(num_patches,)).bool()
-                # print(bool_masked_pos)
-
-                # Convert tensors to "false color" images and save to a PNG file
-                [orig_image] = [
-                    example_to_image(
-                        cfg,
-                        {"image": orig},
-                        with_simulations=False,
-                        render_channels=False,
-                        select_channels=[0, 1, 5],  # ALIGNED, PAIRED, ALLELE
-                    )
-                    # for x in (orig)
-                ]
-
-                recon_image = orig_image
-
-                png_path = result_path("test.png")
-                combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + 10, orig_image.height))
-                combined.paste(orig_image, (0, 0))
-                combined.paste(recon_image, (orig_image.width + 10, 0))
-                combined.save(png_path)
-            else: continue
-
 
 # @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
@@ -147,8 +99,8 @@ class TestDisplayMaskedImage:
     "pileup=unphased_variant",
     "model=MiM",
     "data.patch_size=16",
-    "data.mask_scheme=[\"random\", 50]",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW/pretrained_MiM-step=101850.ckpt"',
+    "data.mask_scheme=[\"random\", 80]",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_80R_16/pretrained_MiM-step=101850.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -158,23 +110,15 @@ class TestTransformerReconstruction:
     def test_transformer_reconstruction(self, tmp_path, cfg, hg002_sample):
         # Generate image for variant
         output_dir = str(tmp_path) # / "shards")
-        # vcf_to_variant_examples(
-        #     cfg,
-        #     data_path("12_22127565_22132387.bam"),
-        #     hg002_sample,
-        #     data_path("12_22129565_22130387.vcf.gz"),
-        #     output_dir,
-        #     background_vcf=data_path("12_22129565_22130387.background.vcf.gz"),
-        # )
-        # images_path = os.path.join(output_dir, "images-0000.tar")
-        # assert os.path.exists(images_path)
 
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
             f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
-        reconstruct(local_cfg, output_dir, limit_predict_batches=1)
+        mask_path = result_path("mask.png")
+
+        reconstruct(local_cfg, output_dir, limit_predict_batches=1, mask_path=mask_path)
         reconstructions_path = os.path.join(output_dir, "reconstructions-0000.tar.gz")
         assert os.path.exists(reconstructions_path)
 

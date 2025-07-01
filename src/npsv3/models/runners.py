@@ -10,7 +10,7 @@ def train(cfg, output_dir=None, **kw_args):
     # print("\nmasking scheme:",cfg.model.masking_scheme)
     dm = hydra.utils.instantiate(cfg.data)
 
-    OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
+    # OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
 
     if cfg.pretrained.path:
         # print(f"\npretrained loaded from {cfg.pretrained.path}")

@@ -1,5 +1,5 @@
 _target_: npsv3.models.transformer.MiM
-patch_size: 16
+# patch_size: 32
 
 # optimizer:
 #   _target_: torch.optim.Adamw

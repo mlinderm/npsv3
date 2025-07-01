@@ -5,8 +5,7 @@ predict_urls: null
 test_urls: null
 num_channels: ${len:${pileup.image_channels}}
 batch_size: 16
-patch_size: 16
 num_workers: ${threads}
-patch_size: 16
+patch_size: 32
 shuffle_size: 1000
-mask_scheme: ["random", 50]
+mask_scheme: ["random", 80]
