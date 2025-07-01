@@ -236,7 +236,7 @@ def make_graph_example_from_region(
     for allele_indices in itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds)):
         # Get the sequences for this haplotype combination
         gt_sequences = [sequences[i][allele_index] for i, allele_index in enumerate(allele_indices)]
-        with tempfile.TemporaryDirectory() as tempdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tempdir:
             # Write the fasta file for this haplotype combination
             fasta_path = os.path.join(tempdir, "haplotypes.fasta")
             with open(fasta_path, "w") as fasta:
@@ -488,7 +488,7 @@ def vcf_to_graph_examples(
     )
 
     os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
         ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)

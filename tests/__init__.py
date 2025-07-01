@@ -44,6 +44,8 @@ SYNDIP_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.genotyped.passi
 SYNDIP_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.sv.genotyped.passing.b37.vcf.gz"))
 SYNDIP_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/CHM1_CHM13_2.b37.bam"))
 
+HG002_DIPCALL_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.hg38.vcf.gz"))
+HG002_DIPCALL_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"))
 
 def data_path(path: str) -> str:
     return os.path.join(DATA_DIR, path)

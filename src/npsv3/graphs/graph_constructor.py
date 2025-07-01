@@ -605,14 +605,14 @@ class PolytypePaths:
             phase_set = genotype.get("PS")
             phase = PhaseState(Phasing.GLOBAL if phase_set is None else Phasing.LOCAL, phase_set)
         elif VariantOverlap.STAR_ALLELE in overlap or len(set(indices)) == 1:
-            # Heterozygous variants should only be implicity phased if there are actual overlapping alleles
+            # Heterozygous variants should only be implicitly phased if there are actual overlapping alleles
             # where we can make inferences about the phase. At present we only assume that for explicit * alleles
             phase = PhaseState(Phasing.IMPLICIT)
         else:
             phase = PhaseState(Phasing.UNPHASED)
 
         # A NonRefAlleleOverlappingNonRefError indicates alleles in overlapping variants are not consistently phased.
-        # If the genotype was orignally unphased, try permutations of the alleles to try to find a consistent phasing.
+        # If the genotype was originally unphased, try permutations of the alleles to try to find a consistent phasing.
         for local_indices in itertools.islice(itertools.permutations(indices), 0, max_gt_permutations if not genotype.phased else 1):
             try:
                 local_haplotypes = copy.deepcopy(self.haplotypes) if VariantOverlap.OVERLAP in overlap else self.haplotypes
@@ -620,7 +620,7 @@ class PolytypePaths:
                     if index is None:
                         continue  # Skip undefined (".") alleles
                     if VariantOverlap.STAR_ALLELE in overlap and variant.allele(index) == "*":
-                        continue  # Don't apply explicity overlapped "*"" allele
+                        continue  # Don't apply explicitly overlapped "*"" allele
                     if index != -1:
                         # TODO: Remove shared prefix/suffix from ref_nodes and alt_nodes
                         alt_path = variant_path_name(variant.vg_variant_id, index, prefix=path_prefix)
@@ -632,12 +632,12 @@ class PolytypePaths:
                 self.haplotypes = local_haplotypes
                 break
             except NonRefAlleleOverlappingNonRefError:
-                # Try another permutation of the genotype to see if we can find a local phasing consitent
+                # Try another permutation of the genotype to see if we can find a local phasing consistent
                 # with the overlap
                 continue
         else:
-            # We tried different permutations of the genotype, but couldn't find a constent phasing, skip variant without
-            # changing the haplotypes
+            # We tried different permutations of the genotype, but couldn't find a consistent phasing, skip variant without
+            # changing the haplotypes. TODO: Alternatively should be "break" the haplotype at this point? That is what VG does.
             logging.warning("Found non-reference allele overlapped by another non-reference allele in %s, skipping", variant.reference_region)
 
     def gfa_paths(self, region) -> dict[str, list[int]]:
@@ -649,7 +649,14 @@ class PolytypePaths:
 
 
 def variant_path_name(variant_id: str, allele: int, prefix: str="alt") -> str:
+    """Construct a path name for a variant and allele, e.g., alt_123_1"""
     return f"_{prefix}_{variant_id}_{allele}"
+
+def path_to_variant_id(path_name: str, prefix: str="alt") -> str:
+    """Extract the variant ID from a path name, e.g., alt_123_1 -> 123"""
+    prefix = f"_{prefix}_"
+    assert path_name.startswith(prefix)
+    return path_name[len(prefix):len(prefix) + VARIANT_ID_LENGTH]
 
 
 def _nesting_reference_region_cmp(a: tuple[Variant, pysam.VariantRecord], b: tuple[Variant, pysam.VariantRecord]) -> int:
