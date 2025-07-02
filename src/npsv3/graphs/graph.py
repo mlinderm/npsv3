@@ -1,4 +1,3 @@
-import itertools
 import operator
 import os
 import re
@@ -15,7 +14,11 @@ import odgi
 import pysam
 from pysam import bcftools
 
-from npsv3.graphs.graph_constructor import GraphConstructor, path_to_variant_id, variant_path_name
+from npsv3.graphs.graph_constructor import (
+    GraphConstructor,
+    variant_path_name,
+    variant_path_to_id,
+)
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
 from npsv3.variant import Variant
@@ -192,7 +195,7 @@ class Graph:
             # Propagate score "along" edges
             next_nodes = []
             self._graph.follow_edges(
-                self._graph.get_handle(node), False, lambda n: next_nodes.append(self._graph.get_id(n))
+                self._graph.get_handle(node), False, lambda n: next_nodes.append(self._graph.get_id(n))  # noqa: B023
             )
             op = operator.le if node in free_nodes else operator.lt # Use "free node" as tiebreaker
             for next_node in next_nodes:
@@ -220,7 +223,7 @@ class Graph:
             # Propagate score backward along edges
             prev_nodes = []
             self._graph.follow_edges(
-                self._graph.get_handle(node), True, lambda n: prev_nodes.append(self._graph.get_id(n))
+                self._graph.get_handle(node), True, lambda n: prev_nodes.append(self._graph.get_id(n))  # noqa: B023
             )
             for prev_node in prev_nodes:
                 if length[node] < length[prev_node]:
@@ -257,12 +260,9 @@ class Graph:
         self, inference_vcf: str, base_path_prefix: str, region: Range
     ) -> list["InferenceHaplotype"]:
         """Enumerate all possible haplotypes containing alleles in region of inference_vcf using base_path_prefix as backbone"""
-        # When there are SNVs in the backbone overlapped by a SV, we can get an explosion of haplotypes due to branching between
-        # the reference and backbone.
- 
+
         # Extract variant paths from the inference VCF
         inference_alleles: dict[str,tuple[int]] = {}
-        #inference_paths: set[str] = set()
         with pysam.VariantFile(inference_vcf, drop_samples=True) as vcf_file:
             for record in vcf_file.fetch(**region.pysam_fetch):
                 variant = Variant.from_pysam(record)
@@ -275,8 +275,7 @@ class Graph:
                 include_alleles = {i for i, sl in enumerate(variant.length_change(), 1) if sl is not None}
                 inference_alleles[variant.vg_variant_id] = include_alleles
 
-        print(inference_alleles)
-        # Identify "indicator" nodes for the inference allele paths
+        # Identify "indicator" nodes for the inference allele paths, i.e., those that differentiate the alternate alleles from the reference allele.
         inference_nodes: dict[str, set[int]] = {}
         for var_id, alleles in inference_alleles.items():
             ref_set = self.path_nodes[variant_path_name(var_id, 0)]
@@ -284,7 +283,6 @@ class Graph:
                 alt_path = variant_path_name(var_id, a)
                 inference_nodes[alt_path] = self.path_nodes[alt_path].difference(ref_set)
 
-        print(inference_nodes)
         # Extract backbone path
         free_nodes = set()
         for path, nodes in self.path_nodes.items():
@@ -295,52 +293,55 @@ class Graph:
         _, sink_prev = self._to_sink(free_nodes)
         backbone_path = _path_from_prev(source_prev, self.max_node_id)
         backbone_nodes = set(backbone_path)
-        print(backbone_nodes)
-        # Identify the inference paths we need to include in DFS
+
+        # Identify the inference paths we need to include in DFS, as we do so extract all the edges that should be explored in the DFS.
         inference_paths: set[str] = set()
+        explore_edges: set[tuple[int, int]] = { (backbone_path[i-1], backbone_path[i]) for i in range(1, len(backbone_path)) }
         for variant_id, alt_allele_indices in inference_alleles.items():
             for a in alt_allele_indices:
                 if backbone_nodes.isdisjoint(inference_nodes[variant_path_name(variant_id, a)]):
-                    inference_paths.add(variant_path_name(variant_id, a))
+                    path = variant_path_name(variant_id, a)
+                    trim_path = variant_path_name(variant_id, 0)
                 else:
                     # If the backbone path already contains the alternate allele, we don't need to enumerate it separately,
                     # but do need to include the reference path, i.e., the absence of the variant.
-                    inference_paths.add(variant_path_name(variant_id, 0))
-        print(inference_paths)
-        # Extract the edges that are "branch" points into variant alleles when performing DFS.
-        branch_edges: dict[tuple[int, int], str] = defaultdict(list)
-        for path in inference_paths:
-            path_nodes = self.nodes_on_path(path)
-            if not path.endswith("_0"):
-                # TODO: Remove any leading or trailing nodes shared with the reference path for this variant
-                pass
-            path_start = path_nodes[0]
-            path_end = path_nodes[-1]
+                    path = variant_path_name(variant_id, 0)
+                    trim_path = variant_path_name(variant_id, a)
 
-            path_into = _path_from_prev(source_prev, path_start, drop_start=True, targets=backbone_nodes)
-            path_from = _path_from_prev(sink_prev, path_end, reverse=True, drop_start=True, targets=backbone_nodes)
+                if path in inference_paths:
+                    continue
+                inference_paths.add(path)
 
-            branching_path_nodes = path_into + path_nodes + path_from
-            branching_path_key = tuple(branching_path_nodes[:2])
-            branch_edges[branching_path_key].append(branching_path_nodes)
-            #breakpoint()
-            # Is one or more of my successors also the start of an inference path? Add additional branch options
-            next_nodes = []
-            self._graph.follow_edges(self._graph.get_handle(path_end), False, lambda n: next_nodes.append(self._graph.get_id(n)))  # noqa: B023
-            for next_node in next_nodes:
-                for next_path in self.node_paths.get(next_node, []):
-                    if next_path in inference_paths and path_to_variant_id(next_path) != path_to_variant_id(path):
-                        branch_edges[branching_path_key].append(path_into + path_nodes + [next_node])
+                # Remove nodes shared between reference and alternate allele paths to avoid an explosion of paths when a reference allele and
+                # alternately allele share many edges, e.g., multi-allelic DEL and MNVs.
+                path_nodes = _trim_path(self.nodes_on_path(path), self.nodes_on_path(trim_path))
+                path_start = path_nodes[0]
+                path_end = path_nodes[-1]
 
-            # Is one or more of my predecessors also the end of an inference path? Add additional branch options
-            prev_nodes = []
-            self._graph.follow_edges(self._graph.get_handle(path_start), True, lambda n: prev_nodes.append(self._graph.get_id(n)))  # noqa: B023
-            for prev_node in prev_nodes:
-                for prev_path in self.node_paths.get(prev_node, []):
-                    if prev_path in inference_paths and path_to_variant_id(prev_path) != path_to_variant_id(path):
-                        branch_edges[(prev_node, path_nodes[0])].append([prev_node, *path_nodes, *path_from])
+                path_into = _path_from_prev(source_prev, path_start, drop_start=True, targets=backbone_nodes)
+                path_from = _path_from_prev(sink_prev, path_end, reverse=True, drop_start=True, targets=backbone_nodes)
 
-        print(branch_edges)
+                branching_path_nodes = path_into + path_nodes + path_from
+                explore_edges.update(
+                    (branching_path_nodes[i-1], branching_path_nodes[i]) for i in range(1, len(branching_path_nodes))
+                )
+
+                # Is one or more of my successors also the start of an inference path? Add exploration edges
+                next_nodes = []
+                self._graph.follow_edges(self._graph.get_handle(path_end), False, lambda n: next_nodes.append(self._graph.get_id(n)))  # noqa: B023
+                for next_node in next_nodes:
+                    for next_path in self.node_paths.get(next_node, []):
+                        if next_path in inference_paths and variant_path_to_id(next_path) != variant_path_to_id(path):
+                            explore_edges.add((path_end, next_node))
+
+                # Is one or more of my predecessors also the end of an inference path? Add exploration edges
+                prev_nodes = []
+                self._graph.follow_edges(self._graph.get_handle(path_start), True, lambda n: prev_nodes.append(self._graph.get_id(n)))  # noqa: B023
+                for prev_node in prev_nodes:
+                    for prev_path in self.node_paths.get(prev_node, []):
+                        if prev_path in inference_paths and variant_path_to_id(prev_path) != variant_path_to_id(path):
+                            explore_edges.add((prev_node, path_start))
+
         haplotypes = []
         def _generate_all_paths(node_handle: odgi.handle, path: list[int]):
             node = self._graph.get_id(node_handle)
@@ -360,7 +361,7 @@ class Graph:
                 recurse_nodes = []
                 for n in next_nodes:
                     recurse_node = self._graph.get_id(n)
-                    if recurse_node in backbone_nodes or (path[-1], recurse_node) in branch_edges:
+                    if (path[-1], recurse_node) in explore_edges:
                         recurse_nodes.append(n)
                 if len(recurse_nodes) == 1:
                     # Optimize for the common case with no branching
@@ -369,21 +370,8 @@ class Graph:
                 else:
                     break
 
-            if path[-1] == 39 and base_path_prefix == "HG00731#0#chr1#0":
-                breakpoint()
             for n in recurse_nodes:
-                # We can have branching paths and backbone nodes for the the same "next" node
-                recurse_node = self._graph.get_id(n)
-                if (path[-1], recurse_node) in branch_edges:
-                    # In a variant, branch while adding all the nodes for the allele into the path. The var_path should
-                    # start at the source of the branch, and its ending node should the "next_node" in the path. If one variant
-                    # leads to the another, we might have multiple "branches"
-                    var_paths = branch_edges[(path[-1], recurse_node)]
-                    for var_path in var_paths:
-                        assert len(var_path) >= 3 and var_path[0] == path[-1]  # noqa: PT018
-                        _generate_all_paths(self._graph.get_handle(var_path[-1]), path + var_path[1:-1])
-                if recurse_node in backbone_nodes:
-                    _generate_all_paths(n, path[::])  # Pass a copy of the path to avoid modifying it in-place
+                _generate_all_paths(n, path[::])  # Pass a copy of the path to avoid modifying it in-place
 
         _generate_all_paths(self._graph.get_handle(self.min_node_id), [])
 
@@ -411,6 +399,7 @@ class Graph:
         haplotypes.sort(key=sort_key)
 
         return haplotypes
+
 
     def is_bubble_path(self, path_name: str) -> bool:
         into_outof_nodes = []
@@ -610,7 +599,19 @@ class GraphKmer:
     sequence: str
     node_ids: list[int]
 
-def _path_from_prev(prev: list[int], start: int, reverse=False, drop_start=False, targets: set[int]|None=None) -> list[int]:
+def _path_from_prev(prev: list[int], start: int, *, reverse=False, drop_start=False, targets: set[int]|None=None) -> list[int]:
+    """Generate path by traversing the previous node list.
+
+    Args:
+        prev (list[int]): List of previous nodes for node at index i
+        start (int): Starting node id to traverse from
+        reverse (bool, optional): Reverse generated path. Defaults to False.
+        drop_start (bool, optional): Don't include start in returned path. Defaults to False.
+        targets (set[int] | None, optional): Terminate traversal if path reaches one of these nodes. Defaults to None.
+
+    Returns:
+        list[int]: Path of node ids
+    """
     path = [start]
     while True:
         if (next_node := prev[path[-1]]) is None:
@@ -621,3 +622,15 @@ def _path_from_prev(prev: list[int], start: int, reverse=False, drop_start=False
     if drop_start:
         path = path[1:]
     return path if reverse else path[::-1]
+
+def _trim_path(path: list[int], to_trim: list[int]) -> list[int]:
+    """Trim the path to remove nodes shared with to_trim at the start and end."""
+    for start in range(min(len(path), len(to_trim))):
+        if path[start] != to_trim[start]:
+            break
+    path = path[start:]
+    to_trim = to_trim[start:]
+    for end in range(-1, -min(len(path), len(to_trim)) - 1, -1):
+        if path[end] != to_trim[end]:
+            break
+    return path[:end + 1] if end != -1 else path

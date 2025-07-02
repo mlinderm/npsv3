@@ -42,7 +42,7 @@ class GraphConstructor:
 
     VCF features supported:
     * Global phasing (|) and local phasing (|) with a PS field.
-    * Star alleles and alleles overlapped by a deletion more generally. If genotypes are not explicity phased, we try to find
+    * Star alleles and alleles overlapped by a deletion more generally. If genotypes are not explicitly phased, we try to find
       a consistent phasing of the alleles in the overlapping variants.
 
     Known limitations:
@@ -117,7 +117,7 @@ class GraphConstructor:
                 self.paths[alt.name].append(alt.node_id)
 
         # Extend trimmed (padding removed) alternate paths to match the beginning and end points of the reference path. We need to
-        # do this because we maintain a single reference path for each variant, as opposed to an allele-specific refererence path.
+        # do this because we maintain a single reference path for each variant, as opposed to an allele-specific reference path.
         # The result should be that the reference and alternate paths begin and end at the same points in the graph.
         for name, nodes in self.paths.items():
             if not name.startswith("_"):
@@ -469,12 +469,12 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
         # Make sure reference sequence is all upper case
         return ref_fasta.fetch(reference=region.contig, start=region.start, end=region.end).upper()
 
-# For reference on converting VCF to graph paths, the approach in the GWVT library
+# For reference on converting VCF to graph paths, the approach in the GBWT library
 # https://github.com/jltsiren/gbwt/blob/bde6858046580d1b9dbfa54f48ab187c85998ffe/src/variants.cpp#L826
 
 
 class Phasing(Enum):
-    """Possible phasing for a gentotype"""
+    """Possible phasing for a genotype"""
     UNPHASED = 0
     GLOBAL = 1
     LOCAL = 2
@@ -533,11 +533,11 @@ class NonRefAlleleOverlappingNonRefError(Exception):
     """Non-reference allele overlapping another non-reference allele"""
     # In a well formed VCF this should not occur, but in practice if the variants are not phased
     # we can obtain a non-reference allele that overlaps another non-reference allele. Report this
-    # error explicity so we can possibly fix it.
+    # error explicitly so we can possibly fix it.
 
 
 class HaplotypePaths:
-    """Construct a sequence of (dis)connected paths making up a single halotype by adding differently phased alleles"""
+    """Construct a sequence of (dis)connected paths making up a single haplotype by adding differently phased alleles"""
     def __init__(self, ref_nodes: list[int]):
         self.nodes = [ref_nodes[:]]
         self.phase = PhaseState(Phasing.IMPLICIT)  # Start with implicit phasing, i.e., no breaks in the haplotype
@@ -573,6 +573,7 @@ class HaplotypePaths:
                     # A VCF with inconsistent phasing of alternate alleles
                     raise NonRefAlleleOverlappingNonRefError from e
                 return
+            e.add_note(f"in variant spanning {variant.reference_region}") # Python 3.11+ (alternately use e.args)
             raise
 
         if alt_nodes is not None:
@@ -599,7 +600,7 @@ class PolytypePaths:
         ref_nodes = self.paths[variant_path_name(variant.vg_variant_id, 0, prefix=path_prefix)]
         indices = genotype.allele_indices
 
-        # A variant can be explicitly globally or locally phased, or implicity phased if it has a overlapping '*' 'llele
+        # A variant can be explicitly globally or locally phased, or implicitly phased if it has a overlapping '*' 'allele
         # or if all alleles are the same (e.g., 0/0 genotype)
         if genotype.phased:
             phase_set = genotype.get("PS")
@@ -652,12 +653,17 @@ def variant_path_name(variant_id: str, allele: int, prefix: str="alt") -> str:
     """Construct a path name for a variant and allele, e.g., alt_123_1"""
     return f"_{prefix}_{variant_id}_{allele}"
 
-def path_to_variant_id(path_name: str, prefix: str="alt") -> str:
+def variant_path_to_id(path_name: str, prefix: str="alt") -> str:
     """Extract the variant ID from a path name, e.g., alt_123_1 -> 123"""
     prefix = f"_{prefix}_"
     assert path_name.startswith(prefix)
     return path_name[len(prefix):len(prefix) + VARIANT_ID_LENGTH]
 
+def variant_path_to_allele(path_name: str, prefix: str="alt") -> int:
+    """Extract the allele index from a path name, e.g., alt_123_1 -> 1"""
+    prefix = f"_{prefix}_"
+    assert path_name.startswith(prefix)
+    return int(path_name[len(prefix) + VARIANT_ID_LENGTH + 1:])
 
 def _nesting_reference_region_cmp(a: tuple[Variant, pysam.VariantRecord], b: tuple[Variant, pysam.VariantRecord]) -> int:
     region_a = a[0].reference_region

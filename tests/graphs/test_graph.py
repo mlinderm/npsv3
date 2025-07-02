@@ -193,9 +193,6 @@ class TestGraphConstructionFromVCF:
                 backbone,
                 region.expand(cfg.pileup.variant_padding),
             )
-            for h in haplotypes:
-                print(sorted(h.paths))
-            print()
             assert len(haplotypes) == 12, f"Backbone {backbone} should have 12 haplotypes"
 
             # One of the paths should match the backbone
@@ -303,7 +300,8 @@ class TestGraphConstructionFromVCF:
         [
             (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
             (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
-            (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3) # Larger multi-allelic SV with overlapped SNVs
+            (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
+            (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
         ],
     )
     def test_dipcall_observed_errors(self, cfg, region, base_path, expected_haplotypes):

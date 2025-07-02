@@ -210,9 +210,13 @@ class _SequenceResolvedVariant(Variant):
         if alt_allele == "*":
             return None
         # Compute per-allele padding (since is may be different than the global padding). Start with
-        # the "right" side to effectively left-align the variant.
+        # the "right" side to effectively left-align the variant. We don't remove "right" padding when
+        # any allele has just length 1 since that can collapse insertions
         ref_allele = self._record.ref.upper()
-        right_padding = len(os.path.commonprefix([ref_allele[::-1], alt_allele[::-1]]))
+        if len(ref_allele) > 1 and len(alt_allele) > 1:
+            right_padding = len(os.path.commonprefix([ref_allele[::-1], alt_allele[::-1]]))
+        else:
+            right_padding = 0
         left_padding = len(os.path.commonprefix([ref_allele[:len(ref_allele)-right_padding], alt_allele[:len(alt_allele)-right_padding]]))
         return Range(self.contig, self.start + left_padding, self.end-right_padding)
 
@@ -223,10 +227,16 @@ class _SequenceResolvedVariant(Variant):
         if alt_allele == "*":
             return None
         assert _VALID_BASES_RE.fullmatch(alt_allele), f"Unexpected base in sequence resolved allele {alt_allele} in region {self.reference_region}"
-        # Compute per-allele padding (since is may be different than the global padding)
-        padding = len(os.path.commonprefix([self._record.ref.upper(), alt_allele]))
-        right_padding = len(os.path.commonprefix([self._record.ref[::-1], alt_allele[::-1]]))
-        return alt_allele[padding:len(alt_allele) - right_padding]
+        # Compute per-allele padding (since is may be different than the global padding). Start with
+        # the "right" side to effectively left-align the variant. We don't remove "right" padding when
+        # any allele has just length 1 since that can collapse insertions
+        ref_allele = self._record.ref.upper()
+        if len(ref_allele) > 1 and len(alt_allele) > 1:
+            right_padding = len(os.path.commonprefix([ref_allele[::-1], alt_allele[::-1]]))
+        else:
+            right_padding = 0
+        left_padding = len(os.path.commonprefix([ref_allele[:len(ref_allele)-right_padding], alt_allele[:len(alt_allele)-right_padding]]))
+        return alt_allele[left_padding:len(alt_allele) - right_padding]
 
 class _SymbolicDeletionVariant(Variant):
     def __init__(self, record):

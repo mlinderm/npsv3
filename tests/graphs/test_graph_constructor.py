@@ -209,13 +209,13 @@ class TestGraphConstructor:
         construct.to_gfa(HG38_REF_FASTA, gfa_path)
 
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
-    @pytest.mark.parametrize(("variant", "addl_paths"), [
+    @pytest.mark.parametrize(("variant", "additional_paths"), [
     ("1	1000001	.	G	C	100	PASS	.	GT	0/1", { "Sample#0#1#1": [4, 6], "Sample#1#1#1": [5, 6] }),
     ("1	1000001	.	G	C	100	PASS	.	GT	0|1", { "Sample#0#1#1": [4, 6], "Sample#1#1#1": [5, 6] }),
     ("1	1000001	.	G	C	100	PASS	.	GT:PS	0|1:1000001", { "Sample#0#1#1": [4, 6], "Sample#1#1#1": [5, 6] }),
     ("1	1000001	.	G	C	100	PASS	.	GT	1/1", { "Sample#0#1#0": [1, 2, 5, 6], "Sample#1#1#0": [1, 3, 5, 6] }),
     ])  # fmt: skip
-    def test_unphased_transitions(self, tmp_path, variant, addl_paths):
+    def test_unphased_transitions(self, tmp_path, variant, additional_paths):
         region = Range.parse_literal("1:1000000-1000001")
         construct = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
@@ -229,7 +229,7 @@ class TestGraphConstructor:
         )  # fmt: skip
         # construct.to_gfa(B37_REF_FASTA)
 
-        expected_paths = {"Sample#0#1#0": [1, 2], "Sample#1#1#0": [1, 3], **addl_paths}
+        expected_paths = {"Sample#0#1#0": [1, 2], "Sample#1#1#0": [1, 3], **additional_paths}
         for name, nodes in expected_paths.items():
             assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
 
@@ -542,3 +542,39 @@ chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
         #     for name, _strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
         #         print(name, nodes)
         #         #assert construct.paths.get(name) == [int(n) for n in nodes], f"Path {name} does not match expected nodes"
+
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    def test_adjacent_inserts(self, tmp_path):
+        region = Range.parse_literal("chr4:99588036-99590036")
+        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr4,length=190214555> 
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr4	99589035	.	A	ACATATATATGTTCATATATATATTCATATATATATGTTCATGTATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATT	30	.	SVTYPE=INS;SVLEN=564	GT	0|1
+chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
+"""
+        )  # fmt: skip
+        # construct.to_gfa(HG38_REF_FASTA)
+
+        # The second insertion has a nominal right padding of 1. With that, the two insertions collapse. To prevent that
+        # collapse we only remove right padding when both (ref, alt) alleles have length > 1.
+
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    def test_inconsistent_haplotypes(self, tmp_path):
+        region = Range.parse_literal("chr1:6012332-6012402")
+        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+chr1	6012332	.	TGGTGGAGGTGATGAAGGCGGAGGTGGGTGGAGGTGGAGATGGAGGTAGTGGTGGAGGTGATGAAGGCGGA	T	.	.	SVTYPE=DEL;SVLEN=-70	GT	1|1
+chr1	6012378	.	T	C	.	.	.	GT	0|1
+"""
+        )  # fmt: skip
+        construct.to_gfa(HG38_REF_FASTA)
+        assert "HG002#0#chr1#1" in construct.paths, "Inconsistent haplotypes should result in a path break"
