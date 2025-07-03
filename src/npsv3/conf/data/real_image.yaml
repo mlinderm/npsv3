@@ -8,4 +8,4 @@ batch_size: 16
 num_workers: ${threads}
 patch_size: 32
 shuffle_size: 1000
-mask_scheme: ["random", 80]
+mask_scheme: ["data_driven", 50]

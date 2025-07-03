@@ -25,7 +25,7 @@ class RealImageDataModule(L.LightningDataModule):
         test_urls=None,
         batch_size=16,
         num_workers=1,
-        patch_size=16,
+        patch_size=32,
         shuffle_size=1000,
         num_channels=3,
         mask_scheme=["random", 20]
@@ -122,7 +122,7 @@ class MiM(L.LightningModule):
         optimizer: torch.optim.Optimizer,
         num_channels = 7,
         image_size=(96, 288),
-        patch_size=16,
+        patch_size=32,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -345,7 +345,7 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         images, bool_masked_pos, keys, regions, label = batch
 
         # comment out to make more efficient
-        generate_mask_visual(bool_masked_pos, 16, self.mask_path)
+        generate_mask_visual(bool_masked_pos, 32, self.mask_path)
 
         recon_images = outputs["final_reconstruction"]
 

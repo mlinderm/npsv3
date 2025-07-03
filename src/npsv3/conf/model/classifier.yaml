@@ -1,18 +1,17 @@
 _target_: npsv3.models.transformer.Classifier
-# patch_size: 32
-
-# optimizer:
-#   _target_: torch.optim.Adamw
-#   _partial_: true
-#   lr: 0.001
-#   betas: [0.9, 0.999]
-#   eps: 1e-8
-#   weight_decay: 0.01
-#   amsgrad: false
-
 
 optimizer:
-  _target_: torch.optim.Adam
+  _target_: torch.optim.AdamW
   _partial_: true
   lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
   amsgrad: false
+
+
+# optimizer:
+#   _target_: torch.optim.Adam
+#   _partial_: true
+#   lr: 0.001
+#   amsgrad: false
