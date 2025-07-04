@@ -548,7 +548,7 @@ chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
         region = Range.parse_literal("chr4:99588036-99590036")
         construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
-##contig=<ID=chr4,length=190214555> 
+##contig=<ID=chr4,length=190214555>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
 ##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -563,7 +563,7 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
         # collapse we only remove right padding when both (ref, alt) alleles have length > 1.
 
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
-    def test_inconsistent_haplotypes(self, tmp_path):
+    def test_inconsistent_haplotypes(self, caplog, tmp_path):
         region = Range.parse_literal("chr1:6012332-6012402")
         construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
@@ -571,10 +571,35 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
 ##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
 chr1	6012332	.	TGGTGGAGGTGATGAAGGCGGAGGTGGGTGGAGGTGGAGATGGAGGTAGTGGTGGAGGTGATGAAGGCGGA	T	.	.	SVTYPE=DEL;SVLEN=-70	GT	1|1
 chr1	6012378	.	T	C	.	.	.	GT	0|1
 """
         )  # fmt: skip
         construct.to_gfa(HG38_REF_FASTA)
-        assert "HG002#0#chr1#1" in construct.paths, "Inconsistent haplotypes should result in a path break"
+
+        # The second variant creates an inconsistent haplotype for Sample#0#chr1#1. We currently warn and skip the variant.
+        # An alternative would be to break the haplotypes and create a new path starting as the inconsistent variant. That
+        # is what VG seems to do.
+
+        assert len(caplog.records) == 1, "Should log a warning about inconsistent haplotypes"
+        # assert "Sample#0#chr1#1" in construct.paths, "Inconsistent haplotypes should result in a path break"
+
+    @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
+    @pytest.mark.parametrize(("region", "vcf_path", "expected_warnings"), [
+        #(Range.parse_literal("13:94416486-94418485"), data_path("13_94416486_94418485.vcf.gz"), 1),
+        (Range.parse_literal("1:5473213-5475287"), data_path("1_5473213_5475287.vcf.gz"), 0),
+    ])  # fmt: skip
+    def test_merged_vcfs(self, caplog, region, vcf_path, expected_warnings):
+        construct = GraphConstructor(region, vcf_path)
+        construct.to_gfa(B37_REF_FASTA)
+
+        # Region 1: The inference and background VCFs contained identical variants that were not combined when merged into
+        # this VCF during graph construction. We currently don't detect that the bi-allelic insertion and the multi-allelic DEL/INS variant
+        # overlap due to comparison of the empty insertion interval to the non-empty deletion interval. To avoid this issue we updated
+        # the background VCF preparation to make it disjoint from the inference VCF.
+
+        # Region 2: Splitting multi-allelic variants left a small deletion with only a * alternate allele that was not detected as
+        # overlapping due to originally incorrect region calculation. We now ignore those variants entirely.
+
+        assert len(caplog.records) == expected_warnings, "Expected warnings about overlapping alleles"

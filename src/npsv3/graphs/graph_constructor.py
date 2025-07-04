@@ -174,17 +174,21 @@ class GraphConstructor:
                 # that have identical "zero width" regions
                 has_star = False
                 try:
-                    star_idx = record.alleles.index("*")
+                    alt_alleles = record.alts
+                    if alt_alleles == ("*",):
+                        continue  # Skip variants that only have * alternate alleles
+                    star_idx = alt_alleles.index("*") + 1
                     allele_indices = set(itertools.chain.from_iterable(genotype.allele_indices for genotype in record.samples.itervalues()))
                     if allele_indices == { star_idx }:
-                        # Skip variants that only have * alleles
-                        continue
+                        continue  # Skip variants with genotypes that are all * alleles
                     if star_idx in allele_indices:
                         # Only consider * alleles actually present in one of the genotypes, i.e., not just in the ALTS
                         has_star = True
                 except ValueError:
                     pass
 
+                # TODO: This currently doesn't handle the case where we are checking an insertion overlaps a multi-allelic variant
+                # containing the same insertion.
                 variant_range = variant.reference_region
                 if current_range is not None and (current_range.overlaps(variant_range) or current_range == variant_range):
                     current_range = current_range.union(variant_range)
@@ -607,7 +611,7 @@ class PolytypePaths:
             phase = PhaseState(Phasing.GLOBAL if phase_set is None else Phasing.LOCAL, phase_set)
         elif VariantOverlap.STAR_ALLELE in overlap or len(set(indices)) == 1:
             # Heterozygous variants should only be implicitly phased if there are actual overlapping alleles
-            # where we can make inferences about the phase. At present we only assume that for explicit * alleles
+            # where we can make inferences about the phase. At present we only assume that for explicit * alleles.
             phase = PhaseState(Phasing.IMPLICIT)
         else:
             phase = PhaseState(Phasing.UNPHASED)
@@ -638,7 +642,8 @@ class PolytypePaths:
                 continue
         else:
             # We tried different permutations of the genotype, but couldn't find a consistent phasing, skip variant without
-            # changing the haplotypes. TODO: Alternatively should be "break" the haplotype at this point? That is what VG does.
+            # changing the haplotypes. Alternatively we could try to "break" the haplotype at this point (what vg does). However,
+            # we would need a way to re-insert nodes that might have been removed by prior variants to construct the new haplotype.
             logging.warning("Found non-reference allele overlapped by another non-reference allele in %s, skipping", variant.reference_region)
 
     def gfa_paths(self, region) -> dict[str, list[int]]:

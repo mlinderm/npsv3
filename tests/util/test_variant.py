@@ -95,7 +95,7 @@ chr1	3999762	6281	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTG
     def test_ins_with_right_padding(self, tmp_path):
         vcf_path = _write_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
-##contig=<ID=chr4,length=190214555> 
+##contig=<ID=chr4,length=190214555>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
 ##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -111,3 +111,18 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
         # We don't remove "right padding" if one of the alleles is just length 1
         assert variant.alt_reference_region(1) == Range("chr4", 99589035, 99589036)
         assert variant.alt_seq(1) == "TATATATATGTTCATATATATATTC"
+
+    def test_split_star_allele(self, tmp_path):
+        vcf_path = _write_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=1,length=249250621>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+1	5474286	.	CG	*	.	.	.	GT	1/0
+"""
+        )  # fmt: skip
+        record = next(pysam.VariantFile(vcf_path, "r"))
+        variant = Variant.from_pysam(record)
+        assert variant.reference_region == Range("1", 5474285, 5474287), "With only * alternate allele, reference be entire REF allele"

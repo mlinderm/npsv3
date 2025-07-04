@@ -42,7 +42,7 @@ def generate_allele_indices(num_alleles: int, ploidy: int) -> typing.Generator[t
     if ploidy == 1:
         for i in range(num_alleles):
             yield (i,)
-    elif ploidy == 2:
+    elif ploidy == 2:  # noqa: PLR2004
         for j in range(num_alleles):
             for i in range(j + 1):
                 yield (i, j)
@@ -67,7 +67,7 @@ def genotype_field_index(allele_indices: typing.Sequence[int]) -> int:
     """
     if len(allele_indices) == 1:
         return allele_indices[0]
-    if len(allele_indices) == 2:
+    if len(allele_indices) == 2:  # noqa: PLR2004
         a1, a2 = sorted(allele_indices)
         return a1 + (a2 * (a2 + 1) // 2)
     msg = "Only ploidy <= 2 is currently supported"
@@ -75,17 +75,14 @@ def genotype_field_index(allele_indices: typing.Sequence[int]) -> int:
 
 
 def genotype_count(num_alleles: int, ploidy: int):
-    if ploidy <= 2:
+    if ploidy <= 2:  # noqa: PLR2004
         return (num_alleles * (num_alleles + 1)) // ploidy
     msg = "Only ploidy <= 2 is currently supported"
     raise NotImplementedError(msg)
 
 
 def _has_symbolic_allele(record):
-    for alt in record.alts:
-        if alt.startswith("<") or alt.endswith(">"):
-            return True
-    return False
+    return any(alt.startswith("<") or alt.endswith(">") for alt in record.alts)
 
 
 class Variant:
@@ -99,9 +96,10 @@ class Variant:
 
         self._sequence_resolved = not _has_symbolic_allele(record)
         if self._sequence_resolved:
-            self._padding = len(os.path.commonprefix([a for a in record.alleles if a != "*"]))
+            alleles = [a for a in record.alleles if a != "*"]
+            self._padding = len(os.path.commonprefix(alleles)) if len(alleles) > 1 else 0
         else:
-            assert len(record.alts) == 1, "Multiallelic symbolic variants not currently supported"
+            assert len(record.alts) == 1, "Multi-allelic symbolic variants not currently supported"
             self._padding = 1
 
         if self._padding > 1:

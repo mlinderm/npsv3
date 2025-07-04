@@ -1,6 +1,7 @@
 import operator
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -530,7 +531,11 @@ class Graph:
             # Construct graph (via GFA file)
             gfa_path = os.path.join(temp_dir, "graph.gfa")
 
-            constructor = GraphConstructor(region, merged_graph_vcf)
+            try:
+                constructor = GraphConstructor(region, merged_graph_vcf)
+            except:
+                shutil.copy(merged_graph_vcf, "/home/mlinderman/error.vcf.gz")
+                raise
             constructor.to_gfa(reference_fasta, gfa_path)
 
             # Construct graph object from GFA file
