@@ -53,14 +53,14 @@ class TestPackedVariant:
 
 
     @pytest.mark.cfg_overrides(
-    "model=paired_packed_inception_contrastive",
+    "model=paired_packed_inception_npairs",
     f'data.train_urls="{data_path("/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00731/generator=coverage,pileup=unphased,simulation.replicates=1/images-0000.tar")}"',
     f'data.validate_urls="{data_path("/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00731/generator=coverage,pileup=unphased,simulation.replicates=1/images-0000.tar")}"',
     "model.encoder.num_channels=7",
-    "data.batch_size=20",
+    "data.batch_size=64",
     "trainer=paired",
     "data=packed_images",
     )
 
     def test_paired_cnn_npairs_model_full(self, cfg):
-        train(cfg, fast_dev_run=100)
+        train(cfg, fast_dev_run=50)

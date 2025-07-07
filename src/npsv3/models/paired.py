@@ -30,9 +30,29 @@ def transform_images(images: np.ndarray) -> torch.Tensor:
 
 def pack_yield_support(images, labels, variants, remaining_space, padding_value=0):
     """Helper function to yield a batch of images with padding. 
-    Helps to avoid code duplication in the main packing function."""
+    Helps to avoid code duplication in the main packing function.
 
-    # If the current sample doesn't fit in the batch, yield the current batch
+    Args:
+        images (list of tensors): A list query images followed by their corresponding support images.
+            - `query` is a single image tensor.
+            - `support` is a tensor of one or more support images (to be cated).
+
+        labels (list of ints): one hot encoding of each variant indicating which images are the correct genotype.
+
+        variants (list of ints): indicates the index of the query in each variant. Offset. 
+
+        remaining_space (int): indicates amount of padding to add to the batch.
+
+        padding_value (int, optional): The value used to fill unused slots (padding) in the
+            batch to ensure uniform shape. Default is 0.
+
+    Returns:
+        tuple: A batch consisting of:
+            - Images: A tensor of cated query and support images with padding,
+            - Labels: tensor of labels with padding,
+            - Variants: A tensor of variants with padding.
+    
+    """
     #Cat the images list into a tensor and add padding
     images_tensor = torch.cat(images, dim=0)
     padding = (0,) * (2 * len(images_tensor.shape) - 1) + (remaining_space,)
@@ -42,6 +62,7 @@ def pack_yield_support(images, labels, variants, remaining_space, padding_value=
     variants += [-100] * (remaining_space)
     labels += [-100] * (remaining_space)
 
+    # Convert lists to tensors
     return (images_tensor, torch.tensor(variants), torch.tensor(labels))
     
 
@@ -54,11 +75,13 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
         padding_value (int, optional): Padding value. Defaults to 0.
 
     Yields:
-        Generator[tuple, None, None]: (Images list, variant_groups, labels ) tuples.
-    """
-    images = [] #Images list to hold the images in the current batch
+        Generator[tuple, None, None]: (Images, variants, labels) tensors:
+            Images (Tensor): query images followed by their corresponding support images.
+            labels (Tensor): one hot encoding of each variant indicating which images are the correct genotype.
+            variants (Tensor): indicates the index of the query in each variant. Offset.
 
-    #Variants and labels lists to hold the metadata in the current batch
+    """
+    images = []
     variants = []
     labels = [] 
     
@@ -67,8 +90,6 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
     for sample in data:
         query, support, label, *_ = sample
         num_genotypes, num_replicates, *image_size = support.shape
-        if num_replicates > 1:
-            print("\nNUM replicates", num_replicates)
         assert label < num_genotypes and len(image_size) == 3, "Unexpected data shape"
 
         remaining_space = batch_size - num_images
@@ -86,36 +107,37 @@ def _pack_and_pad_support(data: Iterable[tuple], batch_size = 256, padding_value
             #Yield the current batch with padding
             yield final
 
-             
+        if num_genotypes * num_replicates + 1  > batch_size:
+            #Sample too big for the batch, skipping ...
+            continue
+
         #Append the current sample to the images list
+
         #Append the unsqueezed query image to the images list
         images.append(query.unsqueeze(0))
 
-        #Append the respahed support images to the images list
+        #Append the reshaped support images to the images list
         images.append(support.reshape(-1, *image_size))
         
-
         #META DATA
         variants += [num_images] * ((num_genotypes * num_replicates) + 1)
 
         #labels
-        #l = [0] #Query image
-        labels.append(0) #Query label
-        genotype_list = list(range(0, num_genotypes))
-        for genotype in genotype_list:
+        labels.append(0) #Query
+
+        for genotype in list(range(0, num_genotypes)):
             if genotype == label:
                 labels += [1] * (num_replicates)
             else:
                 labels += [0] * (num_replicates)
         
-        #labels.append(l) #Padding the labels to be batch_size to work with stacking  
         num_images += ((num_genotypes * num_replicates) + 1)
 
     
     remaining_space = batch_size - num_images
     #YIELD
     #If images is not empty after the loop and there's enough space, yield the last batch
-    if remaining_space>= num_images and len(images)>0:  
+    if len(images)>0:  
         assert num_images == len(variants), "Missmatch of images and variants"
         final = pack_yield_support(images, labels, variants, remaining_space, padding_value)
 
@@ -291,6 +313,20 @@ class GroupedImageDataModule(L.LightningDataModule):
     
 
 class PackedImageDataModule(L.LightningDataModule):
+    """
+    Data module for packed images, uses the packed_and_pad_support.
+
+    Args:
+        train_urls
+        validate_urls
+        predict_urls
+        test_urls
+        batch_size (int, optional): Number of images (query + supports) per batch. Default is 256.
+        num_workers
+        max_group_size
+        shuffle_size
+
+    """
     def __init__(self, train_urls=None, validate_urls=None, predict_urls=None, test_urls=None, batch_size=256, num_workers=1, max_group_size=6, shuffle_size=1000):
         super().__init__()
         self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
@@ -324,11 +360,7 @@ class PackedImageDataModule(L.LightningDataModule):
                 shuffle=False,
                 num_workers=self.hparams.num_workers,
             )
-            #.unbatched()
         )
-        # if mode == "train":
-        #     loader = loader.shuffle(self.hparams.shuffle_size)
-        # loader = loader.batched(self.hparams.batch_size)
 
         return loader
 
@@ -376,6 +408,7 @@ class InceptionEncoder(nn.Module):
         # Replace the final layer with our projection head
         self.inception.fc = nn.Linear(self.inception.fc.in_features, projection_size, bias=False)
         self.bn = nn.BatchNorm1d(projection_size)
+        #self.bn = nn.LayerNorm(projection_size)
 
     def forward(self, x):
         embeddings = self.inception(x)
@@ -383,9 +416,25 @@ class InceptionEncoder(nn.Module):
         return projection
 
 class EuclideanDistanceMetric(nn.Module):
+    """
+    Computes the L2 (Euclidean) distance between normalized query and support embeddings.
+
+    This module assumes both input tensors are of shape (batch_size, embedding_dim) and
+    returns a 1D tensor of distances for each corresponding pair in the batch.
+
+    Embeddings are L2-normalized before distance computation to ensure scale invariance.
+
+    Args:
+        query_embeddings (torch.Tensor): Tensor of shape (batch_size, embedding_dim) representing query embeddings.
+        support_embeddings (torch.Tensor): Tensor of shape (batch_size, embedding_dim) representing support embeddings.
+
+    Returns:
+        Tensor of shape (batch_size,): Euclidean distances between query and support pairs.
+    """
     def __init__(self):
         super(EuclideanDistanceMetric, self).__init__()
         self.batched_distance = torch.cdist
+        
     def forward(self, query_embeddings, support_embeddings):
         query = torch.nn.functional.normalize(query_embeddings, p=2, dim=-1)
         support = torch.nn.functional.normalize(support_embeddings, p=2, dim=-1)
@@ -395,6 +444,22 @@ class EuclideanDistanceMetric(nn.Module):
         return distances
 
 class DotProductSimilarityMetric(nn.Module):
+    """
+    Computes the dot product similarity (cosine similarity) between normalized query and support embeddings.
+
+    Assumes both input tensors have shape (batch_size, embedding_dim) and returns a 1D tensor
+    of similarity scores for each corresponding pair in the batch.
+
+    Embeddings are L2-normalized before computing the dot product, so the output is equivalent
+    to cosine similarity.
+
+    Args:
+        query_embeddings (torch.Tensor): Tensor of shape (batch_size, embedding_dim) representing query embeddings.
+        support_embeddings (torch.Tensor): Tensor of shape (batch_size, embedding_dim) representing support embeddings.
+
+    Returns:
+        Tensor of shape (batch_size,): Cosine similarity scores between query and support pairs.
+    """
     def __init__(self):
         super(DotProductSimilarityMetric, self).__init__()
 
@@ -419,13 +484,11 @@ class ContrastiveLoss(nn.Module):
     Inputs:
         distances (torch.Tensor): A 1D tensor containing the distances between each query and each support sample.
         label (torch.Tensor): A 1D tensor of shape (batch_size,) containing the index of the
-            correct (positive) support sample for each query.
+            correct (positive) support sample for each query. One hot encoded, where 1 indicates a match
         mask (torch.Tensor): A boolean tensor of shape (batch_size,) indicating which examples
             in the batch should contribute to the final loss.
-        query_embeddings (torch.Tensor): The embeddings for the query samples. (Unused in loss but
-            may be passed for logging or future use.)
-        support_embeddings (torch.Tensor): The embeddings for the support samples. (Unused in loss but
-            may be passed for logging or future use.)
+        variants (Tensor): Tensor of shape (batch_size,) indicating the group each image belongs to by indicating the index of the query image in each variant group.
+
 
     Returns:
         torch.Tensor: A scalar tensor representing the mean contrastive loss over the masked batch.
@@ -434,7 +497,7 @@ class ContrastiveLoss(nn.Module):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor,  query_embeddings: torch.Tensor, support_embeddings: torch.Tensor, variants):
+    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor, variants):
         label_pair = label[mask]
         loss = label_pair * torch.square(distances[mask]) + (1.0 - label_pair) * torch.square(
             torch.clamp(self.margin - distances[mask], min=0)
@@ -443,16 +506,35 @@ class ContrastiveLoss(nn.Module):
         return torch.mean(loss)
 
 class NPairsLoss(nn.Module):
+    """
+    Implements the N-Pairs loss for metric learning using cross-entropy over similarity scores.
+
+    This loss compares a query image with multiple support images per variant (group), encouraging
+    the similarity between the query and the correct support (positive) to be higher than for
+    incorrect supports (negatives).
+
+    Args:
+        l2_reg (float, optional): L2 regularization coefficient. Default is 0.002.
+
+    Forward Args:
+        metric (Tensor): Similarity scores of shape (batch_size, num_support), computed 
+                         by dot product.
+        label (Tensor): Tensor of shape (batch_size,) indicating which support(s) are the correct match.
+                        Should contain 1 for positives and 0 for negatives.
+        mask (BoolTensor): Tensor of shape (batch_size,) indicating valid entries (ignoring padding).
+        variants (Tensor): Tensor of shape (batch_size,) indicating the group each image belongs to by indicating the index of the query image in each variant group.
+
+    Returns:
+        Tensor: Scalar loss value averaged across all valid variant groups.
+    """
     def __init__(self, l2_reg=0.002):
         super(NPairsLoss, self).__init__()
         self.l2_reg = l2_reg
 
-    def forward(self, metric, label, mask, query_embeddings, support_embeddings, variants):
+    def forward(self, metric, label, mask, variants):
         # Apply mask to filter valid entries
         metric = metric[mask]                  # (B_valid, S)
-        label = label[mask]                    # (B_valid,)
-        query_embeddings = query_embeddings[mask]        # (B_valid, D)
-        support_embeddings = support_embeddings[mask]    # (B_valid, S, D)
+        label = label[mask]                    # (B_valid,)   # (B_valid, S, D)
         variants = variants[mask] 
 
         # Cross-entropy loss on similarity scores
@@ -463,34 +545,53 @@ class NPairsLoss(nn.Module):
             loss.append( torch.nn.functional.cross_entropy(metric[v_mask][1:], label[v_mask][1:].float(), reduction="mean"))
         
 
-        return torch.mean(torch.stack(loss)) #+ reg_term
+        return torch.mean(torch.stack(loss))
     
 class InfoNCE(nn.Module):
+    """
+    Implements the InfoNCE loss for contrastive learning using precomputed similarity scores.
+
+    This formulation encourages positive pairs (query-support with label=1) to have higher
+    similarity scores than negative pairs (label=0) within each variant group. It applies
+    temperature scaling and uses log-ratio separation between positives and all negatives.
+
+    Args:
+        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation.
+                                       Default is 0.07.
+
+    Forward Args:
+        metric (Tensor): Similarity scores of shape (batch_size,). Dot products
+                         or cosine similarities between query and support embeddings.
+        label (Tensor): Tensor of shape (batch_size,) with binary labels — 1 for correct (positive) pairs
+                        and 0 for negatives.
+        mask (BoolTensor): Boolean tensor of shape (batch_size,) indicating valid entries (non-padding).
+        variants (Tensor): Tensor of shape (batch_size,) indicating group membership of each entry (used to group pairs).
+
+    Returns:
+        Tensor: Scalar tensor representing the average InfoNCE loss across variant groups.
+    """
     def __init__(self, temperature=0.07):
         super(InfoNCE, self).__init__()
         self.temperature = temperature
 
-    def forward(self, metric, label, mask, query_embeddings, support_embeddings):
+    def forward(self, metric, label, mask, variants):
         # Apply mask to filter valid entries
-        metric = metric[mask]                  # (B_valid, S)
-        label = label[mask]                    # (B_valid,)
-        query_embeddings = query_embeddings[mask]        # (B_valid, D)
-        support_embeddings = support_embeddings[mask]
+        metric = torch.exp(metric[mask] / self.temperature) # Scale the similarity scores by the temperature and exponentiate
+        label = label[mask] 
         variants = variants[mask] 
-           # (B_valid, S, D)
 
-        # Scale the similarity scores by the temperature
-        scaled_metric = metric / self.temperature
-
-
-        # Cross-entropy loss on similarity scores
         loss = []
         uniques, counts = variants.unique(return_counts=True)
         for i, (v, c) in enumerate(zip(uniques, counts)):
+            variant = []
             v_mask = (variants == v)
-            loss.append( torch.nn.functional.cross_entropy(metric[v_mask][1:], label[v_mask][1:].float(), reduction="mean"))
-        
-
+            labels_mask = label[v_mask] == 1 #Positives
+            inverted_mask = ~labels_mask #negatives
+            #Loop across the positives
+            for i in torch.nonzero(labels_mask, as_tuple=True)[0]:
+                pos = metric[v_mask][i]
+                variant.append(torch.log(pos / (pos + torch.sum(metric[v_mask][inverted_mask]))))
+            loss.append(-torch.sum(torch.stack(variant)))
         return torch.mean(torch.stack(loss))
 
 
@@ -528,11 +629,12 @@ class MaximizingPredictor(nn.Module):
 
 def accuracy_func(preds, labels):
     """
-    Computes accuracy for a batch of predictions and labels.
+    Computes accuracy for a batch of predictions and labels, only considering if the correct genotype is predicted as 1. 
+    This means an incorrect 0 prediction will not contribute to the accuracy score. Only predictions of 1 will count towards accuracy.
 
     Args:
         preds (torch.Tensor): One hot encoding of predicted class for all images (B,).
-        labels (torch.Tensor): truth labels (B,).
+        labels (torch.Tensor): Actual one hot encodings  (B,).
 
     Returns:
         torch.Tensor: Accuracy as a scalar tensor.
@@ -589,9 +691,12 @@ class PackedVariant(L.LightningModule):
         #Separate query and support embeddings
         
         #Removing padding
-        #query_embeddings = images_embeddings[torch.masked_select(variants, variants != -100)]
-        #support_embeddings = images_embeddings[ :query_embeddings.size()[0]]
-
+        # print("Image stats:")
+        # print("  mean:", images.mean().item())
+        # print("  std:", images.std().item())
+        # print("  norm mean:", images.norm(dim=1).mean().item())
+        # print("  norm min:", images.norm(dim=1).min().item())
+        # print("  norm max:", images.norm(dim=1).max().item())
         #Not removing paddings
         query_embeddings = images_embeddings[torch.masked_select(variants, variants != -100)]
         padding = (0,) * (2 * len(images_embeddings.shape) - 1) + (images_embeddings.size()[0]- query_embeddings.size()[0],)
@@ -600,8 +705,13 @@ class PackedVariant(L.LightningModule):
 
         # We would want to generalize this to any metric, here we use dot product as an example
         # batched_dot = torch.vmap(torch.dot)
-       
         metric = self.metric(query_embeddings, support_embeddings)
+        # print("Image embedding stats:")
+        # print("  mean:", images_embeddings.mean().item())
+        # print("  std:", images_embeddings.std().item())
+        # print("  norm mean:", images_embeddings.norm(dim=1).mean().item())
+        # print("  norm min:", images_embeddings.norm(dim=1).min().item())
+        # print("  norm max:", images_embeddings.norm(dim=1).max().item())
         return (metric, query_embeddings, support_embeddings)
         
 
@@ -613,14 +723,14 @@ class PackedVariant(L.LightningModule):
         Args:
             batch (Tuple): A batch of data containing:
                 - Images: (B, C, H, W) query images + support images flattened
-                - variants: (B,) variant index for each image in the batch
-                - labels: (B,) true = index of the correct support image for each variant group
+                - variants: (B,) variant index for each image in the batch. Indicates the index of teh query image in each variant group.
+                - labels: (B,)  index of the correct support images for each variant group
 
         Returns:
             Tuple:
                 - loss (Tensor): Scalar loss value.
-                - preds (Tensor): Predicted class index for each query (B,).
-                - label (Tensor): Ground truth labels (B,).
+                - preds (Tensor): Predicted one hot encodings (B,).
+                - label (Tensor): Actual one hot encodings (B,).
         """
         # Unpack the batch    
         images, variants, labels = batch
@@ -639,19 +749,13 @@ class PackedVariant(L.LightningModule):
         mask = torch.arange(len(variants), device=variants.device) < padding_start_idx
 
         # --- Compute loss and predictions ---
-        # Custom loss function may use embeddings and mask
-
-        print("\nVariants", variants)
-        
-        loss = self.loss(metric, labels, mask, query_embeddings, support_embeddings, variants)
-        print("\nLOSS", loss)
+        loss = self.loss(metric, labels, mask, variants)
         # Predictor outputs predicted class index per query (e.g. argmax over masked metric)
         
         #preds = self.predictor(metric, mask)
         preds = self.predictor(metric, variants)
-        print("\nPREDS", preds)
-        print("\nMETRIC", metric)
-        print("\nLABELS", labels[mask])
+       # print("\nPREDS", preds)
+        #print("\nLABELS", labels[mask])
         
 
         return (loss, preds, labels[mask])
@@ -660,18 +764,14 @@ class PackedVariant(L.LightningModule):
         loss, preds, label = self._model_step(batch, batch_idx)
         self.log("train_loss", loss, prog_bar=True)
         self.train_acc = accuracy_func(preds, label)
-        print("\nTRAIN ACC", self.train_acc)
         self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label = self._model_step(batch, batch_idx)
-
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        #self.val_acc(preds, label)
         self.val_acc = accuracy_func(preds, label)
-        print("\nVAL ACC", self.val_acc)
         self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
 
 
@@ -741,7 +841,7 @@ class GroupedVariant(L.LightningModule):
         mask[(torch.arange(metric.shape[0]), num_support - 1)] = 1
         mask = (1 - (mask.cumsum(dim=-1) - mask)).to(torch.bool)
 
-        loss = self.loss(metric, label, mask, query_embeddings, support_embeddings)
+        loss = self.loss(metric, label, mask)
         preds = self.predictor(metric, mask)
 
         return (loss, preds, label)

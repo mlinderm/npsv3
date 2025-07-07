@@ -6,7 +6,7 @@ encoder:
 metric:
   _target_: npsv3.models.paired.DotProductSimilarityMetric
 loss:
-  _target_: npsv3.models.paired.NPairsLoss
+  _target_: npsv3.models.paired.InfoNCE
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
