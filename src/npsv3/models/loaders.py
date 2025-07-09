@@ -25,7 +25,7 @@ def _pack_image_batch(
     images, labels, batch_size, transform_images=torch.nn.Identity, padding_value=-100
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Transform list of images and labels into a single batch tensor, padding labels with padding_value if needed"""
-    assert len(images) == len(labels), "Images and labels must have the same length"
+    assert len(images) // 2 == len(labels), "Unexpected number labels for number of images"
     assert sum(img.shape[0] for img in images) <= batch_size, "Total number of images exceeds batch size"
 
     # Manually cat images while transforming and scaling. If batch_size is larger than the number of images,
@@ -34,13 +34,15 @@ def _pack_image_batch(
     offsets = [0]  # Offset to the start of each new variant group in the batch
     for query, support in zip(
         *[iter(images)] * 2, strict=True
-    ):  # Get groups of length 2, i.e. batched available in Python 3.12
+    ):  # Get groups of length 2, i.e. implementation for `batched` (only available in Python>=3.12)
         images_batch[offsets[-1], ...] = transform_images(query)
         offsets.append(offsets[-1] + 1)
         images_batch[offsets[-1] : offsets[-1] + support.shape[0], ...] = transform_images(support)
         offsets[-1] += support.shape[0]
 
-    labels_batch = F.pad(torch.cat(labels, dim=0), (0, batch_size - offsets[-1]), mode="constant", value=padding_value)
+    labels_batch = torch.cat(labels, dim=0)
+    if batch_size > offsets[-1]:
+        labels_batch = F.pad(labels_batch, (0, batch_size - labels_batch.shape[0]), value=padding_value)
 
     return (images_batch, labels_batch, torch.tensor(offsets, dtype=torch.long))
 
@@ -87,7 +89,6 @@ def _pack_and_pad_images(
 
         # Append the "query" (real image) to the images list as a 1CHW tensor
         images.append(torch.unsqueeze(query, 0))
-        labels.append(torch.tensor([0], dtype=torch.long))
 
         # Append the "support" (simulated) images to the images list as a (G*R)CHW tensor. Generate one hot labels encoding correct
         # replicates, e.g., if num_genotypes=3 and num_replicates=2, and the label is 1, generate  [0, 0, 1, 1, 0, 0]
@@ -123,6 +124,20 @@ class EmptyDataset(data.Dataset):
 
 
 class PackedImageDataModule(L.LightningDataModule):
+    """Data module for loading variants images as packed batches, e.g., [q_0, s_00, ..., s_0n, q_1, s_10, ..., s_1m, ...]
+
+    If pad is True, the number of images will be padded to the maximum batch size with random data.
+
+    Args:
+        train_urls (str | None, optional): URLs for the training dataset, as webdataset '::' delimited brace URLs. Defaults to None.
+        validate_urls (str | None, optional): URLs for the validation dataset, as webdataset '::' delimited brace URLs. Defaults to None.
+        predict_urls (str | None, optional): URLs for the prediction dataset, as webdataset '::' delimited brace URLs. Defaults to None.
+        test_urls (str | None, optional): URLs for the test dataset, as webdataset '::' delimited brace URLs. Defaults to None.
+        batch_size (int, optional): Maximum number of images in the batch. Defaults to 256.
+        pad (bool, optional): Pad batches to maximum size. Defaults to False.
+        num_workers (int, optional): Number of workers in torch.DataLoader. Defaults to 1.
+        shuffle_size (int, optional): Size of the shuffle buffer for training loaders. Defaults to 1000.
+    """
     def __init__(
         self,
         *,
@@ -137,18 +152,6 @@ class PackedImageDataModule(L.LightningDataModule):
         mean=(0.5,),
         std=(0.5,),
     ):
-        """Data module for loading variants images as packed batches, e.g., [q_0, s_00, ..., s_0n, q_1, s_10, ..., s_1m, ...]
-
-        Args:
-            train_urls (str | None, optional): URLs for the training dataset, as webdataset '::' delimited brace URLs. Defaults to None.
-            validate_urls (str | None, optional): URLs for the validation dataset, as webdataset '::' delimited brace URLs. Defaults to None.
-            predict_urls (str | None, optional): URLs for the prediction dataset, as webdataset '::' delimited brace URLs. Defaults to None.
-            test_urls (str | None, optional): URLs for the test dataset, as webdataset '::' delimited brace URLs. Defaults to None.
-            batch_size (int, optional): Maximum number of images in the batch. Defaults to 256.
-            pad (bool, optional): Pad batches to maximum size. Defaults to False.
-            num_workers (int, optional): Number of workers in torch.DataLoader. Defaults to 1.
-            shuffle_size (int, optional): Size of the shuffle buffer for training loaders. Defaults to 1000.
-        """
         super().__init__()
         self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
 
@@ -181,22 +184,21 @@ class PackedImageDataModule(L.LightningDataModule):
             )
         )
 
-        # Since the data is pre-batched, we set batch_size to None. Per the webdataset recommendations, we shuffle after the dataloader to mix
-        # batches from different workers.
+        # Since the data is pre-batched, we set batch_size to None. Since we have already batched, we don't further shuffle to minimize
+        # memory usage.
 
-        def _seq_worker(_worker_id: int):
-            # Set number of threads in dataset workers to prevent oversubscribing CPU cores
-            torch.set_num_threads(1)
+        # def _seq_worker(_worker_id: int):
+        #     # Set number of threads in dataset workers to prevent oversubscribing CPU cores
+        #     torch.set_num_threads(1)
 
         loader = wds.WebLoader(
             dataset,
             batch_size=None,
             shuffle=False,
             num_workers=self.hparams.num_workers,
-            worker_init_fn=_seq_worker,
+            #worker_init_fn=_seq_worker,
+            pin_memory=torch.cuda.is_available(),
         )
-        if mode == "train":
-            loader = loader.shuffle(self.hparams.shuffle_size)
 
         return loader
 
@@ -204,15 +206,13 @@ class PackedImageDataModule(L.LightningDataModule):
         return self.make_loader(self.train_urls, mode="train")
 
     def val_dataloader(self):
-        # Make sure to return a valid dataloader, even if validation data is not available since
-        # Lightning still calls this method with zero validation steps
+        # Make sure to return a valid dataloader, even if validation data is not available since Lightning still calls this method with zero validation steps
         if self.validate_urls:
             return self.make_loader(self.validate_urls or [], mode="val")
         return data.DataLoader(EmptyDataset())
 
     def test_dataloader(self):
-        # Make sure to return a valid dataloader, even if test data is not available since
-        # Lightning still calls this method with zero validation steps
+        # Make sure to return a valid dataloader, even if test data is not available since Lightning still calls this method with zero validation steps
         if self.test_urls:
             return self.make_loader(self.test_urls or [], mode="test")
         return data.DataLoader(EmptyDataset())

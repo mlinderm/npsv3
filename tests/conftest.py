@@ -50,3 +50,25 @@ def syndip_sample():
         sequencer="HSXn",
         read_length=151,
     )
+
+@pytest.fixture
+def na12878_sample():
+    return Sample(
+        "NA12878",
+        mean_coverage=30.63,
+        mean_insert_size=446.53,
+        std_insert_size=102.3,
+        sequencer="HSXn",
+        read_length=150,
+    )
+
+@pytest.fixture
+def hg002_hg38_sample():
+    return Sample(
+        "HG002",
+        mean_coverage=23.50,
+        mean_insert_size=472.38,
+        std_insert_size=156.24,
+        sequencer="HS25",
+        read_length=148,
+    )

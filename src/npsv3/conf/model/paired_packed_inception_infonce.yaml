@@ -1,10 +1,10 @@
 _target_: npsv3.models.paired.PackedVariant
 encoder:
   _target_: npsv3.models.paired.InceptionEncoder
-  num_channels: 8
+  num_channels: ${len:${pileup.image_channels}}
   projection_size: 512
 metric:
-  _target_: npsv3.models.paired.DotProductSimilarityMetric
+  _target_: torch.nn.CosineSimilarity
 loss:
   _target_: npsv3.models.paired.InfoNCE
 optimizer:
@@ -13,4 +13,3 @@ optimizer:
   lr: 0.001
 predictor:
   _target_: npsv3.models.paired.MaximizingPredictor
-max_group_size: ${data.max_group_size}

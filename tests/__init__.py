@@ -6,7 +6,7 @@ import os
 from omegaconf import OmegaConf
 
 RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
-
+EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
 
 def _first_existing(*paths):
     for path in paths:
@@ -46,6 +46,12 @@ SYNDIP_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/CHM1_CHM13_2.
 
 HG002_DIPCALL_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.hg38.vcf.gz"))
 HG002_DIPCALL_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"))
+HG002_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG002-ready.hg38.bam"))
+
+NA12878_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.alt.passing.hg38.vcf.gz"))
+NA12878_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.sv.alt.passing.hg38.vcf.gz"))
+NA12878_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/NA12878.final.cram"))
+
 
 def data_path(path: str) -> str:
     return os.path.join(DATA_DIR, path)

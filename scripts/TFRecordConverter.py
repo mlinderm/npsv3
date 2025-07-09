@@ -98,7 +98,7 @@ def write_webdataset(filename, output_dir, output_filename, reader_threads:int =
             "region.txt": region,
             "image.npy.gz": features["image"].numpy(),
             "label.cls": int(real_label),
-            "sim.image.npy.gz": features["sim/images"].numpy(),
+            "sim.images.npy.gz": features["sim/images"].numpy(),
         }
         writer.write(sample)
 
