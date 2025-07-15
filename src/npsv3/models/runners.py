@@ -1,9 +1,14 @@
 import hydra
 import lightning as L
+import torch
 from omegaconf import OmegaConf
 
 
 def train(cfg, output_dir=None, **kw_args):
+    # Reduce precision to enable use of GPU tensor cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
     dm = hydra.utils.instantiate(cfg.data)
     model = hydra.utils.instantiate(cfg.model)
 
@@ -17,13 +22,8 @@ def train(cfg, output_dir=None, **kw_args):
         # Skip validation if no validation data provided
         limit_val_batches = num_sanity_val_steps = 0
 
-    if cfg.data.test_urls:
-        limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
-    else:
-        # Skip testing if no testing data provided
-        limit_test_batches = 0
-
-    profiler = "simple"#L.pytorch.profilers.PyTorchProfiler(profile_memory=True)
+    # Skip testing if no testing data provided
+    limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if cfg.data.test_urls else 0
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,
@@ -31,7 +31,8 @@ def train(cfg, output_dir=None, **kw_args):
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
-        profiler=profiler,
+        #profiler=L.pytorch.profilers.PyTorchProfiler(dirpath="/storage/mlinderman/tmp/profiler", filename="profile"),
+        #profiler=L.pytorch.profilers.AdvancedProfiler(dirpath="/storage/mlinderman/tmp/profiler", dump_stats=True),
         **kw_args,
     )
 

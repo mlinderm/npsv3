@@ -118,7 +118,7 @@ def main(cfg: DictConfig) -> None:
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
-        OmegaConf.update(cfg, "data.prediction_urls", _to_webdataset_urls(cfg.data.prediction_urls), merge=False)
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
 
         predict(cfg)
 

@@ -3,6 +3,7 @@ import lightning as L
 import torch
 import torchmetrics
 from torch import nn
+from torch.nn import functional as F
 from torchvision import models
 
 
@@ -33,7 +34,7 @@ class EuclideanDistanceMetric(nn.Module):
     Embeddings are L2-normalized before distance computation to ensure scale invariance.
 
     Inputs:
-        query_embedding (torch.Tensor): Tensor of shape (1, embedding_dim) representing query embeddings.
+        query_embedding (torch.Tensor): Tensor of shape (|support|, embedding_dim) representing query embeddings.
         support_embeddings (torch.Tensor): Tensor of shape (|support|, embedding_dim) representing support embeddings.
 
     Returns:
@@ -48,7 +49,8 @@ class EuclideanDistanceMetric(nn.Module):
         support_embeddings = torch.nn.functional.normalize(support_embeddings, p=2, dim=-1)
 
         # Compute distance between corresponding rows
-        return torch.cdist(query_embedding, support_embeddings).squeeze(0)
+        # return torch.cdist(query_embedding, support_embeddings)
+        return F.pairwise_distance(query_embedding, support_embeddings)
 
 
 class ContrastiveLoss(nn.Module):
@@ -108,13 +110,12 @@ class InfoNCE(nn.Module):
             positives = variant_metric[torch.logical_not(negative_mask)]
 
             # Compute log(softmax) using log-sum-exp trick (similar to log_softmax) to ensure numerical stability
-            max_negative = torch.max(negatives)
-            max_value = torch.maximum(positives, max_negative)
+            max_value = torch.max(variant_metric)
             numerator = positives - max_value
-            # TODO: Normalize by the number of positives? Some versions of infoNCE do, but not all
-            loss += (
+            # TODO: Normalize by the number of positives (i.e., mean vs. sum)? Some versions of infoNCE do, but not all
+            loss += torch.sum(
                 numerator - torch.log(torch.exp(numerator) + torch.sum(torch.exp(negatives - max_value)) + 1e-8)
-            )  # Add small epsilon to avoid log(0)
+            )
 
         return -loss / metric.size(0)  # Average loss across all variants
 
@@ -171,7 +172,7 @@ class PackedVariant(L.LightningModule):
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["encoder", "metric"])
+        self.save_hyperparameters(ignore=["encoder", "metric", "loss", "predictor"])
 
         self.encoder = encoder
         self.metric = metric
@@ -187,37 +188,59 @@ class PackedVariant(L.LightningModule):
         self.val_acc.reset()
 
     def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
-        """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
-        images, labels, offsets = batch
-        images_embeddings = self.encoder(images)
+        """Compute (metric, preds, labels, *metadata) as nested tensors from a batch of packed images, labels, and offsets."""
+        images, labels, offsets, *metadata = batch
+        image_embeddings = self.encoder(images)
 
-        # Separate query and support embeddings as views of the embeddings tensor.
-        support_lengths = torch.diff(offsets) - 1  # Subtract 1 to account for the query image at each offset
-        query_embeddings = (torch.narrow(images_embeddings, 0, offsets[i].item(), 1) for i in range(len(offsets) - 1))
-        support_embeddings = (
-            torch.narrow(images_embeddings, 0, offsets[i].item() + 1, support_lengths[i].item())
-            for i in range(len(offsets) - 1)
+        # TODO: Consider padding query and support embeddings if images are padded to enable consistent tensor sizes
+        support_lengths = torch.diff(offsets)
+        max_support = torch.max(support_lengths)
+        # Extract query embeddings from after the supports and expand to compute the pairwise metric
+        query_embeddings = torch.repeat_interleave(
+            image_embeddings[offsets[-1]:offsets[-1]+support_lengths.size(0)],
+            support_lengths,
+            dim=0,
+            output_size=offsets[-1],
+        )
+        support_embeddings = image_embeddings[: offsets[-1]]
+
+        metrics = torch.nested.nested_tensor_from_jagged(
+            self.metric(query_embeddings, support_embeddings), offsets=offsets, max_seqlen=max_support
         )
 
-        # Compute the metric for each variant independently, ultimately returning a nested tensor of size(|variants|, j1)
-        metrics = [
-            self.metric(query, support) for query, support in zip(query_embeddings, support_embeddings, strict=True)
-        ]
-        metrics_nt = torch.nested.as_nested_tensor(metrics, layout=torch.jagged)
-
-        preds = self.predictor(metrics_nt)
+        preds = self.predictor(metrics)
 
         # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
         # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
-        labels_nt = torch.nested.nested_tensor_from_jagged(
-            labels, offsets=metrics_nt.offsets(), max_seqlen=torch.max(support_lengths)
-        )
+        labels_nt = torch.nested.nested_tensor_from_jagged(labels, offsets=offsets, max_seqlen=max_support)
 
-        return (metrics_nt, preds, labels_nt)
+        return (metrics, preds, labels_nt, *metadata)
 
+    # def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+    #     """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
+    #     images, labels, offsets = batch
+    #     images_embeddings = self.encoder(images)
+
+    #     variant_lengths = torch.diff(offsets)
+    #     query_embeddings = images_embeddings[offsets[:-1]].unsqueeze(1)
+    #     support_embeddings_nt = torch.nested.nested_tensor_from_jagged(images_embeddings, offsets=offsets, max_seqlen=torch.max(variant_lengths))
+    #     support_embeddings = support_embeddings_nt.to_padded_tensor(0.0)
+
+    #     metrics = self.metric(query_embeddings, support_embeddings).squeeze(1)
+    #     metrics_nt = torch.nested.as_nested_tensor([metrics[i,1:variant_lengths[i]] for i in range(len(offsets) - 1)], layout=torch.jagged)
+
+    #     preds = self.predictor(metrics_nt)
+
+    #     # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
+    #     # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
+    #     labels_nt = torch.nested.nested_tensor_from_jagged(
+    #         labels, offsets=metrics_nt.offsets(), max_seqlen=torch.max(variant_lengths) - 1
+    #     )
+
+    #     return (metrics_nt, preds, labels_nt)
 
     def _model_step(self, batch, batch_idx):  # noqa: ARG002
-        metric, preds, labels = self(batch)
+        metric, preds, labels, *_ = self(batch)
         loss = self.loss(metric, labels)
         return (loss, preds, labels)
 
@@ -225,7 +248,7 @@ class PackedVariant(L.LightningModule):
         loss, preds, label = self._model_step(batch, batch_idx)
         self.log("train_loss", loss, prog_bar=True)
         self.train_acc(preds, label)
-        self.log("train_acc", self.train_acc, prog_bar=True)
+        self.log("train_acc", self.train_acc, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -240,6 +263,9 @@ class PackedVariant(L.LightningModule):
         self.test_acc(preds, label)
         self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
 
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        return self(batch)
+
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
         return {"optimizer": optimizer}
@@ -249,15 +275,17 @@ def predict(cfg, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
 
     model_cls = hydra.utils.get_class(cfg.model._target_)
-    # We need to instantiate any of ignored components in the model
     model = model_cls.load_from_checkpoint(
         cfg.model.checkpoint,
         encoder=hydra.utils.instantiate(cfg.model.encoder),
         metric=hydra.utils.instantiate(cfg.model.metric),
+        loss=hydra.utils.instantiate(cfg.model.loss),
+        predictor=hydra.utils.instantiate(cfg.model.predictor),
     )
     trainer = L.Trainer(limit_predict_batches=2)
-    predictions = trainer.predict(model, dm)
-    print(predictions)
+    for prediction in trainer.predict(model, dm):
+        metrics, preds, labels_nt, *metadata = prediction
+        print(metrics.offsets(), metrics.values(), preds, labels_nt.values(), *metadata, sep="\n")
 
 
 def test(cfg, **kw_args):
