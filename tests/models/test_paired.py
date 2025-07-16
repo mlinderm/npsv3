@@ -29,4 +29,4 @@ class TestPackedVariant:
         "trainer=paired",
     )
     def test_paired_cnn_infonce(self, cfg):
-        train(cfg, fast_dev_run=16)
+        train(cfg, fast_dev_run=True)

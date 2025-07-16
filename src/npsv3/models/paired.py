@@ -73,6 +73,7 @@ class ContrastiveLoss(nn.Module):
         self.margin = margin
 
     def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
         loss = target * torch.square(metric) + (1.0 - target) * torch.square(torch.clamp(self.margin - metric, min=0))
         return torch.mean(loss)
 
@@ -101,6 +102,7 @@ class InfoNCE(nn.Module):
         self.temperature = temperature
 
     def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
         metric = metric / self.temperature  # Scale the similarity scores by the temperature
 
         loss = torch.tensor([0.0], dtype=metric.dtype, device=metric.device)
@@ -151,10 +153,11 @@ class GenotypingAccuracy(torchmetrics.Metric):
     def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
         """Update accuracy measures with |variants|, dense integer prediction tensor and |variants|,|support| nested one-hot target tensor"""
         padded_target = torch.nested.to_padded_tensor(target, 0)
-        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.shape[1])
+        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
 
         # TODO: Also collect non-reference concordance (need to know which are reference genotypes)
-        self.correct += torch.sum(torch.any(padded_target & onehot_preds, dim=1))
+        # Treat "first-rank" and "second-rank" positives (same genotype, different phase) as correct
+        self.correct += torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
         self.total += target.shape[0]
 
     def compute(self) -> torch.Tensor:

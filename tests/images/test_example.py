@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import pytest
 import webdataset as wds
 from omegaconf import OmegaConf
@@ -74,7 +75,7 @@ class TestRegionToExample:
 
 
 @pytest.mark.skipif(
-    not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
+    not all((B37_REF_FASTA, bwa_index_loaded(B37_REF_FASTA))), reason="B37 reference in SHM required"
 )
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
@@ -132,6 +133,7 @@ class TestB37GraphToExample:
                 cfg.pileup.image_width,
                 len(cfg.pileup.image_channels),
             )
+            np.testing.assert_array_equal(sample["label.inf.npy"], [0, 0, 0, 1]) # Label is 1/1, which has only one inference positive (itself)
         assert _i == 0, "Only one sample in dataset"
 
     @pytest.mark.skipif(
@@ -177,13 +179,14 @@ class TestHG38GraphToExample:
         not all((NA12878_BAM, NA12878_VCF, NA12878_SV_VCF)), reason="NA12878 dataset required"
     )
     @pytest.mark.parametrize(
-        "region",
+        ("region", "label", "ranked_label"),
         [
-            #Range("chr1",150506578,150506578),
-            Range("chr1", 2994972, 2995286),
+            (Range("chr1", 150506578,150506578), 0, [1] + [0] * 8), # 0/0 only has a true positive
+            (Range("chr1", 2994972, 2995286), 1, [0, 1, 2, 3]),  # 0/1 genotype, with other phase as "second-rank" and 1/1 as "third-rank"
+            (Range("chr1", 977943, 978002), 2, None) # 0/1 DEL, with complex upstream region
         ],
     )
-    def test_na12878_images(self, cfg, na12878_sample, region):
+    def test_na12878_images(self, cfg, na12878_sample, region, label, ranked_label):
         local_conf = OmegaConf.from_dotlist([ ])
         cfg = OmegaConf.merge(cfg, local_conf)
 
@@ -195,6 +198,12 @@ class TestHG38GraphToExample:
             NA12878_VCF,
             NA12878_SV_VCF,
         )
+
+        if label is not None:
+            assert example["label"] == label
+        if ranked_label is not None:
+            np.testing.assert_array_equal(example["label.rank"], ranked_label)
+
         #png_path = str(tmp_path / "test.png")
         png_path = result_path("test.png")
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE

@@ -18,7 +18,7 @@ class TestPackedDataLoader:
             b, c, h, w = images.shape
             assert b == 2*4+1, "Batch size must be 2 replicates of 4 genotypes + 1 query image"
             assert labels.shape == (2*4,), "Labels must be 1D tensor with 2 replicates of 4 genotypes"
-            assert labels.equal(torch.tensor([0,0, 0,0, 0,0, 1,1], dtype=torch.long)), "All replicates of correct genotype (3) should have 1 label"
+            assert labels.equal(torch.tensor([0,0, 3,3, 3,3, 1,1], dtype=torch.long)), "All replicates of correct genotype (3) should have 1 label"
             assert offsets.equal(torch.tensor([0, 8], dtype=torch.long)), "Offsets should match the support images"
             assert addl_fields[0] == ["12_22129565_22130387"], "Additional fields should include key or region strings"
 
@@ -38,7 +38,7 @@ class TestPackedDataLoader:
             b, c, h, w = images.shape
             assert b == 64, "Batch size must be padded to max batch size"
             assert labels.shape == (b,), "Labels must be 1D tensor matching image batch size"
-            assert labels.equal(torch.tensor([0,0, 0,0, 0,0, 1,1] + [-100]*(64-8), dtype=torch.long)), "All replicates of correct genotype (3) should have 1 label"
+            assert labels.equal(torch.tensor([0,0, 3,3, 3,3, 1,1] + [-100]*(64-8), dtype=torch.long)), "All replicates of correct genotype (3) should have 1 label"
             assert offsets.equal(torch.tensor([0, 8], dtype=torch.long)), "Offsets should match the support images"
             assert addl_fields[0] == ["12_22129565_22130387"], "Additional fields should include key or region strings"
 

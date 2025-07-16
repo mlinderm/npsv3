@@ -102,12 +102,12 @@ def _pack_and_pad_images(
         # Append the "query" (real image) to the images list as a CHW tensor
         query_images.append(query)
 
-        # Append the "support" (simulated) images to the images list as a (G*R)CHW tensor. Generate one hot labels encoding correct
-        # replicates, e.g., if num_genotypes=3 and num_replicates=2, and the label is 1, generate  [0, 0, 1, 1, 0, 0]
+        # Append the "support" (simulated) images to the images list as a (G*R)CHW tensor. Expand out the ranked labels
+        # based on the number of replicates, if num_genotypes=3 and num_replicates=2, the ranked label is [0, 1, 3], then
+        # the labels would be [0, 0, 1, 1, 3, 3].
         support_images.append(support.reshape(-1, *image_size))
-        labels.append(
-            torch.repeat_interleave(F.one_hot(torch.tensor(label, dtype=torch.long), num_genotypes), num_replicates)
-        )
+        labels.append(torch.repeat_interleave(label, num_replicates))
+
         addl_fields.append(addl)
 
         num_images += num_genotypes * num_replicates + 1
@@ -139,7 +139,7 @@ class EmptyDataset(data.Dataset):
 
 
 class PackedImageDataModule(L.LightningDataModule):
-    """Data module for loading variants images as packed batches, e.g., [q_0, s_00, ..., s_0n, q_1, s_10, ..., s_1m, ...]
+    """Data module for loading variants images as packed batches, e.g., [s_00, ..., s_0n, s_10, ..., s_1m, ..., q_0, ..., q_v]
 
     If pad is True, the number of images will be padded to the maximum batch size with random data.
 
@@ -191,7 +191,17 @@ class PackedImageDataModule(L.LightningDataModule):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
 
         def to_tuple(data):
-            return to_tensor(data["image.npy.gz"]), to_tensor(data["sim.images.npy.gz"]), data["label.cls"], data.get("region.txt", data["__key__"])
+            query_image = to_tensor(data["image.npy.gz"])
+            support_images = to_tensor(data["sim.images.npy.gz"])
+            # Synthesize ranked labels from the integer label if not present
+            label = data["label.cls"]
+            if (label_rank := data.get("label.rank.npy")) is None:
+                label_rank = F.one_hot(torch.tensor(label, dtype=torch.long), support_images.size(0))
+                if label > 0: # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
+                    label_rank[(label_rank == 0) & (torch.arange(support_images.size(0)) > 0)] = 3
+            else:
+                label_rank = torch.from_numpy(label_rank)
+            return query_image, support_images, label_rank, data.get("region.txt", data["__key__"])
 
         dataset = wds.WebDataset(urls, shardshuffle=100 if mode == "train" else False)
         if mode == "train":
