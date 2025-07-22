@@ -1,8 +1,15 @@
-import torch
+import os
 
+import pytest
+import torch
+import webdataset as wds
+
+from npsv3.images.example import (
+    example_to_image,
+)
 from npsv3.models.loaders import PackedImageDataModule
 
-from .. import data_path
+from .. import EXPERIMENTS_DIR, data_path, result_path
 
 
 class TestPackedDataLoader:
@@ -43,5 +50,41 @@ class TestPackedDataLoader:
             assert addl_fields[0] == ["12_22129565_22130387"], "Additional fields should include key or region strings"
 
         assert _i == 0, "The 8 support images are packed into a single batch with the query image"
+
+        dm.teardown(stage="fit")
+
+class TestNPSV2Examples:
+    @pytest.mark.skipif(
+        not os.path.exists(os.path.join(EXPERIMENTS_DIR, "training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar")),
+        reason="NPSV2 images dataset required"
+    )
+    def test_visualize_converted_images(self, tmp_path, cfg):
+        urls = os.path.join(EXPERIMENTS_DIR, "training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar")
+        dataset = wds.WebDataset(urls, shardshuffle=False).decode()
+        for _i, sample in enumerate(dataset):
+            #png_path = str(tmp_path / "test.png")
+            png_path = result_path("test.png")
+
+            example_to_image(
+                cfg,
+                {"image": sample["image.npy.gz"], "sim.images": sample["sim.images.npy.gz"] },
+                png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5], # ALIGNED, PAIRED, ALLELE
+            )
+            assert os.path.exists(png_path)
+            break
+
+    def test_packed_loader(self, tmp_path, cfg):
+        urls = os.path.join(EXPERIMENTS_DIR, "training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar")
+        dm = PackedImageDataModule(train_urls=urls, batch_size=64, num_workers=cfg.threads)
+        dm.prepare_data()
+
+        dm.setup(stage="fit")
+
+        for _i, batch in enumerate(dm.train_dataloader()):
+            images, labels, offsets, *addl_fields = batch
+            print(images.shape, labels.shape, offsets, addl_fields)
+           
+
+            break
 
         dm.teardown(stage="fit")

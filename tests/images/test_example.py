@@ -18,6 +18,7 @@ from npsv3.util.range import Range
 
 from .. import (
     B37_REF_FASTA,
+    EXPERIMENTS_DIR,
     HG002_DIPCALL_SV_VCF,
     HG002_DIPCALL_VCF,
     HG002_HG38_BAM,
@@ -271,3 +272,4 @@ class TestVariantToExample:
             )
             assert os.path.exists(png_path)
         assert _i == 0, "Only one sample in dataset"
+

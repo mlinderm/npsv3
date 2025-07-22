@@ -65,7 +65,7 @@ class ContrastiveLoss(nn.Module):
         target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
 
     Returns:
-        torch.Tensor: A scalar tensor representing the mean contrastive loss across all image pairs
+        tuple[torch.Tensor]: A scalar tensor representing the mean contrastive loss across all image pairs and the number of pairs in batch
     """
 
     def __init__(self, margin=1.0):
@@ -75,8 +75,7 @@ class ContrastiveLoss(nn.Module):
     def forward(self, metric: torch.Tensor, target: torch.Tensor):
         target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
         loss = target * torch.square(metric) + (1.0 - target) * torch.square(torch.clamp(self.margin - metric, min=0))
-        return torch.mean(loss)
-
+        return torch.mean(loss), loss.size(0)  # Average loss across all pairs
 
 class InfoNCE(nn.Module):
     """
@@ -94,7 +93,7 @@ class InfoNCE(nn.Module):
         target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
 
     Returns:
-        torch.Tensor: Scalar tensor representing the average InfoNCE loss across variant groups.
+        tuple[torch.Tensor]: Scalar tensor representing the average InfoNCE loss across variant groups and the number of variants in batch
     """
 
     def __init__(self, temperature=0.07):
@@ -114,12 +113,14 @@ class InfoNCE(nn.Module):
             # Compute log(softmax) using log-sum-exp trick (similar to log_softmax) to ensure numerical stability
             max_value = torch.max(variant_metric)
             numerator = positives - max_value
-            # TODO: Normalize by the number of positives (i.e., mean vs. sum)? Some versions of infoNCE do, but not all
-            loss += torch.sum(
+            # Normalize by the number of positives "outside the log". This is the approach described in the SupCon paper.
+            # Normalizing seems to improve learning and accuracy relative to just a "sum".
+            variant_loss= torch.mean(
                 numerator - torch.log(torch.exp(numerator) + torch.sum(torch.exp(negatives - max_value)) + 1e-8)
             )
+            loss += variant_loss
 
-        return -loss / metric.size(0)  # Average loss across all variants
+        return -loss / metric.size(0), metric.size(0)  # Average loss across all variants
 
 
 class MinimizingPredictor(nn.Module):
@@ -165,6 +166,8 @@ class GenotypingAccuracy(torchmetrics.Metric):
 
 
 class PackedVariant(L.LightningModule):
+    ignored_hyperparameters = ("encoder", "metric", "loss", "predictor")
+
     def __init__(
         self,
         encoder: nn.Module,
@@ -175,7 +178,7 @@ class PackedVariant(L.LightningModule):
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["encoder", "metric", "loss", "predictor"])
+        self.save_hyperparameters(ignore=type(self).ignored_hyperparameters)
 
         self.encoder = encoder
         self.metric = metric
@@ -244,27 +247,31 @@ class PackedVariant(L.LightningModule):
 
     def _model_step(self, batch, batch_idx):  # noqa: ARG002
         metric, preds, labels, *_ = self(batch)
-        loss = self.loss(metric, labels)
-        return (loss, preds, labels)
+        # The different loss functions should return their relevant batch size (which may be pairs or number of variants)
+        loss, batch_size = self.loss(metric, labels)
+        return (loss, preds, labels, batch_size)
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
+        loss, preds, label, *_ = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
         self.log("train_loss", loss, prog_bar=True)
         self.train_acc(preds, label)
-        self.log("train_acc", self.train_acc, on_epoch=True, prog_bar=True)
+        self.log("train_acc", self.train_acc, on_epoch=True, prog_bar=True, batch_size=num_variants)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss, preds, label, batch_size = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.val_acc(preds, label)
-        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
-        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss, preds, label, batch_size = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.test_acc(preds, label)
-        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         return self(batch)
@@ -290,17 +297,3 @@ def predict(cfg, **kw_args):
         metrics, preds, labels_nt, *metadata = prediction
         print(metrics.offsets(), metrics.values(), preds, labels_nt.values(), *metadata, sep="\n")
 
-
-def test(cfg, **kw_args):
-    dm = hydra.utils.instantiate(cfg.data)
-
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-    # We need to instantiate any of ignored components in the model
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-        encoder=hydra.utils.instantiate(cfg.model.encoder),
-        metric=hydra.utils.instantiate(cfg.model.metric),
-    )
-
-    trainer = L.Trainer(**kw_args)
-    trainer.test(model, dm)

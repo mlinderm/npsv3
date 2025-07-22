@@ -234,6 +234,7 @@ def make_graph_example_from_region(
             ranked_positives[g] = 2
 
     # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
+    # TODO: Should only variants with the true allele be considered "third-rank" positives?
     if gt_label > 0:
         ranked_positives[(ranked_positives == 0) & (np.arange(total_genotypes) > 0)] = 3
 

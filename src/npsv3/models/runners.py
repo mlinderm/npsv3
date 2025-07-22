@@ -12,8 +12,7 @@ def train(cfg, output_dir=None, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
     model = hydra.utils.instantiate(cfg.model)
 
-    # Overwrite existing checkpoints, instead of creating new versions
-    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir)
 
     if cfg.data.validate_urls:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
@@ -41,3 +40,27 @@ def train(cfg, output_dir=None, **kw_args):
     trainer.fit(model=model, datamodule=dm)
 
     return checkpoint_callback.best_model_path
+
+def test(cfg, **kw_args):
+    # Reduce precision to enable use of GPU tensor cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
+    dm = hydra.utils.instantiate(cfg.data)
+
+    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+
+    model_args = {}
+    for key, value in cfg.model.items():
+        if key in model_cls.ignored_hyperparameters and "_target_" in value:
+            model_args[key] = hydra.utils.instantiate(value)
+
+    model = model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+        callbacks=[L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        **model_args,
+    )
+
+    trainer = hydra.utils.instantiate(cfg.trainer, **kw_args)
+    trainer.test(model=model, datamodule=dm)
