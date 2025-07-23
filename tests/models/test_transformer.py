@@ -98,9 +98,9 @@ class TestAccuracy:
     "simulation.replicates=0",
     "pileup=unphased_variant",
     "model=MiM",
-    "data.patch_size=16",
-    "data.mask_scheme=[\"random\", 80]",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_80R_16/pretrained_MiM-step=101850.ckpt"',
+    "data.patch_size=20",
+    "data.mask_scheme=[\"random\", 50]",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=20,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=10/pretrained_MiM-step=49160.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -111,9 +111,12 @@ class TestTransformerReconstruction:
         # Generate image for variant
         output_dir = str(tmp_path) # / "shards")
 
+        print("Temp path: ", tmp_path)
+
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
-            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            # f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
         mask_path = result_path("mask.png")

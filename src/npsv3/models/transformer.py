@@ -25,10 +25,10 @@ class RealImageDataModule(L.LightningDataModule):
         test_urls=None,
         batch_size=16,
         num_workers=1,
-        patch_size=32,
+        patch_size=20,
         shuffle_size=1000,
-        num_channels=3,
-        mask_scheme=["random", 20]
+        num_channels=9,
+        mask_scheme=["data_driven", 50]
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["train_urls", "validate_urls", "predict_urls", "test_urls"])
@@ -120,9 +120,9 @@ class MiM(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        num_channels = 7,
-        image_size=(96, 288),
-        patch_size=32,
+        num_channels = 9,
+        image_size=(100, 300),
+        patch_size=20,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -274,10 +274,10 @@ class Classifier(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        num_channels = 7,
-        image_size = (96, 288),
+        num_channels = 9,
+        image_size = (100, 300),
         num_labels = 2,
-        patch_size=32
+        patch_size=20
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -345,7 +345,7 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         images, bool_masked_pos, keys, regions, label = batch
 
         # comment out to make more efficient
-        generate_mask_visual(bool_masked_pos, 32, self.mask_path)
+        generate_mask_visual(bool_masked_pos, 20, self.mask_path)
 
         recon_images = outputs["final_reconstruction"]
 
@@ -386,7 +386,7 @@ def display_image(urls):
 # Need to either remove this because it's only for testing or change the png path to a non-user path
 def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
     
-    mask = Image.new("RGB", (288, 96))
+    mask = Image.new("RGB", (300, 100))
     pixel_array = np.array(mask)
 
     for i in range (len(pixel_array)):
@@ -403,7 +403,6 @@ def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
 def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
 
     patches_per_row = len(pixel_values[0][0]) // patch_size
-    patches_per_col = len(pixel_values[0]) // patch_size
 
     for i in range (len(i_bool_mask_pos)):
         if (i_bool_mask_pos[i] == False): continue
