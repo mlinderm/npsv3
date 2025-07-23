@@ -7,6 +7,6 @@ num_channels: ${len:${pileup.image_channels}}
 # num_channels: 9
 batch_size: 16
 num_workers: ${threads}
-patch_size: 32
+patch_size: 20
 shuffle_size: 1000
-mask_scheme: ["data_driven", 50]
+mask_scheme: ["random", 50]

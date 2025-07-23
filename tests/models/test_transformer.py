@@ -112,9 +112,12 @@ class TestTransformerReconstruction:
         # Generate image for variant
         output_dir = str(tmp_path) # / "shards")
 
+        print("Temp path: ", tmp_path)
+
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
-            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            # f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
         mask_path = result_path("mask.png")

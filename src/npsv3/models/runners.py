@@ -16,6 +16,7 @@ def train(cfg, output_dir=None, **kw_args):
         print(f"\npretrained loaded from {cfg.pretrained.path}")
         model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)
     else: 
+        print("Instantiating base model\n")
         model = hydra.utils.instantiate(cfg.model)
     
     model = torch.compile(model)
