@@ -25,7 +25,7 @@ class RealImageDataModule(L.LightningDataModule):
         test_urls=None,
         batch_size=16,
         num_workers=1,
-        patch_size=32,
+        patch_size=16,
         shuffle_size=1000,
         num_channels=3,
         mask_scheme=["random", 20]
@@ -122,7 +122,7 @@ class MiM(L.LightningModule):
         optimizer: torch.optim.Optimizer,
         num_channels = 7,
         image_size=(96, 288),
-        patch_size=32,
+        patch_size=16,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -277,7 +277,7 @@ class Classifier(L.LightningModule):
         num_channels = 7,
         image_size = (96, 288),
         num_labels = 2,
-        patch_size=32
+        patch_size=16
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -313,20 +313,26 @@ def torch_decode(key, data):
 class ModelAssessmentCallback(L.pytorch.callbacks.Callback):
     def __init__(self):
         self.results = []
+        self.missed = []
 
     #I believe this is an override for the default function that allows us to execute some code each prediction
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):
         images, bool_masked_pos, keys, regions, label = batch
         for i, logits in enumerate(outputs.logits):
-            if label[i].item() == torch.argmax(logits).item():
+            real_label = label[i].item()
+            predicted_label = torch.argmax(logits).item()
+            if real_label == predicted_label:
                 self.results.append(1)
             else: 
                 self.results.append(0)
+                self.missed.append((regions[i], "prediction:", predicted_label, "logits:", logits))
   
     def on_predict_end(self, trainer, model):
         print(f"\nAssessing accuracy of {len(self.results)} predictions")
         correct = sum(self.results)
         print("\nAccuracy:",correct/len(self.results))
+        for i in range(25):
+            print(random.choice(self.missed))
 
 
 class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
@@ -345,7 +351,7 @@ class ReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
         images, bool_masked_pos, keys, regions, label = batch
 
         # comment out to make more efficient
-        generate_mask_visual(bool_masked_pos, 32, self.mask_path)
+        generate_mask_visual(bool_masked_pos, 16, self.mask_path)
 
         recon_images = outputs["final_reconstruction"]
 
@@ -403,7 +409,6 @@ def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
 def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):
 
     patches_per_row = len(pixel_values[0][0]) // patch_size
-    patches_per_col = len(pixel_values[0]) // patch_size
 
     for i in range (len(i_bool_mask_pos)):
         if (i_bool_mask_pos[i] == False): continue

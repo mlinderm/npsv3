@@ -10,6 +10,8 @@ from torch.utils import data
 from torchmetrics.classification.accuracy import Accuracy
 from torchvision import models
 from torchvision.transforms import v2 as transforms
+from transformers import ViTConfig, ViTModel
+from npsv3.models.transformer import Classifier
 
 
 def transform_images(images: np.ndarray) -> torch.Tensor:
@@ -198,10 +200,44 @@ class InceptionEncoder(nn.Module):
         self.inception.fc = nn.Linear(self.inception.fc.in_features, projection_size, bias=False)
         self.bn = nn.BatchNorm1d(projection_size)
 
+    # @staticmethod
+    # def load_model(self, path=None, **kwd):
+    #     if path:
+    #         return __class__.load_checkpoint(path)
+    #     else:
+    #         return __class__(**kwd)
+        
     def forward(self, x):
         embeddings = self.inception(x)
         projection = self.bn(embeddings)
         return projection
+
+class ViTEncoder(nn.Module):
+    def __init__(self, num_channels=8, projection_size=512, pretrained_path=None):
+        super(ViTEncoder, self).__init__()
+        self.num_channels = num_channels
+        # self.projection_size = projection_size
+
+        config = ViTConfig(num_channels=self.num_channels, image_size = (100, 300), )
+
+        if pretrained_path:
+            checkpoint = torch.load(pretrained_path, map_location=torch.device('cpu'), weights_only=False)
+            self.model = ViTModel(config, add_pooling_layer=False)
+            print(list(checkpoint["state_dict"].keys()))
+            encoder_weights = {k.removeprefix("model.vit."): v for k, v in checkpoint["state_dict"].items() if k.startswith("model.vit.")}
+            self.model.load_state_dict(encoder_weights, strict=False)
+        else:
+            self.model = ViTModel(config, add_pooling_layer=False)
+
+        # self.inception.Conv2d_1a_3x3.conv = nn.Conv2d(num_channels, 32, kernel_size=(3, 3), stride=(2, 2), bias=False)
+
+        # self.inception.fc = nn.Linear(self.inception.fc.in_features, projection_size, bias=False)
+        # self.bn = nn.BatchNorm1d(projection_size)
+
+    def forward(self, x):
+        outputs = self.model(x)
+        sequence_output = outputs[0]
+        return sequence_output[:, 0, :]
 
 class EuclideanDistanceMetric(nn.Module):
     def __init__(self):

@@ -4,6 +4,7 @@ validate_urls: null
 predict_urls: null
 test_urls: null
 num_channels: ${len:${pileup.image_channels}}
+# num_channels: 9
 batch_size: 16
 num_workers: ${threads}
 patch_size: 32

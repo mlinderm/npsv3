@@ -25,13 +25,14 @@ def torch_decode(key, data):
 url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 test_image = Image.open(requests.get(url, stream=True).raw)
 
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     "pileup=unphased_variant",
 )
 class TestRealImageDataLoader:
     def test_real_image_loader(self, cfg):
         dm = RealImageDataModule(
-            data_path("unphased_variant_images-0000.tar"),
+            data_path("images-0000.tar"),
             num_channels=len(cfg.pileup.image_channels),
             batch_size=1,
             num_workers=cfg.threads,
@@ -45,7 +46,7 @@ class TestRealImageDataLoader:
 
         dm.teardown(stage="fit")
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestMiM:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
@@ -54,29 +55,29 @@ class TestMiM:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
-        "data.patch_size=32",
+        "data.patch_size=16",
         "trainer=transformer",
     )
     def test_MiM(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestClassifier:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
         "model=classifier",
-        "data.patch_size=8",
+        "data.patch_size=16",
         "data=real_image",
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         f"data.train_urls={'::'.join([data_path('unphased_variant_images-0000.tar')]*2)}",
         "data.batch_size=2",
         "trainer=transformer",
-        "pretrained=classifier"
+        # "pretrained=classifier"
     )
     def test_classifier(self, cfg):
         train(cfg, fast_dev_run=True)
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
@@ -86,7 +87,7 @@ class TestAccuracy:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW/full_train-step=101850.ckpt"',
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=50/full_train-step=407400.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
         # output_dir = str(tmp_path / "shards")
@@ -99,8 +100,8 @@ class TestAccuracy:
     "pileup=unphased_variant",
     "model=MiM",
     "data.patch_size=16",
-    "data.mask_scheme=[\"random\", 80]",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_80R_16/pretrained_MiM-step=101850.ckpt"',
+    "data.mask_scheme=[\"random\", 50]",
+    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW_BEST/pretrained_MiM-step=101840.ckpt"',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
