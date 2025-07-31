@@ -14,15 +14,9 @@ find_library(
     PATH_SUFFIXES "src/seqlib/src"
 )
 
-if (APPLE)
-  set(HTSLIB_FILE "libhts.dylib")
-else()
-  set(HTSLIB_FILE "libhts.so")
-endif()
-
 find_library(
     HTS_LIBRARY
-    NAMES "${HTSLIB_FILE}"
+    NAMES "libhts.a"
     PATHS ${SEQLIB_ROOT}
     PATH_SUFFIXES "src/seqlib/htslib"
     NO_DEFAULT_PATH
@@ -36,8 +30,7 @@ find_library(
     NO_DEFAULT_PATH
 )
 
-
-if ((EXISTS "${SEQLIB_INCLUDE_DIR}") AND (EXISTS "${SEQLIB_LIBRARY}"))
+if ((EXISTS "${SEQLIB_INCLUDE_DIR}") AND (EXISTS "${SEQLIB_LIBRARY}") AND (EXISTS "${HTS_LIBRARY}") AND (EXISTS "${BWA_LIBRARY}"))
     set(SEQLIB_INCLUDE_DIRS ${SEQLIB_INCLUDE_DIR} ${SEQLIB_INCLUDE_DIR}/htslib)
     set(SEQLIB_LIBRARIES 
         ${SEQLIB_LIBRARY}
@@ -53,7 +46,6 @@ if ((EXISTS "${SEQLIB_INCLUDE_DIR}") AND (EXISTS "${SEQLIB_LIBRARY}"))
     )
 else()
     include(ExternalProject)
-    # C++ language version needs to match main project
     ExternalProject_Add(
         seqlib
         PREFIX "${CMAKE_BINARY_DIR}/lib/seqlib"
@@ -62,12 +54,13 @@ else()
         BUILD_IN_SOURCE 1
         BUILD_COMMAND make
         INSTALL_COMMAND ""
+        PATCH_COMMAND patch --strip=1 --forward --reject-file=- --directory=${SEQLIB_ROOT} --input=${CMAKE_SOURCE_DIR}/seqlib.patch || true
     )
     ExternalProject_Get_Property(seqlib source_dir binary_dir)
     set(SEQLIB_INCLUDE_DIRS ${source_dir} ${source_dir}/htslib)
 
     add_library(libseqlib IMPORTED STATIC GLOBAL)
-    add_library(libhts IMPORTED SHARED GLOBAL)
+    add_library(libhts IMPORTED STATIC GLOBAL)
     add_library(libbwa IMPORTED STATIC GLOBAL)
 
     add_dependencies(libseqlib seqlib)
@@ -79,7 +72,7 @@ else()
     )
 
     set_target_properties(libhts PROPERTIES
-        "IMPORTED_LOCATION" "${binary_dir}/htslib/${HTSLIB_FILE}"
+        "IMPORTED_LOCATION" "${binary_dir}/htslib/libhts.a"
     )
 
     set_target_properties(libbwa PROPERTIES

@@ -1,12 +1,12 @@
 #pragma once
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
 #include "SeqLib/BWAWrapper.h"
 #include "SeqLib/BamReader.h"
 #include "SeqLib/BamWriter.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 namespace sl = SeqLib;
 
 namespace npsv3 {
@@ -121,12 +121,12 @@ class FragmentRealigner {
  public:
   typedef std::tuple<double, double, double, double, std::vector<double> > RealignTuple;
 
-  FragmentRealigner(const std::string& fasta_path, double insert_size_mean, double insert_size_std, py::kwargs kwargs);
+  FragmentRealigner(const std::string& fasta_path, double insert_size_mean, double insert_size_std, nb::kwargs kwargs);
 
   AltIndexesSequence::size_type NumAltAlleles() const { return alt_indexes_.size(); }
 
   RealignTuple RealignReadPair(const std::string& name, const std::string& read1_seq, const std::string& read1_qual,
-                               py::kwargs kwargs);
+                               nb::kwargs kwargs);
 
  private:
   std::vector<std::array<sl::GenomicRegion, 4> > breakpoints_;
@@ -146,7 +146,7 @@ std::vector<double> TestScoreAlignment(const std::string& ref_seq, const std::st
 
 FragmentRealigner::RealignTuple TestRealignReadPair(const std::string& fasta_path, const std::string& name,
                                                     const std::string& read1_seq, const std::string& read1_qual,
-                                                    py::kwargs kwargs);
+                                                    nb::kwargs kwargs);
 }  // namespace test
 
 }  // namespace npsv3

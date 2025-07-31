@@ -1,13 +1,11 @@
 #include "realigner.hpp"
 
-#include <pybind11/stl.h>
-
 #include <limits>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include "SeqLib/FastqReader.h"
 #include "utility.hpp"
-
-#define PYBIND11_DETAILED_ERROR_MESSAGES 1
 
 namespace {
 
@@ -328,7 +326,7 @@ sl::GenomicRegion BreakpointToGenomicRegion(const std::string& region, const sl:
 }  // namespace
 
 FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double insert_size_mean, double insert_size_std,
-                                     py::kwargs kwargs)
+                                     nb::kwargs kwargs)
     : insert_size_dist_(insert_size_mean, insert_size_std) {
   // Load alleles from a FASTA file
   sl::FastqReader contigs(fasta_path);
@@ -341,7 +339,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
   // The remaining sequences at the alternate sequences
   if (kwargs && kwargs.contains("num_alts")) {
     // TODO: Prevent memory corruption errors if number of sequences not provided
-    alt_indexes_.reserve(py::cast<int>(kwargs["num_alts"]));
+    alt_indexes_.reserve(nb::cast<int>(kwargs["num_alts"]));
   }
   while (contigs.GetNextSequence(next_sequence)) {
     alt_indexes_.emplace_back(next_sequence);
@@ -354,7 +352,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
 
   // Load the FASTA file with IUPAC sequence if provided
   if (kwargs && kwargs.contains("iupac_fasta_path")) {
-    sl::FastqReader contigs(py::cast<std::string>(kwargs["iupac_fasta_path"]));
+    sl::FastqReader contigs(nb::cast<std::string>(kwargs["iupac_fasta_path"]));
     // We assumed the first sequence is the reference sequence
     pyassert(contigs.GetNextSequence(next_sequence), "Reference sequence not present in the IUPAC FASTA");
     ref_index_.SetIUPACSequence(next_sequence);
@@ -365,7 +363,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
   }
 
   if (kwargs && kwargs.contains("alt_alignment_paths")) {
-    auto alt_alignment_paths = py::cast<std::vector<std::string> >(kwargs["alt_alignment_paths"]);
+    auto alt_alignment_paths = nb::cast<std::vector<std::string> >(kwargs["alt_alignment_paths"]);
     pyassert(alt_alignment_paths.size() == NumAltAlleles(),
              "Number of alternate alignment paths must match the number of alleles");
     alt_writers_.reserve(NumAltAlleles());
@@ -388,10 +386,10 @@ int ReadIndex(const sl::BamRecord& read) { return read.FirstFlag() ? 0 : 1; }
 
 FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::string& name,
                                                                    const std::string& read1_seq,
-                                                                   const std::string& read1_qual, py::kwargs kwargs) {
+                                                                   const std::string& read1_qual, nb::kwargs kwargs) {
   int offset = 0;
   if (kwargs && kwargs.contains("offset")) {
-    offset = py::cast<int>(kwargs["offset"]);
+    offset = nb::cast<int>(kwargs["offset"]);
   }
 
   sl::BamRecord read1, read2;
@@ -403,13 +401,13 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
   if (kwargs && kwargs.contains("read2_seq") && kwargs.contains("read2_qual")) {
     read2.init();
     read2.SetQname(name);
-    read2.SetSequence(py::cast<std::string>(kwargs["read2_seq"]));
-    read2.SetQualities(py::cast<std::string>(kwargs["read2_qual"]), offset);
+    read2.SetSequence(nb::cast<std::string>(kwargs["read2_seq"]));
+    read2.SetQualities(nb::cast<std::string>(kwargs["read2_qual"]), offset);
   }
 
   // Release the GIL while executing the C++ realignment code. This seems to need to be after
   // any interactions with Python objects (e.g. kwargs)
-  py::gil_scoped_release release;
+  nb::gil_scoped_release release;
 
   // Realign the fragment to the reference allele
   RealignedFragment ref_realignment(read1, read2, ref_index_, insert_size_dist_);
@@ -481,12 +479,12 @@ std::vector<double> TestScoreAlignment(const std::string& ref_seq, const std::st
 
 FragmentRealigner::RealignTuple TestRealignReadPair(const std::string& fasta_path, const std::string& name,
                                                     const std::string& read1_seq, const std::string& read1_qual,
-                                                    py::kwargs kwargs) {
+                                                    nb::kwargs kwargs) {
   pyassert(kwargs && kwargs.contains("fragment_mean") && kwargs.contains("fragment_sd"),
            "Insert size distribution must be provided");
 
-  FragmentRealigner realigner(fasta_path, py::cast<double>(kwargs["fragment_mean"]),
-                              py::cast<double>(kwargs["fragment_sd"]), kwargs);
+  FragmentRealigner realigner(fasta_path, nb::cast<double>(kwargs["fragment_mean"]),
+                              nb::cast<double>(kwargs["fragment_sd"]), kwargs);
   return realigner.RealignReadPair(name, read1_seq, read1_qual, kwargs);
 }
 

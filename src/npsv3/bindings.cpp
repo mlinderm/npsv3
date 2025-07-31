@@ -1,17 +1,18 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+#include <nanobind/stl/tuple.h>
 
 #include "realigner.hpp"
-//#include "graph.hpp"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-PYBIND11_MODULE(_native, m) {
+NB_MODULE(_native, m) {
   m.doc() = "NPSV3 native tools";
 
   // Realignment
-  py::class_<npsv3::FragmentRealigner>(m, "FragmentRealigner")
-      .def(py::init<const std::string&, double, double, py::kwargs>())
+  nb::class_<npsv3::FragmentRealigner>(m, "FragmentRealigner")
+      .def(nb::init<const std::string&, double, double, nb::kwargs>())
       .def("realign_read_pair", &npsv3::FragmentRealigner::RealignReadPair);
 
   m.def("test_score_alignment", &npsv3::test::TestScoreAlignment, "Test interface for scoring alignment");
