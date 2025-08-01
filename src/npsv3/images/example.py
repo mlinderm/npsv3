@@ -1,5 +1,6 @@
 import itertools
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -135,10 +136,15 @@ def make_graph_example_from_region(
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
         realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region.expand(cfg.pileup.variant_padding))
-        assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"
-        assert realign_haplotypes[0].nodes == graph.nodes_on_path(
-            region.contig
-        ), f"First haplotype must be the reference for region {region}"
+        try:
+            assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"  # noqa: PLR2004
+            assert realign_haplotypes[0].nodes == graph.nodes_on_path(
+                region.contig
+            ), f"First haplotype must be the reference for region {region}"
+        except AssertionError:
+            graph._graph.to_gfa()
+            print(realign_haplotypes)
+            raise
 
         realign_fasta_path = os.path.join(tempdir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
@@ -196,20 +202,43 @@ def make_graph_example_from_region(
         graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding))
         for i in range(ploidy)
     ]
+    total_genotypes = math.prod(len(haplotypes) for haplotypes in backgrounds)
 
     # For fully labeled data, one of the haplotypes should be the true haplotype
     labels = []
     for allele, haplotypes in enumerate(backgrounds):
-        assert len(haplotypes) >= 2, f"Fewer than 2 haplotypes for allele {allele} in region {region}"
+        assert len(haplotypes) > 1, f"Fewer than 2 haplotypes for allele {allele} in region {region}"
         base_path_nodes = graph.shortest_path(f"{sample.name}#{allele}#{region.contig}")
         for allele_index, haplotype in enumerate(haplotypes):
             if haplotype.nodes == base_path_nodes:
                 labels.append(allele_index)
                 break
         else:
-            raise ValueError(f"True haplotype not found in possible haplotypes for region {region}")
-    if len(labels) == ploidy:
-        example["label"] = np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)).item()
+            msg = f"True haplotype not found in possible haplotypes for region {region}"
+            raise ValueError(msg)
+    assert len(labels) == ploidy, f"Expected {ploidy} labels, got {len(labels)} for region {region}"
+    gt_label = np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)).item()
+    example["label"] = gt_label
+
+    # Determine "ranked" positives based on shared inference paths, presence, etc.
+    ranked_positives = np.zeros(total_genotypes, dtype=np.long)
+    ranked_positives[gt_label] = 1 # True (or "first-rank") positive
+
+    true_inference_paths = set.union(*(backgrounds[i][allele_index].paths for i, allele_index in enumerate(labels)))
+    for g, allele_indices in enumerate(itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds))):
+        if g == gt_label:
+            continue  # Skip the true positive
+        # Diplotypes that have the same inference paths as the true haplotype, but with a different phase, are considered "second-rank" positives
+        inf_paths = set.union(*(backgrounds[i][allele_index].paths for i, allele_index in enumerate(allele_indices)))
+        if inf_paths == true_inference_paths:
+            ranked_positives[g] = 2
+
+    # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
+    # TODO: Should only variants with the true allele be considered "third-rank" positives?
+    if gt_label > 0:
+        ranked_positives[(ranked_positives == 0) & (np.arange(total_genotypes) > 0)] = 3
+
+    example["label.rank"] = ranked_positives
 
     if cfg.simulation.replicates == 0:
         # No more work to be done if there are not simulations
@@ -231,7 +260,7 @@ def make_graph_example_from_region(
     for allele_indices in itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds)):
         # Get the sequences for this haplotype combination
         gt_sequences = [sequences[i][allele_index] for i, allele_index in enumerate(allele_indices)]
-        with tempfile.TemporaryDirectory() as tempdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tempdir:
             # Write the fasta file for this haplotype combination
             fasta_path = os.path.join(tempdir, "haplotypes.fasta")
             with open(fasta_path, "w") as fasta:
@@ -349,6 +378,8 @@ class VariantWriter(ExampleActor):
                     }
                     if "label" in example:
                         sample["label.cls"] = example["label"]
+                    if "label.rank" in example:
+                        sample["label.rank.npy"] = example["label.rank"]
                     if "sim.images" in example:
                         sample["sim.images.npy.gz"] = example["sim.images"]
                     self._writer.write(sample)
@@ -367,6 +398,8 @@ class GraphWriter(ExampleActor):
             }
             if "label" in example:
                 sample["label.cls"] = example["label"]
+            if "label.rank" in example:
+                sample["label.rank.npy"] = example["label.rank"]
             if "sim.images" in example:
                 sample["sim.images.npy.gz"] = example["sim.images"]
             self._writer.write(sample)
@@ -484,7 +517,7 @@ def vcf_to_graph_examples(
     )
 
     os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
         ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)

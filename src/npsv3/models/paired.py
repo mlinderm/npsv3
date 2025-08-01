@@ -1,193 +1,18 @@
-from collections.abc import Generator, Iterable
-
 import hydra
 import lightning as L
-import numpy as np
 import torch
-import webdataset as wds
+import torchmetrics
 from torch import nn
-from torch.utils import data
-from torchmetrics.classification.accuracy import Accuracy
+from torch.nn import functional as F
 from torchvision import models
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTModel
 from npsv3.models.transformer import Classifier
 
 
-def transform_images(images: np.ndarray) -> torch.Tensor:
-    """Preprocess images from numpy array to torch tensor
-
-    Args:
-        images (np.ndarray): *HWC numpy array.
-
-    Returns:
-        torch.Tensor: Normalized *CHW torch tensor.
-    """
-    return transforms.functional.to_dtype(
-        torch.from_numpy(images).movedim(-1, -3).contiguous(),
-        torch.float32,
-        scale=True,
-    )
-
-
-def _split_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value=0) -> Generator[tuple, None, None]:
-    """Split support images into groups of at most `max_genotypes` images, padding with `padding_value`.
-
-    Transforms support images from GRCHW with variable size G to GCHW with fixed
-    and padded G. A positive support image is guaranteed to be present in each group.
-
-    Args:
-        data (Iterable[tuple]): Iterable of (query, support, label) tuples.
-        max_genotypes (int, optional): Maximum genotypes in output groups. Defaults to 6.
-        padding_value (int, optional): Padding value. Defaults to 0.
-
-    Yields:
-        Generator[tuple, None, None]: (query, support, num_support, label) tuples.
-    """
-    for sample in data:
-        query, support, label, *_ = sample
-        genotypes, replicates, *image_size = support.shape
-        assert label < genotypes and len(image_size) == 3, "Unexpected data shape"
-
-        i = 0
-        while i < genotypes:
-            # Make sure there is a positive support image in each yielded example
-            indices = list(range(i, min(i + max_genotypes, genotypes)))
-            if i <= label < i + max_genotypes:
-                # positive support image is already present in this group
-                group_label = label - i
-                i += len(indices)
-            elif len(indices) < max_genotypes:
-                # Space in current group to append positive
-                i += len(indices)
-                indices.append(label)
-                group_label = len(indices) - 1
-            else:
-                # Swap positive support image into group
-                group_label = len(indices) - 1
-                i, indices[group_label] = indices[group_label], label
-
-            # yield a separate example for each replicate
-            num_support = len(indices)
-            padding = (0, 0) * len(image_size) + (0, max_genotypes - num_support)
-            for j in range(replicates):
-                yield query, torch.nn.functional.pad(
-                    support[indices, j],
-                    padding,
-                    mode='constant',
-                    value=padding_value,
-                ), num_support, group_label
-
-
-split_and_pad_support = wds.pipelinefilter(_split_and_pad_support)
-
-
-def _wrap_and_pad_support(data: Iterable[tuple], max_genotypes=6, padding_value=0) -> Generator[tuple, None, None]:
-    for sample in data:
-        query, support, label, key, *_ = sample
-        genotypes, replicates, *image_size = support.shape
-        assert label < genotypes and len(image_size) == 3, "Unexpected data shape"
-
-        for i in range(0, genotypes, max_genotypes):
-            indices = range(i, min(i + max_genotypes, genotypes))
-
-            # yield a separate example for each replicate
-            num_support = len(indices)
-            padding = (0, 0) * len(image_size) + (0, max_genotypes - num_support)
-            for j in range(replicates):
-                print(query.shape, support.shape)
-                yield query, torch.nn.functional.pad(
-                    support[indices, j],
-                    padding,
-                    mode='constant',
-                    value=padding_value,
-                ), num_support, label, genotypes, key
-
-
-wrap_and_pad_support = wds.pipelinefilter(_wrap_and_pad_support)
-
-
-class EmptyDataset(data.Dataset):
-    def __init__(self):
-        super(EmptyDataset).__init__()
-
-    def __iter__(self):
-        return iter(())
-
-
-class GroupedImageDataModule(L.LightningDataModule):
-    def __init__(self, train_urls=None, validate_urls=None, predict_urls=None, test_urls=None, batch_size=16, num_workers=1, max_group_size=6, shuffle_size=1000):
-        super().__init__()
-        self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
-
-        self.train_urls = train_urls
-        self.validate_urls = validate_urls
-        self.predict_urls = predict_urls
-        self.test_urls = test_urls
-
-    def make_loader(self, urls, mode="train"):
-        # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
-
-        dataset = wds.WebDataset(urls, shardshuffle=100 if mode == "train" else False)
-        if mode == "train":
-            dataset = dataset.shuffle(self.hparams.shuffle_size)
-        dataset = (
-            dataset
-            .decode()
-            .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls")
-            .map_tuple(transform_images, transform_images, wds.utils.identity)
-            .compose(split_and_pad_support(max_genotypes=self.hparams.max_group_size, padding_value=0))
-            .batched(self.hparams.batch_size, partial=False)
-        )
-
-        # We unbatch, shuffle, and rebatch to mix samples from different workers as shown in webdataset examples
-        loader = (
-            wds.WebLoader(
-                dataset,
-                batch_size=None,
-                shuffle=False,
-                num_workers=self.hparams.num_workers,
-            )
-            .unbatched()
-        )
-        if mode == "train":
-            loader = loader.shuffle(self.hparams.shuffle_size)
-        loader = loader.batched(self.hparams.batch_size)
-
-        return loader
-
-    def train_dataloader(self):
-        return self.make_loader(self.train_urls, mode="train")
-
-    def val_dataloader(self):
-        # Make sure to return a valid dataloader, even if validation data is not available since
-        # Lightning still calls this method with zero validation steps
-        if self.validate_urls:
-            return self.make_loader(self.validate_urls or [], mode="val")
-        return data.DataLoader(EmptyDataset())
-
-    def test_dataloader(self):
-        # Make sure to return a valid dataloader, even if validation data is not available since
-        # Lightning still calls this method with zero validation steps
-        if self.test_urls:
-            return self.make_loader(self.test_urls or [], mode="test")
-        return data.DataLoader(EmptyDataset())
-
-    def predict_dataloader(self):
-        dataset = (
-            wds.WebDataset(self.predict_urls, shardshuffle=False)
-            .decode()
-            .to_tuple("image.npy.gz", "sim.images.npy.gz", "label.cls", "__key__")
-            .map_tuple(transform_images, transform_images, wds.utils.identity, wds.utils.identity)
-            .compose(wrap_and_pad_support(max_genotypes=self.hparams.max_group_size, padding_value=0))
-            .batched(self.hparams.batch_size, partial=True)
-        )
-
-        return wds.WebLoader(dataset, batch_size=None, shuffle=False, num_workers=self.hparams.num_workers)
-
 class InceptionEncoder(nn.Module):
     def __init__(self, num_channels=8, projection_size=512):
-        super(InceptionEncoder, self).__init__()
+        super().__init__()
         self.num_channels = num_channels
         self.projection_size = projection_size
 
@@ -209,8 +34,8 @@ class InceptionEncoder(nn.Module):
         
     def forward(self, x):
         embeddings = self.inception(x)
-        projection = self.bn(embeddings)
-        return projection
+        return self.bn(embeddings)
+
 
 class ViTEncoder(nn.Module):
     def __init__(self, num_channels=8, projection_size=512, pretrained_path=None):
@@ -240,73 +65,213 @@ class ViTEncoder(nn.Module):
         return sequence_output[:, 0, :]
 
 class EuclideanDistanceMetric(nn.Module):
+    """
+    Computes the L2 (Euclidean) distance between normalized query and support embeddings for a single variant.
+
+    Embeddings are L2-normalized before distance computation to ensure scale invariance.
+
+    Inputs:
+        query_embedding (torch.Tensor): Tensor of shape (|support|, embedding_dim) representing query embeddings.
+        support_embeddings (torch.Tensor): Tensor of shape (|support|, embedding_dim) representing support embeddings.
+
+    Returns:
+        Tensor of shape (|support|,): Euclidean distances between query and support pairs.
+    """
+
     def __init__(self):
-        super(EuclideanDistanceMetric, self).__init__()
-        self.batched_distance = torch.vmap(torch.cdist)
+        super().__init__()
 
-    def forward(self, query_embeddings, support_embeddings):
-        return torch.squeeze(
-            self.batched_distance(
-                torch.unsqueeze(torch.nn.functional.normalize(query_embeddings, p=2, dim=-1), 1),
-                torch.nn.functional.normalize(support_embeddings, p=2, dim=-1),
-            ),
-            dim=1,
-        )
+    def forward(self, query_embedding, support_embeddings):
+        query_embedding = torch.nn.functional.normalize(query_embedding, p=2, dim=-1)
+        support_embeddings = torch.nn.functional.normalize(support_embeddings, p=2, dim=-1)
 
-class DotProductSimilarityMetric(nn.Module):
-    def __init__(self):
-        super(DotProductSimilarityMetric, self).__init__()
-        self.batched_dot = torch.vmap(torch.mv)
+        # Compute distance between corresponding rows
+        # return torch.cdist(query_embedding, support_embeddings)
+        return F.pairwise_distance(query_embedding, support_embeddings)
 
-    def forward(self, query_embeddings, support_embeddings):
-        return self.batched_dot(support_embeddings, query_embeddings)
 
 class ContrastiveLoss(nn.Module):
+    """
+    Computes a contrastive loss based on distances between query and support embeddings
+
+    Args:
+        margin (float): The margin enforced between dissimilar pairs. Default is 1.0.
+
+    Inputs:
+        metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
+
+    Returns:
+        tuple[torch.Tensor]: A scalar tensor representing the mean contrastive loss across all image pairs and the number of pairs in batch
+    """
+
     def __init__(self, margin=1.0):
-        super(ContrastiveLoss, self).__init__()
+        super().__init__()
         self.margin = margin
 
-    def forward(self, distances: torch.Tensor, label: torch.Tensor, mask: torch.Tensor, query_embeddings: torch.Tensor, support_embeddings: torch.Tensor):
-        label_pair = nn.functional.one_hot(label, distances.shape[1])
-        loss = label_pair * torch.square(distances) + (1.0 - label_pair) * torch.square(
-            torch.clamp(self.margin - distances, min=0)
-        )
-        return torch.mean(loss[mask])
+    def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
+        loss = target * torch.square(metric) + (1.0 - target) * torch.square(torch.clamp(self.margin - metric, min=0))
+        return torch.mean(loss), loss.size(0)  # Average loss across all pairs
 
-class NPairsLoss(nn.Module):
-    def __init__(self, l2_reg=0.002):
-        super(NPairsLoss, self).__init__()
-        self.l2_reg = l2_reg
+class InfoNCE(nn.Module):
+    """
+    Implements the InfoNCE loss for contrastive learning using precomputed similarity scores
 
-    def forward(self, metric, label, mask, query_embeddings, support_embeddings):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
-        loss = nn.functional.cross_entropy(masked_metric, label, reduction="mean")
+    This formulation encourages positive pairs (query-support with label=1) to have higher
+    similarity scores than negative pairs (label=0) within each variant group. It applies
+    temperature scaling and uses log-ratio separation between positives and all negatives.
 
-        masked_support = torch.where(mask, torch.square(support_embeddings).sum(dim=2),  support_embeddings.new_full([], 0))
-        return loss + 0.25*self.l2_reg*(
-            torch.mean(torch.torch.square(query_embeddings).sum(dim=1)) +
-            torch.mean(masked_support)
-        )
+    Args:
+        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+
+    Inputs:
+        metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes.
+
+    Returns:
+        tuple[torch.Tensor]: Scalar tensor representing the average InfoNCE loss across variant groups and the number of variants in batch
+    """
+
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
+        metric = metric / self.temperature  # Scale the similarity scores by the temperature
+
+        loss = torch.tensor([0.0], dtype=metric.dtype, device=metric.device)
+        for variant_metric, variant_target in zip(metric.unbind(), target.unbind(), strict=True):
+            negative_mask = variant_target == 0
+            negatives = variant_metric[negative_mask]
+            positives = variant_metric[torch.logical_not(negative_mask)]
+
+            # Compute log(softmax) using log-sum-exp trick (similar to log_softmax) to ensure numerical stability
+            max_value = torch.max(variant_metric)
+            numerator = positives - max_value
+            # Normalize by the number of positives "outside the log". This is the approach described in the SupCon paper.
+            # Normalizing seems to improve learning and accuracy relative to just a "sum".
+            variant_loss= torch.mean(
+                numerator - torch.log(torch.exp(numerator) + torch.sum(torch.exp(negatives - max_value)) + 1e-8)
+            )
+            loss += variant_loss
+
+        return -loss / metric.size(0), metric.size(0)  # Average loss across all variants
+
+    
+class RINCE(nn.Module):
+    """
+    Implements the Ranking Info Noise Contrastive Estimation (RINCE) loss for contrastive learning using precomputed similarity scores
+
+    Args:
+        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+
+    Inputs:
+        metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
+        
+
+    Returns:
+        torch.Tensor: Scalar tensor representing the average RINSE loss across variant groups.
+    """
+
+    def __init__(self, temperature= [0.1, 0.225 , 0.5], max_rank=3, ignore=0.0):
+        super().__init__()
+        self.temperature = torch.tensor(temperature, dtype=torch.float32)
+        self.max_rank = max_rank
+        self.ignore = ignore  # Value to ignore in the target tensor, e.g., for padding
+
+    def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        loss = torch.tensor(0.0, dtype=metric.dtype, device=metric.device)
+
+        for variant_metric, variant_target in zip(metric.unbind(), target.unbind(), strict=True):
+            negative_mask = variant_target == 0
+            hard_negatives = variant_metric[negative_mask]
+            variant_loss = 0 
+            for rank in range(1, self.max_rank + 1): 
+                #Rank 1 positives
+                
+                R1mask = variant_target == rank
+                positivesR1 = variant_metric[R1mask]
+
+                if rank > 1:
+                    positivesR1 = positivesR1[positivesR1 >= self.ignore] #Threshold for rank 1 positives
+
+                #Skip empty ranks
+                if positivesR1.numel() == 0:
+                    continue
+
+                R2mask = variant_target > rank
+                positivesR2 = variant_metric[R2mask]
+                positivesR2 = positivesR2[positivesR2 >= self.ignore] #Threshold for rank 2 positives
+
+                numerator = torch.sum(torch.exp(positivesR1/self.temperature[rank-1]))
+                posR2 = torch.sum(torch.exp(positivesR2/self.temperature[rank-1]))
+
+                denominator = numerator + posR2 + torch.sum(torch.exp(hard_negatives/self.temperature[rank-1]))
+
+                variant_loss += -torch.log(numerator/denominator + 1e-8)
+                #ranks[rank-1] += -torch.log(numerator/denominator + 1e-8)
+            loss += variant_loss
+            #ranks = ranks/metric.size(0)
+            #loss = ranks.mean()
+        return loss / metric.size(0), metric.size(0) # Average loss across all variants
+
 
 class MinimizingPredictor(nn.Module):
     def __init__(self):
-        super(MinimizingPredictor, self).__init__()
+        super().__init__()
 
-    def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], torch.inf))
-        # TODO: Should this use masked_metric?
+    def forward(self, metric):
         return torch.argmin(metric, dim=1)
+
 
 class MaximizingPredictor(nn.Module):
     def __init__(self):
-        super(MaximizingPredictor, self).__init__()
+        super().__init__()
 
-    def forward(self, metric, mask):
-        masked_metric = torch.where(mask, metric, metric.new_full([], -torch.inf))
-        # TODO: Should this use masked_metric?
+    def forward(self, metric):
         return torch.argmax(metric, dim=1)
 
-class GroupedVariant(L.LightningModule):
+
+class GenotypingAccuracy(torchmetrics.Metric):
+    """
+    Compute genotyping accuracy(ies), allowing for multiple correct support images per variant.
+
+    Predicted genotype labeled as 1 is considered correct, while incorrect predictions of 0 do not contribute to the calculated accuracy.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("non_reference_concordance", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor,) -> None:
+        """Update accuracy measures with |variants|, dense integer prediction tensor and |variants|,|support| nested one-hot target tensor"""
+        padded_target = torch.nested.to_padded_tensor(target, 0)
+        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
+
+        # Treat "first-rank" and "second-rank" positives (same genotype, different phase) as correct
+        self.correct += torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
+        self.total += target.shape[0]
+
+        #Non-reference concordance 
+        
+        targ = padded_target > 0
+        indices = torch.arange(targ.size(0))
+        self.non_reference_concordance += torch.sum(targ[indices, preds])
+        
+    def compute(self) -> torch.Tensor:
+        return {"accuracy":self.correct.float() / self.total, 
+                "non-reference concordance": self.non_reference_concordance.float() / self.total
+        }
+
+
+class PackedVariant(L.LightningModule):
+    ignored_hyperparameters = ("encoder", "metric", "loss", "predictor")
+
     def __init__(
         self,
         encoder: nn.Module,
@@ -314,135 +279,137 @@ class GroupedVariant(L.LightningModule):
         loss: nn.Module,
         optimizer: torch.optim.Optimizer,
         predictor: nn.Module,
-        max_group_size=6,
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["encoder", "metric"])
+        self.save_hyperparameters(ignore=type(self).ignored_hyperparameters)
 
         self.encoder = encoder
         self.metric = metric
         self.loss = loss
         self.predictor = predictor
 
-        self.train_acc = Accuracy(task="multiclass", num_classes=max_group_size)
-        self.val_acc = Accuracy(task="multiclass", num_classes=max_group_size)
-        self.test_acc = Accuracy(task="multiclass", num_classes=max_group_size)
-
-        self.example_input_array = (torch.zeros(1, self.encoder.num_channels, 100, 300), torch.zeros(1, max_group_size, self.encoder.num_channels, 100, 300))
+        self.train_acc = GenotypingAccuracy()
+        self.val_acc = GenotypingAccuracy()
+        self.test_acc = GenotypingAccuracy()
 
     def on_train_start(self) -> None:
         # Reset validation metrics at the start of training to avoid effects of sanity batches
         self.val_acc.reset()
 
-    def forward(self, query, support):
-        query_embeddings = self.encoder(query)
+    def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+        """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
+        images, labels, offsets, *metadata = batch
+        image_embeddings = self.encoder(images)
 
-        # https://github.com/pytorch/pytorch/issues/1927#issuecomment-1245392571
-        support = support.transpose(0, 1)
-        support_embeddings = torch.stack([self.encoder(s) for s in support], dim=0)
-        support_embeddings = support_embeddings.transpose(0, 1)
+        # TODO: Consider padding query and support embeddings if images are padded to enable consistent tensor sizes
+        support_lengths = torch.diff(offsets)
+        max_support = torch.max(support_lengths)
+        # Extract query embeddings from after the supports and expand to compute the pairwise metric
+        query_embeddings = torch.repeat_interleave(
+            image_embeddings[offsets[-1]:offsets[-1]+support_lengths.size(0)],
+            support_lengths,
+            dim=0,
+            output_size=offsets[-1],
+        )
+        support_embeddings = image_embeddings[: offsets[-1]]
 
-        metric = self.metric(query_embeddings, support_embeddings)
+        metrics = torch.nested.nested_tensor_from_jagged(
+            self.metric(query_embeddings, support_embeddings), offsets=offsets, max_seqlen=max_support
+        )
 
-        return (metric, query_embeddings, support_embeddings)
+        preds = self.predictor(metrics)
 
-    def _model_step(self, batch, batch_idx):
-        query, support, num_support, label, *_ = batch
-        metric, query_embeddings, support_embeddings = self(query, support)
+        # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
+        # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
+        labels_nt = torch.nested.nested_tensor_from_jagged(labels, offsets=offsets, max_seqlen=max_support)
 
-        # Create a mask for the valid support images in each group by filling ones out to the
-        # last valid support image (via "exclusive cumsum")
-        mask = torch.zeros(metric.shape, dtype=torch.long, device=metric.device)
-        mask[(torch.arange(metric.shape[0]), num_support - 1)] = 1
-        mask = (1 - (mask.cumsum(dim=-1) - mask)).to(torch.bool)
+        return (metrics, preds, labels_nt, *metadata)
 
-        loss = self.loss(metric, label, mask, query_embeddings, support_embeddings)
-        preds = self.predictor(metric, mask)
+    # def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+    #     """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
+    #     images, labels, offsets = batch
+    #     images_embeddings = self.encoder(images)
 
-        return (loss, preds, label)
+    #     variant_lengths = torch.diff(offsets)
+    #     query_embeddings = images_embeddings[offsets[:-1]].unsqueeze(1)
+    #     support_embeddings_nt = torch.nested.nested_tensor_from_jagged(images_embeddings, offsets=offsets, max_seqlen=torch.max(variant_lengths))
+    #     support_embeddings = support_embeddings_nt.to_padded_tensor(0.0)
+
+    #     metrics = self.metric(query_embeddings, support_embeddings).squeeze(1)
+    #     metrics_nt = torch.nested.as_nested_tensor([metrics[i,1:variant_lengths[i]] for i in range(len(offsets) - 1)], layout=torch.jagged)
+
+    #     preds = self.predictor(metrics_nt)
+
+    #     # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
+    #     # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
+    #     labels_nt = torch.nested.nested_tensor_from_jagged(
+    #         labels, offsets=metrics_nt.offsets(), max_seqlen=torch.max(variant_lengths) - 1
+    #     )
+
+    #     return (metrics_nt, preds, labels_nt)
+
+    def _model_step(self, batch, batch_idx):  # noqa: ARG002
+        metric, preds, labels, *_ = self(batch)
+        # The different loss functions should return their relevant batch size (which may be pairs or number of variants)
+        loss, batch_size = self.loss(metric, labels)
+        return (loss, preds, labels, batch_size)
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
-
+        loss, preds, label, *_ = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
         self.log("train_loss", loss, prog_bar=True)
-        self.train_acc(preds, label)
-        self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
-
+        acc = self.train_acc(preds, label)
+        self.log("train_acc", acc["accuracy"], prog_bar=True, batch_size=num_variants)
+        self.log("non-reference", acc["non-reference concordance"], prog_bar=True, batch_size=num_variants)
         return loss
-
+    
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
-
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss, preds, label, batch_size = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.val_acc(preds, label)
-        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
-
+        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, preds, label = self._model_step(batch, batch_idx)
-
-        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.test_acc(preds, label)
-        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
-
-
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        query, support, num_support, label, total_support, key = batch
-        metric, *_ = self(query, support)
-        return metric, num_support, label, total_support, key
+        loss, preds, label, batch_size = self._model_step(batch, batch_idx)
+        num_variants = label.size(0)
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        acc = self.test_acc(preds, label)
+        self.log("test_acc", acc["accuracy"], on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        self.log("test_non_ref", acc["non-reference concordance"], on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-        return { "optimizer": optimizer }
+        return {"optimizer": optimizer}
 
-
-# def train(cfg, output_dir=None, **kw_args):
-#     dm = hydra.utils.instantiate(cfg.data)
-#     model = hydra.utils.instantiate(cfg.model)
-
-#     # Overwrite existing checkpoints, instead of creating new versions
-#     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir, enable_version_counter=False)
-
-#     if cfg.data.validation_urls:
-#         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
-#         num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
-#     else:
-#         # Skip validation if no validation data provided
-#         limit_val_batches = num_sanity_val_steps = 0
-
-#     if cfg.data.test_urls:
-#         limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
-#     else:
-#         # Skip testing if no testing data provided
-#         limit_test_batches = 0
-
-#     trainer =  hydra.utils.instantiate(cfg.trainer, callbacks=[checkpoint_callback], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, limit_test_batches=limit_test_batches, **kw_args)
-
-#     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
-#     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
-#     trainer.fit(model=model, datamodule=dm)
-
-#     return checkpoint_callback.best_model_path
 
 def predict(cfg, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
 
     model_cls = hydra.utils.get_class(cfg.model._target_)
-    # We need to instantiate any of ignored components in the model
-    model = model_cls.load_from_checkpoint(cfg.model.checkpoint, encoder=hydra.utils.instantiate(cfg.model.encoder), metric=hydra.utils.instantiate(cfg.model.metric))
-    print(model)
+    model = model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+        encoder=hydra.utils.instantiate(cfg.model.encoder),
+        metric=hydra.utils.instantiate(cfg.model.metric),
+        loss=hydra.utils.instantiate(cfg.model.loss),
+        predictor=hydra.utils.instantiate(cfg.model.predictor),
+    )
     trainer = L.Trainer(limit_predict_batches=2)
-    predictions = trainer.predict(model, dm)
-    print(predictions)
+    for prediction in trainer.predict(model, dm):
+        metrics, preds, labels_nt, *metadata = prediction
+        print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
+              "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
+        padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
+        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
+ 
+        correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
+        total = labels_nt.shape[0]
+        
+        targ = padded_target > 0
+        indices = torch.arange(targ.size(0))
+        non_reference_concordance = torch.sum(targ[indices, preds])
 
+        print("\nAccuracy", correct.float() / total, 
+                "\nnon-reference concordance", non_reference_concordance.float() / total)
 
-def test(cfg, **kw_args):
-    dm = hydra.utils.instantiate(cfg.data)
-
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-    # We need to instantiate any of ignored components in the model
-    model = model_cls.load_from_checkpoint(cfg.model.checkpoint, encoder=hydra.utils.instantiate(cfg.model.encoder), metric=hydra.utils.instantiate(cfg.model.metric))
-
-    trainer = L.Trainer(**kw_args)
-    trainer.test(model, dm)

@@ -11,6 +11,10 @@ def train(cfg, output_dir=None, **kw_args):
     # seed_everything()
 
     # print("\nmasking scheme:",cfg.model.masking_scheme)
+    # Reduce precision to enable use of GPU tensor cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
     dm = hydra.utils.instantiate(cfg.data)
 
     # OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
@@ -35,16 +39,19 @@ def train(cfg, output_dir=None, **kw_args):
         # Skip validation if no validation data provided
         limit_val_batches = num_sanity_val_steps = 0
 
-    if cfg.data.test_urls:
-        limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
-    else:
-        # Skip testing if no testing data provided
-        limit_test_batches = 0
+    # Skip testing if no testing data provided
+    limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if cfg.data.test_urls else 0
 
-    profile = False
-    profiler = "advanced" if torch.cuda.is_available() and profile else None
-    device_stats = DeviceStatsMonitor()
-    trainer = hydra.utils.instantiate(cfg.trainer, profiler=profiler, callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=50), device_stats], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, precision="32-true", limit_test_batches=limit_test_batches, **kw_args)
+    trainer = hydra.utils.instantiate(
+        cfg.trainer,
+        callbacks=[checkpoint_callback, L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        limit_val_batches=limit_val_batches,
+        num_sanity_val_steps=num_sanity_val_steps,
+        limit_test_batches=limit_test_batches,
+        #profiler=L.pytorch.profilers.PyTorchProfiler(dirpath="/storage/mlinderman/tmp/profiler", filename="profile"),
+        #profiler=L.pytorch.profilers.AdvancedProfiler(dirpath="/storage/mlinderman/tmp/profiler", dump_stats=True),
+        **kw_args,
+    )
 
     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
@@ -61,3 +68,27 @@ def assess_accuracy(cfg, ckpt_path, **kw_args):
         callbacks=[ModelAssessmentCallback(), TQDMProgressBar(refresh_rate=50)], **kw_args
     )
     trainer.predict(model, dm)
+    
+def test(cfg, **kw_args):
+    # Reduce precision to enable use of GPU tensor cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
+    dm = hydra.utils.instantiate(cfg.data)
+
+    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+
+    model_args = {}
+    for key, value in cfg.model.items():
+        if key in model_cls.ignored_hyperparameters and "_target_" in value:
+            model_args[key] = hydra.utils.instantiate(value)
+
+    model = model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+        callbacks=[L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        **model_args,
+    )
+
+    trainer = hydra.utils.instantiate(cfg.trainer, **kw_args)
+    trainer.test(model=model, datamodule=dm)

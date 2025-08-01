@@ -1,2 +1,5 @@
 defaults:
   - base
+
+# Utilize mixed precision
+precision: "16-mixed"

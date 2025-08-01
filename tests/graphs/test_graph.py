@@ -9,7 +9,15 @@ from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
 
-from .. import B37_REF_FASTA, HG00731_SV_VCF, HG00731_VCF, HG38_REF_FASTA, data_path
+from .. import (
+    B37_REF_FASTA,
+    HG002_DIPCALL_SV_VCF,
+    HG002_DIPCALL_VCF,
+    HG00731_SV_VCF,
+    HG00731_VCF,
+    HG38_REF_FASTA,
+    data_path,
+)
 
 
 def assert_topological_order(graph: odgi.graph):
@@ -79,7 +87,7 @@ class TestGraphConstructionFromVCF:
         assert len(variant_haplotypes[0].sequence()) == region.length
         assert len(variant_haplotypes[1].sequence()) == region.length - 822
 
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_insertion_haplotype(self):
         region = Range("chrY", 56880140, 56880241)
         graph = Graph.from_vcf(
@@ -98,7 +106,7 @@ class TestGraphConstructionFromVCF:
         assert len(haplotypes[1].sequence()) == region.length + 73
 
     @pytest.mark.skip
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_complex_haplotype(self):
         region = Range("chr13", 29557413, 29560096)
         graph = Graph.from_vcf(
@@ -120,7 +128,7 @@ class TestGraphConstructionFromVCF:
     # so we have 2 haplotypes for the absence of that variant, the explicit reference path and an
     # "implicit" path that does not include the alternate allele
 
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     @pytest.mark.parametrize(
         ("region", "background_vcf", "inference_vcf", "exp_haplotypes"),
         [
@@ -129,7 +137,7 @@ class TestGraphConstructionFromVCF:
                 Range("chr1", 41824764, 41824818),
                 "chr1_41823764_41825818.vcf.gz",
                 "chr1_41823764_41825818.sv.vcf.gz",
-                (3, 3),
+                (2, 2), # < 50bp deletion is not considered, making this a bi-allelic site
             ),
         ],
     )
@@ -149,7 +157,7 @@ class TestGraphConstructionFromVCF:
             )
             assert len(haplotypes) == exp_haplotypes_allele, f"Unexpected number of haplotypes for allele {allele}"
 
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_inconsistent_backbone_haplotype(self, cfg):
         region = Range("chr1", 6012136, 6012573)
         graph = Graph.from_vcf(
@@ -158,7 +166,7 @@ class TestGraphConstructionFromVCF:
             region.expand(cfg.pileup.graph_flank),
             inference_vcf=data_path("chr1_6011136_6013135.sv.vcf.gz"),
         )
-
+        graph._graph.to_gfa()
         # Since graph is optimized during construction, we should iterate over the nodes in topological order
         assert_topological_order(graph._graph)
 
@@ -185,12 +193,12 @@ class TestGraphConstructionFromVCF:
                 backbone,
                 region.expand(cfg.pileup.variant_padding),
             )
-            assert len(haplotypes) == 12, "4 possible SVs, but 2 are mutually exclusive, thus 12 haplotypes"
+            assert len(haplotypes) == 12, f"Backbone {backbone} should have 12 haplotypes"
 
             # One of the paths should match the backbone
             assert sum(h.nodes == graph.shortest_path(backbone) for h in haplotypes) == 1
 
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_overlapping_haplotype(self, cfg):
         region = Range("chr1", 853424, 853622)
         graph = Graph.from_vcf(
@@ -215,7 +223,7 @@ class TestGraphConstructionFromVCF:
         for h in (2, 3):
             assert len(del_nodes & set(haplotypes[h].nodes)) == 0
 
-    @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference required")
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     @pytest.mark.skipif(not HG00731_VCF or not HG00731_SV_VCF, reason="HG00731 VCFs required")
     @pytest.mark.parametrize(
         "region",
@@ -233,7 +241,7 @@ class TestGraphConstructionFromVCF:
             Range("chr21", 37122424, 37122424),
         ],
     )
-    def test_observed_errors_haplotype(self, cfg, region):
+    def test_hgsvc2_observed_errors(self, cfg, region):
         graph = Graph.from_vcf(
             HG38_REF_FASTA,
             HG00731_VCF,
@@ -276,7 +284,7 @@ class TestGraphConstructionFromVCF:
 14	77187581	.	GCC	G	603.88	PASS	.	GT	0/1
 14	77187582	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2
 """
-        )
+        )  # fmt: skip
 
         region = Range("14", 77187572, 77187592)
         graph = Graph.from_vcf(B37_REF_FASTA, vcf_path, region)
@@ -284,3 +292,30 @@ class TestGraphConstructionFromVCF:
 
         assert graph.sequence_length(graph.nodes_on_path("HG002#0#14#0")) == 30
         assert graph.sequence_length(graph.nodes_on_path("HG002#1#14#0")) == 18
+
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    @pytest.mark.skipif(not HG002_DIPCALL_VCF or not HG002_DIPCALL_SV_VCF, reason="HG002 dipcall VCFs required")
+    @pytest.mark.parametrize(
+        ("region", "base_path", "expected_haplotypes"),
+        [
+            (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
+            (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
+            (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
+            (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
+        ],
+    )
+    def test_dipcall_observed_errors(self, cfg, region, base_path, expected_haplotypes):
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA, HG002_DIPCALL_VCF, region.expand(cfg.pileup.graph_flank), inference_vcf=HG002_DIPCALL_SV_VCF,
+        )
+        graph._graph.to_gfa()
+
+        haplotypes = graph.all_haplotypes(
+            HG002_DIPCALL_SV_VCF,
+            base_path,
+            region.expand(cfg.pileup.variant_padding),
+        )
+
+        assert len(haplotypes) == expected_haplotypes
+        if base_path == region.contig:
+            assert haplotypes[0].nodes == graph.nodes_on_path(region.contig), "First haplotype should match reference path"

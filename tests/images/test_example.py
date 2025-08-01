@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import pytest
 import webdataset as wds
 from omegaconf import OmegaConf
@@ -15,7 +16,22 @@ from npsv3.images.example import (
 from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
 
-from .. import B37_REF_FASTA, SYNDIP_BAM, SYNDIP_SV_VCF, SYNDIP_VCF, data_path, result_path
+from .. import (
+    B37_REF_FASTA,
+    EXPERIMENTS_DIR,
+    HG002_DIPCALL_SV_VCF,
+    HG002_DIPCALL_VCF,
+    HG002_HG38_BAM,
+    HG38_REF_FASTA,
+    NA12878_BAM,
+    NA12878_SV_VCF,
+    NA12878_VCF,
+    SYNDIP_BAM,
+    SYNDIP_SV_VCF,
+    SYNDIP_VCF,
+    data_path,
+    result_path,
+)
 
 
 @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
@@ -60,13 +76,13 @@ class TestRegionToExample:
 
 
 @pytest.mark.skipif(
-    not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
+    not all((B37_REF_FASTA, bwa_index_loaded(B37_REF_FASTA))), reason="B37 reference in SHM required"
 )
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
 )
 @pytest.mark.usefixtures("ray_setup")
-class TestGraphToExample:
+class TestB37GraphToExample:
     def test_single_del(self, tmp_path, cfg, hg002_sample):
         region = Range("12", 22129564, 22130387)
         example = make_graph_example_from_region(
@@ -118,6 +134,7 @@ class TestGraphToExample:
                 cfg.pileup.image_width,
                 len(cfg.pileup.image_channels),
             )
+            np.testing.assert_array_equal(sample["label.inf.npy"], [0, 0, 0, 1]) # Label is 1/1, which has only one inference positive (itself)
         assert _i == 0, "Only one sample in dataset"
 
     @pytest.mark.skipif(
@@ -150,6 +167,67 @@ class TestGraphToExample:
         png_path = result_path("test.png")
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
+
+@pytest.mark.skipif(
+    not all((HG38_REF_FASTA, bwa_index_loaded(HG38_REF_FASTA))), reason="HG38 reference in SHM required"
+)
+@pytest.mark.cfg_overrides(
+    f"reference={HG38_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
+)
+@pytest.mark.usefixtures("ray_setup")
+class TestHG38GraphToExample:
+    @pytest.mark.skipif(
+        not all((NA12878_BAM, NA12878_VCF, NA12878_SV_VCF)), reason="NA12878 dataset required"
+    )
+    @pytest.mark.parametrize(
+        ("region", "label", "ranked_label"),
+        [
+            (Range("chr1", 150506578,150506578), 0, [1] + [0] * 8), # 0/0 only has a true positive
+            (Range("chr1", 2994972, 2995286), 1, [0, 1, 2, 3]),  # 0/1 genotype, with other phase as "second-rank" and 1/1 as "third-rank"
+            (Range("chr1", 977943, 978002), 2, None) # 0/1 DEL, with complex upstream region
+        ],
+    )
+    def test_na12878_images(self, cfg, na12878_sample, region, label, ranked_label):
+        local_conf = OmegaConf.from_dotlist([ ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            NA12878_BAM,
+            na12878_sample,
+            NA12878_VCF,
+            NA12878_SV_VCF,
+        )
+
+        if label is not None:
+            assert example["label"] == label
+        if ranked_label is not None:
+            np.testing.assert_array_equal(example["label.rank"], ranked_label)
+
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    def test_hg002_dipcall_images(self, cfg, hg002_hg38_sample):
+        region = Range.parse_literal("chr11:24919131-24919131")
+        local_conf = OmegaConf.from_dotlist([ ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG002_HG38_BAM,
+            hg002_hg38_sample,
+            HG002_DIPCALL_VCF,
+            HG002_DIPCALL_SV_VCF,
+        )
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
 
 @pytest.mark.skipif(
     not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
@@ -194,3 +272,4 @@ class TestVariantToExample:
             )
             assert os.path.exists(png_path)
         assert _i == 0, "Only one sample in dataset"
+

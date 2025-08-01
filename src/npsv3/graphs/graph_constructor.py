@@ -26,7 +26,7 @@ from typing import Optional, TextIO
 import pysam
 
 from npsv3.util.range import Range
-from npsv3.variant import Variant
+from npsv3.variant import VARIANT_ID_LENGTH, Variant
 
 # We would like to use the interval tree library, but it doesn't support "null" intervals,
 # i.e., with zero size, which we need for insertions. So instead we use a sorted list as the core
@@ -42,7 +42,7 @@ class GraphConstructor:
 
     VCF features supported:
     * Global phasing (|) and local phasing (|) with a PS field.
-    * Star alleles and alleles overlapped by a deletion more generally. If genotypes are not explicity phased, we try to find
+    * Star alleles and alleles overlapped by a deletion more generally. If genotypes are not explicitly phased, we try to find
       a consistent phasing of the alleles in the overlapping variants.
 
     Known limitations:
@@ -71,27 +71,33 @@ class GraphConstructor:
             for variant, _ in sort_variant_reference_region(vcf_file.fetch(**self.region.pysam_fetch)):
                 has_star_allele = variant.has_star_allele
                 for allele_idx, allele_len in enumerate(variant.length_change(allele=None), start=1):
-                    # When there * alleles also create paths that include the padding bases (noted with "rec" prefix).
-                    # This crudely create extra copies of some nodes, but those could be pruned later.
-                    if has_star_allele and allele_len is not None:
-                        # Find and split the corresponding span with any padding bases included
-                        alt_region = variant.record_reference_region
-                        alt = AltPath(
-                            variant_path_name(variant.vg_variant_id, allele_idx, prefix="rec"),
-                            alt_region.end,
-                            variant.allele(allele_idx), # Include all the padding bases in the sequence
-                        )
-                        self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
-                    # "Normal" allele addition without creating paths including padding bases
-                    if allele_len is not None: # Ignore * alleles
-                        # Find and split the corresponding span
-                        alt_region = variant.alt_reference_region(allele_idx)
-                        alt = AltPath(
-                            variant_path_name(variant.vg_variant_id, allele_idx),
-                            alt_region.end,
-                            variant.alt_seq(allele_idx),
-                        )
-                        self._split_spans(alt_region, variant.vg_variant_id, alt)
+                    try:
+                        # When there * alleles also create paths that include the padding bases (noted with "rec" prefix).
+                        # This crudely create extra copies of some nodes, but those could be pruned later by removing
+                        # the "rec" paths and then any nodes that are no longer referenced in any path.
+                        if has_star_allele and allele_len is not None:
+                            # Find and split the corresponding reference span (which includes the padding bases)
+                            alt_region = variant.record_reference_region #TODO: Should this be based on the alternative alle?
+                            alt = AltPath(
+                                variant_path_name(variant.vg_variant_id, allele_idx, prefix="rec"),
+                                alt_region.end,
+                                variant.allele(allele_idx), # Include all the padding bases in the sequence
+                            )
+                            self._split_spans(alt_region, variant.vg_variant_id, alt, path_prefix="rec")
+
+                        # "Normal" allele addition without padding bases
+                        if allele_len is not None: # Ignore * alleles
+                            # Find and split the corresponding span
+                            alt_region = variant.alt_reference_region(allele_idx)
+                            alt = AltPath(
+                                variant_path_name(variant.vg_variant_id, allele_idx),
+                                alt_region.end,
+                                variant.alt_seq(allele_idx),
+                            )
+                            self._split_spans(alt_region, variant.vg_variant_id, alt)
+                    except Exception as e:
+                        e.add_note(f"in variant spanning {variant.reference_region} and allele {allele_idx}") # Python 3.11+ (alternately use e.args)
+                        raise
 
 
     def _assign_nodes(self):
@@ -110,6 +116,46 @@ class GraphConstructor:
             for alt in span.alts:
                 self.paths[alt.name].append(alt.node_id)
 
+        # Extend trimmed (padding removed) alternate paths to match the beginning and end points of the reference path. We need to
+        # do this because we maintain a single reference path for each variant, as opposed to an allele-specific reference path.
+        # The result should be that the reference and alternate paths begin and end at the same points in the graph.
+        for name, nodes in self.paths.items():
+            if not name.startswith("_"):
+                continue # Skip paths that aren't variants, e.g., _alt_...
+            allele = int(name[5+VARIANT_ID_LENGTH+1:])
+            if allele > 0:
+                # Extend the alternate path to match the start and end of the reference paths, i.e.
+                # make sure the paths span equivalent portions of the graph.
+                ref_path = name[:5+VARIANT_ID_LENGTH] + "_0"
+                ref_nodes = self.paths[ref_path]
+
+                span_idx, alt_path = self.find_node_span(nodes[0])
+                assert span_idx is not None and span_idx > 0 and alt_path is not None  # noqa: PT018
+                target_span = self.spans[span_idx - 1]
+                # If the preceding span id is in the references nodes, extend the alternate path to include those nodes to the beginning
+                # of the reference path
+                try:
+                    ref_nodes_index = ref_nodes.index(target_span.node_id)
+                    self.paths[name][:0] = ref_nodes[:ref_nodes_index + 1] # Insert elements at the beginning of the list
+                except ValueError:
+                    pass
+
+                span_idx, alt_path = self.find_node_span(nodes[-1])
+                assert span_idx is not None and span_idx < len(self.spans) - 1 and alt_path is not None  # noqa: PT018
+                span_region = self.spans[span_idx].region
+                if len(span_region) == 0 and alt_path.target == span_region.start:
+                    target_span = self.spans[span_idx + 1]
+                else:
+                    target_span = self.spans[self.find_target_span(alt_path.target)]
+
+                # If the target span id is in the references nodes, extend the alternate path to include those nodes to the end
+                try:
+                    ref_nodes_index = ref_nodes.index(target_span.node_id)
+                    self.paths[name].extend(ref_nodes[ref_nodes_index:])
+                except ValueError:
+                    pass
+
+
     def _extract_haplotypes(self, vcf_path: str, samples: Sequence[str] | None=None, ploidy=2):
         """Extract haplotypes from vcf_path for samples as paths in the graph"""
         with pysam.VariantFile(vcf_path) as vcf_file:
@@ -126,20 +172,23 @@ class GraphConstructor:
                 # We can also have overlap alleles that are not specifically encoded in the VCF with "*", but instead
                 # are still marked with a genotype, e.g., 0/0, even it latter should formally be 0/*. These include insertions
                 # that have identical "zero width" regions
-
                 has_star = False
                 try:
-                    star_idx = record.alleles.index("*")
+                    alt_alleles = record.alts
+                    if alt_alleles == ("*",):
+                        continue  # Skip variants that only have * alternate alleles
+                    star_idx = alt_alleles.index("*") + 1
                     allele_indices = set(itertools.chain.from_iterable(genotype.allele_indices for genotype in record.samples.itervalues()))
                     if allele_indices == { star_idx }:
-                        # Skip variants that only have * alleles
-                        continue
+                        continue  # Skip variants with genotypes that are all * alleles
                     if star_idx in allele_indices:
                         # Only consider * alleles actually present in one of the genotypes, i.e., not just in the ALTS
                         has_star = True
                 except ValueError:
                     pass
 
+                # TODO: This currently doesn't handle the case where we are checking an insertion overlaps a multi-allelic variant
+                # containing the same insertion.
                 variant_range = variant.reference_region
                 if current_range is not None and (current_range.overlaps(variant_range) or current_range == variant_range):
                     current_range = current_range.union(variant_range)
@@ -191,7 +240,17 @@ class GraphConstructor:
         """Find the leftmost span that starts at the target position, including any null regions"""
         return bisect_left(self.spans, target_start, key=span_between_point_key)
 
-    def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout):
+    def find_node_span(self, node: int) -> "tuple[int|None,AltPath|None]":
+        """Find the span or alternate path with the given node ID."""
+        for i, span in enumerate(self.spans):
+            if span.node_id == node:
+                return (i,None)
+            for alt in span.alts:
+                if alt.node_id == node:
+                    return (i,alt)
+        return (None,None)
+
+    def to_gfa(self, ref_fasta: str, out_file: str | TextIO = sys.stdout) -> None:
         """Write the graph in GFA format to out_file using reference sequence from ref_fasta."""
         ref_seq = _reference_sequence(ref_fasta, self.region)
 
@@ -414,12 +473,12 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
         # Make sure reference sequence is all upper case
         return ref_fasta.fetch(reference=region.contig, start=region.start, end=region.end).upper()
 
-# For reference on converting VCF to graph paths, the approach in the GWVT library
+# For reference on converting VCF to graph paths, the approach in the GBWT library
 # https://github.com/jltsiren/gbwt/blob/bde6858046580d1b9dbfa54f48ab187c85998ffe/src/variants.cpp#L826
 
 
 class Phasing(Enum):
-    """Possible phasing for a gentotype"""
+    """Possible phasing for a genotype"""
     UNPHASED = 0
     GLOBAL = 1
     LOCAL = 2
@@ -430,7 +489,7 @@ class Phasing(Enum):
 class PhaseState:
     """Phase state for a genotype, including local phase set (PS) if applicable"""
     phase: Phasing
-    phase_set: int | None = None  # Phase set ID, if applicable (this is really any type used in VCF PS field)
+    phase_set: int | None = None  # Phase set ID, if applicable (this is really any type used in the VCF PS field)
 
     def __eq__(self, other):
         if isinstance(other, PhaseState):
@@ -478,11 +537,11 @@ class NonRefAlleleOverlappingNonRefError(Exception):
     """Non-reference allele overlapping another non-reference allele"""
     # In a well formed VCF this should not occur, but in practice if the variants are not phased
     # we can obtain a non-reference allele that overlaps another non-reference allele. Report this
-    # error explicity so we can possibly fix it.
+    # error explicitly so we can possibly fix it.
 
 
 class HaplotypePaths:
-    """Construct a sequence of (dis)connected paths making up a single halotype by adding differently phased alleles"""
+    """Construct a sequence of (dis)connected paths making up a single haplotype by adding differently phased alleles"""
     def __init__(self, ref_nodes: list[int]):
         self.nodes = [ref_nodes[:]]
         self.phase = PhaseState(Phasing.IMPLICIT)  # Start with implicit phasing, i.e., no breaks in the haplotype
@@ -518,6 +577,7 @@ class HaplotypePaths:
                     # A VCF with inconsistent phasing of alternate alleles
                     raise NonRefAlleleOverlappingNonRefError from e
                 return
+            e.add_note(f"in variant spanning {variant.reference_region}") # Python 3.11+ (alternately use e.args)
             raise
 
         if alt_nodes is not None:
@@ -544,20 +604,20 @@ class PolytypePaths:
         ref_nodes = self.paths[variant_path_name(variant.vg_variant_id, 0, prefix=path_prefix)]
         indices = genotype.allele_indices
 
-        # A variant can be explicitly globally or locally phased, or implicity phased if it has a overlapping '*' 'llele
+        # A variant can be explicitly globally or locally phased, or implicitly phased if it has a overlapping '*' 'allele
         # or if all alleles are the same (e.g., 0/0 genotype)
         if genotype.phased:
             phase_set = genotype.get("PS")
             phase = PhaseState(Phasing.GLOBAL if phase_set is None else Phasing.LOCAL, phase_set)
         elif VariantOverlap.STAR_ALLELE in overlap or len(set(indices)) == 1:
-            # Heterozygous variants should only be implicity phased if there are actual overlapping alleles
-            # where we can make inferences about the phase. At present we only assume that for explicit * alleles
+            # Heterozygous variants should only be implicitly phased if there are actual overlapping alleles
+            # where we can make inferences about the phase. At present we only assume that for explicit * alleles.
             phase = PhaseState(Phasing.IMPLICIT)
         else:
             phase = PhaseState(Phasing.UNPHASED)
 
         # A NonRefAlleleOverlappingNonRefError indicates alleles in overlapping variants are not consistently phased.
-        # If the genotype was orignally unphased, try permutations of the alleles to try to find a consistent phasing.
+        # If the genotype was originally unphased, try permutations of the alleles to try to find a consistent phasing.
         for local_indices in itertools.islice(itertools.permutations(indices), 0, max_gt_permutations if not genotype.phased else 1):
             try:
                 local_haplotypes = copy.deepcopy(self.haplotypes) if VariantOverlap.OVERLAP in overlap else self.haplotypes
@@ -565,8 +625,9 @@ class PolytypePaths:
                     if index is None:
                         continue  # Skip undefined (".") alleles
                     if VariantOverlap.STAR_ALLELE in overlap and variant.allele(index) == "*":
-                        continue  # Don't apply explicity overlapped "*"" allele
+                        continue  # Don't apply explicitly overlapped "*"" allele
                     if index != -1:
+                        # TODO: Remove shared prefix/suffix from ref_nodes and alt_nodes
                         alt_path = variant_path_name(variant.vg_variant_id, index, prefix=path_prefix)
                         local_haplotypes[i].apply_allele(ref_nodes, phase, overlap, alt_nodes=self.paths[alt_path] if index > 0 else None, variant=variant)
                     else:
@@ -576,12 +637,13 @@ class PolytypePaths:
                 self.haplotypes = local_haplotypes
                 break
             except NonRefAlleleOverlappingNonRefError:
-                # Try another permutation of the genotype to see if we can find a local phasing consitent
+                # Try another permutation of the genotype to see if we can find a local phasing consistent
                 # with the overlap
                 continue
         else:
-            # We tried different permutations of the genotype, but couldn't find a constent phasing, skip variant without
-            # changing the haplotypes
+            # We tried different permutations of the genotype, but couldn't find a consistent phasing, skip variant without
+            # changing the haplotypes. Alternatively we could try to "break" the haplotype at this point (what vg does). However,
+            # we would need a way to re-insert nodes that might have been removed by prior variants to construct the new haplotype.
             logging.warning("Found non-reference allele overlapped by another non-reference allele in %s, skipping", variant.reference_region)
 
     def gfa_paths(self, region) -> dict[str, list[int]]:
@@ -593,8 +655,20 @@ class PolytypePaths:
 
 
 def variant_path_name(variant_id: str, allele: int, prefix: str="alt") -> str:
+    """Construct a path name for a variant and allele, e.g., alt_123_1"""
     return f"_{prefix}_{variant_id}_{allele}"
 
+def variant_path_to_id(path_name: str, prefix: str="alt") -> str:
+    """Extract the variant ID from a path name, e.g., alt_123_1 -> 123"""
+    prefix = f"_{prefix}_"
+    assert path_name.startswith(prefix)
+    return path_name[len(prefix):len(prefix) + VARIANT_ID_LENGTH]
+
+def variant_path_to_allele(path_name: str, prefix: str="alt") -> int:
+    """Extract the allele index from a path name, e.g., alt_123_1 -> 1"""
+    prefix = f"_{prefix}_"
+    assert path_name.startswith(prefix)
+    return int(path_name[len(prefix) + VARIANT_ID_LENGTH + 1:])
 
 def _nesting_reference_region_cmp(a: tuple[Variant, pysam.VariantRecord], b: tuple[Variant, pysam.VariantRecord]) -> int:
     region_a = a[0].reference_region
