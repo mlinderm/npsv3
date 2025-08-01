@@ -1,1 +1,1 @@
-name: '{val_loss}-pretrained_MiM-{step}'
+name: 'pretrained_MiM-{step}-{train_loss}'

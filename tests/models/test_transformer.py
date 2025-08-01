@@ -93,6 +93,46 @@ class TestAccuracy:
         # output_dir = str(tmp_path / "shards")
         assess_accuracy(cfg, cfg.model.checkpoint, limit_predict_batches=100)
 
+def reconstruct_image(cfg, reconstructions_path, idx, iter):
+    dataset = wds.WebDataset(reconstructions_path, shardshuffle=False).decode(torch_decode)
+    for _i, sample in enumerate(dataset):
+        orig = sample["image.npy"]
+        recon = sample["recon_image.npy"]
+        assert orig.shape == recon.shape
+
+        # Convert tensors to "false color" images and save to a PNG file
+        [orig_image, recon_image] = [
+            example_to_image(
+                cfg,
+                {"image": x},
+                with_simulations=False,
+                render_channels=False,
+                select_channels=[0, 1, 5],  # ALIGNED, PAIRED, ALLELE
+            )
+            for x in (orig, recon)
+        ]
+        mask = Image.open(result_path("mask.png"))
+        pixel_array = np.array(mask)
+
+        for i in range (len(pixel_array)):
+            for j in range (len(pixel_array[0])):
+                bool_index = (i // cfg.data.patch_size) * (len(pixel_array[0]) // cfg.data.patch_size) + (j // cfg.data.patch_size)
+                # case where pixel should be masked
+                if (mask.getpixel((j, i)) == (255, 255, 255)):
+                    pass
+                else:
+                    mask.putpixel((j, i), orig_image.getpixel((j, i)))
+
+
+        png_path = result_path("test_recon_model"+ str(idx)+"_img"+str(iter) +".png")
+        combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + mask.width + 20, orig_image.height))
+        combined.paste(orig_image, (0, 0))
+        combined.paste(mask, (orig_image.width + 10, 0))
+        combined.paste(recon_image, (orig_image.width + 10 + mask.width + 10, 0))
+        combined.save(png_path)
+        # break
+    assert _i == 0, "Only one sample in dataset"
+
 # @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
@@ -101,7 +141,7 @@ class TestAccuracy:
     "model=MiM",
     "data.patch_size=16",
     "data.mask_scheme=[\"random\", 50]",
-    '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW_BEST/pretrained_MiM-step=101840.ckpt"',
+    '+model.checkpoint=null',
     "data=real_image",
     "data._target_=npsv3.models.transformer.RealImageDataModule",
     "data.batch_size=1",
@@ -112,58 +152,30 @@ class TestTransformerReconstruction:
         # Generate image for variant
         output_dir = str(tmp_path) # / "shards")
 
-        print("Temp path: ", tmp_path)
-
         # Write reconstructed images to a WebDataset file
         local_conf = OmegaConf.from_dotlist([
-            # f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
-            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar",
+            f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/HG00096/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar",
+            # f"data.predict_urls=/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze3.sv.alt.passing.training.hg38.DEL.images/HG00096/+pileup.snv_input=True,generator=single_depth_phaseread,pileup.discrete_mapq=True,pileup.render_snv=True,simulation.augment=True,simulation.chrom_norm_covg=True,simulation.replicates=5/images.tar",
         ])
         local_cfg = OmegaConf.merge(cfg, local_conf)
         mask_path = result_path("mask.png")
 
-        reconstruct(local_cfg, output_dir, limit_predict_batches=1, mask_path=mask_path)
-        reconstructions_path = os.path.join(output_dir, "reconstructions-0000.tar.gz")
-        assert os.path.exists(reconstructions_path)
-
-        dataset = wds.WebDataset(reconstructions_path, shardshuffle=False).decode(torch_decode)
-        for _i, sample in enumerate(dataset):
-            orig = sample["image.npy"]
-            recon = sample["recon_image.npy"]
-            assert orig.shape == recon.shape
-
-            # Convert tensors to "false color" images and save to a PNG file
-            [orig_image, recon_image] = [
-                example_to_image(
-                    cfg,
-                    {"image": x},
-                    with_simulations=False,
-                    render_channels=False,
-                    select_channels=[0, 1, 5],  # ALIGNED, PAIRED, ALLELE
-                )
-                for x in (orig, recon)
+        model_checkpoints = [
+            "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW_BEST/Node20/pretrained_MiM-step=117510-train_loss=0.048836905509233475.ckpt",
+            "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_MiM-step=188016-train_loss=0.058955565094947815.ckpt",
+            "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_MiM-step=235020-train_loss=0.07813941687345505.ckpt",
             ]
-            mask = Image.open(result_path("mask.png"))
-            pixel_array = np.array(mask)
+        torch_seed = random.randint(1, 10000000)
+        iterations = 2
+        for i in range(len(model_checkpoints)):
+            torch.manual_seed(torch_seed)
+            OmegaConf.update(local_cfg, "model.checkpoint", model_checkpoints[i], merge=False)
+            for j in range(iterations):
+                reconstruct(local_cfg, output_dir, limit_predict_batches=1, mask_path=mask_path)
+                reconstructions_path = os.path.join(output_dir, "reconstructions-0000.tar.gz")
+                assert os.path.exists(reconstructions_path)
 
-            for i in range (len(pixel_array)):
-                for j in range (len(pixel_array[0])):
-                    bool_index = (i // cfg.data.patch_size) * (len(pixel_array[0]) // cfg.data.patch_size) + (j // cfg.data.patch_size)
-                    # case where pixel should be masked
-                    if (mask.getpixel((j, i)) == (255, 255, 255)):
-                        pass
-                    else:
-                        mask.putpixel((j, i), orig_image.getpixel((j, i)))
-
-
-            png_path = result_path("test_recon3.png")
-            combined = Image.new(orig_image.mode, (orig_image.width + recon_image.width + mask.width + 20, orig_image.height))
-            combined.paste(orig_image, (0, 0))
-            combined.paste(mask, (orig_image.width + 10, 0))
-            combined.paste(recon_image, (orig_image.width + 10 + mask.width + 10, 0))
-            combined.save(png_path)
-            # break
-        assert _i == 0, "Only one sample in dataset"
+                reconstruct_image(cfg, reconstructions_path, i, j)
 
 
 @pytest.mark.skip()

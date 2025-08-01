@@ -1,1 +1,1 @@
-name: '{val_loss}-{epoch}-{step}'
+name: '{epoch}-{step}-{train_loss}'

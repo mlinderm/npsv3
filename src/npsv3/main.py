@@ -125,9 +125,9 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
         # print("\ncheckpoint path:",ckpt_path)
         OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
-        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}", merge=False)
+        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}-{train_loss}", merge=False)
         ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
-        # assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
         # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
 
     elif cfg.command == "assess_accuracy":

@@ -2,11 +2,14 @@ import hydra
 import lightning as L
 import torch
 from omegaconf import OmegaConf
-from lightning.pytorch.callbacks import TQDMProgressBar
+from lightning.pytorch.callbacks import TQDMProgressBar, DeviceStatsMonitor
+from lightning.pytorch import seed_everything
 from npsv3.models.transformer import Classifier, ModelAssessmentCallback
 
 
 def train(cfg, output_dir=None, **kw_args):
+    # seed_everything()
+
     # print("\nmasking scheme:",cfg.model.masking_scheme)
     dm = hydra.utils.instantiate(cfg.data)
 
@@ -22,8 +25,8 @@ def train(cfg, output_dir=None, **kw_args):
     model = torch.compile(model)
 
     # Overwrite existing checkpoints, instead of creating new versions
-    # print("\ncheckpoint name:",cfg.checkpoint.name)
-    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(save_top_k = 1, monitor="val_loss", mode="min", dirpath=output_dir, filename=cfg.checkpoint.name, enable_version_counter=False)
+    print("\ncheckpoint name:",cfg.checkpoint.name)
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(save_top_k = 1, monitor="train_loss", mode="min", dirpath=output_dir, filename=cfg.checkpoint.name, enable_version_counter=False)
 
     if cfg.data.validate_urls:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
@@ -40,7 +43,8 @@ def train(cfg, output_dir=None, **kw_args):
 
     profile = False
     profiler = "advanced" if torch.cuda.is_available() and profile else None
-    trainer = hydra.utils.instantiate(cfg.trainer, profiler=profiler, callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=50)], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, precision="32-true", limit_test_batches=limit_test_batches, **kw_args)
+    device_stats = DeviceStatsMonitor()
+    trainer = hydra.utils.instantiate(cfg.trainer, profiler=profiler, callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=50), device_stats], limit_val_batches=limit_val_batches, num_sanity_val_steps=num_sanity_val_steps, precision="32-true", limit_test_batches=limit_test_batches, **kw_args)
 
     # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
     # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
