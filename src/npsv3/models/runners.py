@@ -3,22 +3,18 @@ import lightning as L
 import torch
 from omegaconf import OmegaConf
 from lightning.pytorch.callbacks import TQDMProgressBar, DeviceStatsMonitor
-from lightning.pytorch import seed_everything
 from npsv3.models.transformer import Classifier, ModelAssessmentCallback
 
 
 def train(cfg, output_dir=None, **kw_args):
-    # seed_everything()
 
-    # print("\nmasking scheme:",cfg.model.masking_scheme)
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
 
-    # OmegaConf.update(cfg, "model.patch_size", cfg.data.patch_size, merge=False)
-
+    # Loads classifier from a checkpoint if one is provided, else initiates a classifier with random weights
     if cfg.pretrained.path:
         print(f"\npretrained loaded from {cfg.pretrained.path}")
         model = Classifier.load_from_checkpoint(cfg.pretrained.path, strict=False)
@@ -26,9 +22,9 @@ def train(cfg, output_dir=None, **kw_args):
         print("Instantiating base model\n")
         model = hydra.utils.instantiate(cfg.model)
     
-    model = torch.compile(model)
+    model = torch.compile(model) 
 
-    # Overwrite existing checkpoints, instead of creating new versions
+    # Overwrite existing checkpoints, instead of creating new versions. Saves checkpoint with best weights in format: pretrained_MiM/full_train-step=x-train_loss=x
     print("\ncheckpoint name:",cfg.checkpoint.name)
     checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(save_top_k = 1, monitor="train_loss", mode="min", dirpath=output_dir, filename=cfg.checkpoint.name, enable_version_counter=False)
 
@@ -44,12 +40,11 @@ def train(cfg, output_dir=None, **kw_args):
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,
+        # TQDM progress refresh rate set higher due to performance drawbacks at a faster refresh rate
         callbacks=[checkpoint_callback, L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
-        #profiler=L.pytorch.profilers.PyTorchProfiler(dirpath="/storage/mlinderman/tmp/profiler", filename="profile"),
-        #profiler=L.pytorch.profilers.AdvancedProfiler(dirpath="/storage/mlinderman/tmp/profiler", dump_stats=True),
         **kw_args,
     )
 
@@ -59,6 +54,7 @@ def train(cfg, output_dir=None, **kw_args):
 
     return checkpoint_callback.best_model_path
 
+# Method for testing accuracy of classifier transformer
 def assess_accuracy(cfg, ckpt_path, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)
     print("\n",ckpt_path)
@@ -68,7 +64,7 @@ def assess_accuracy(cfg, ckpt_path, **kw_args):
         callbacks=[ModelAssessmentCallback(), TQDMProgressBar(refresh_rate=50)], **kw_args
     )
     trainer.predict(model, dm)
-    
+
 def test(cfg, **kw_args):
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():

@@ -43,7 +43,7 @@ class ViTEncoder(nn.Module):
         self.num_channels = num_channels
         # self.projection_size = projection_size
 
-        config = ViTConfig(num_channels=self.num_channels, image_size = (100, 300), )
+        config = ViTConfig(num_channels=self.num_channels, image_size = (96, 288), )
 
         if pretrained_path:
             checkpoint = torch.load(pretrained_path, map_location=torch.device('cpu'), weights_only=False)

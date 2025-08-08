@@ -87,7 +87,7 @@ class TestAccuracy:
         "data._target_=npsv3.models.transformer.RealImageDataModule",
         "data.predict_urls='/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.images/NA19983/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-0000.tar'",
         "data.batch_size=1",
-        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=50/full_train-step=407400.ckpt"',
+        '+model.checkpoint="/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/10Epoch_50R_16_AdamW_BEST/Node20/full_train-step=117510-train_loss=0.2303631603717804.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
         # output_dir = str(tmp_path / "shards")
@@ -133,7 +133,7 @@ def reconstruct_image(cfg, reconstructions_path, idx, iter):
         # break
     assert _i == 0, "Only one sample in dataset"
 
-# @pytest.mark.skip()
+@pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",
@@ -165,9 +165,11 @@ class TestTransformerReconstruction:
             "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_MiM-step=188016-train_loss=0.058955565094947815.ckpt",
             "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/pretrained_MiM-step=235020-train_loss=0.07813941687345505.ckpt",
             ]
+        # Generates a seed that will be used across iterations
         torch_seed = random.randint(1, 10000000)
         iterations = 2
         for i in range(len(model_checkpoints)):
+            # Sets the seed such that each model checkpoint will be given the same images with the same masks
             torch.manual_seed(torch_seed)
             OmegaConf.update(local_cfg, "model.checkpoint", model_checkpoints[i], merge=False)
             for j in range(iterations):
@@ -178,7 +180,7 @@ class TestTransformerReconstruction:
                 reconstruct_image(cfg, reconstructions_path, i, j)
 
 
-@pytest.mark.skip()
+# @pytest.mark.skip()
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
     "simulation.replicates=0",

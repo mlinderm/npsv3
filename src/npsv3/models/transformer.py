@@ -279,11 +279,7 @@ class Classifier(L.LightningModule):
         self,
         optimizer: torch.optim.Optimizer,
         num_channels = 7,
-<<<<<<< HEAD
-        image_size = (100, 300),
-=======
         image_size = (96, 288),
->>>>>>> acd01677764e303d2678570f6f353413b516bb24
         num_labels = 2,
         patch_size=16
     ):
