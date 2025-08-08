@@ -27,8 +27,8 @@ class RealImageDataModule(L.LightningDataModule):
         num_workers=1,
         patch_size=16,
         shuffle_size=1000,
-        num_channels=9,
-        mask_scheme=["data_driven", 50]
+        num_channels=7,
+        mask_scheme=["random", 80]
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["train_urls", "validate_urls", "predict_urls", "test_urls"])
@@ -170,6 +170,10 @@ class MiM(L.LightningModule):
             "masked_pos": bool_masked_pos,
             "reconstructed_only": reconstructed,
             "final_reconstruction": final_reconstruction
+
+            # Use this line to reconstruct the entire image
+            # "final_reconstruction": outputs.logits
+
         }
 
 #Adapted from: https://github.com/huggingface/transformers/blob/v4.52.3/src/transformers/models/vit/modeling_vit.py#L592
@@ -274,7 +278,7 @@ class Classifier(L.LightningModule):
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
-        num_channels = 9,
+        num_channels = 7,
         image_size = (100, 300),
         num_labels = 2,
         patch_size=16
@@ -389,10 +393,9 @@ def display_image(urls):
         image = sample["image.npy"]
     return image
 
-# Need to either remove this because it's only for testing or change the png path to a non-user path
 def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
     
-    mask = Image.new("RGB", (300, 100))
+    mask = Image.new("RGB", (288, 96))
     pixel_array = np.array(mask)
 
     for i in range (len(pixel_array)):
