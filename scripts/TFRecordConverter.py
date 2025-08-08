@@ -35,7 +35,7 @@ def _extract_metadata_from_first_example(filename, pileup_image_channels=None):
         assert image_shape == tuple(sim_image_shape), "Simulated and actual image shapes don't match"
     if pileup_image_channels:
         assert len(pileup_image_channels) <= image_shape[-1], "More channels requested than available"
-        image_shape = image_shape[:-1] + (len(pileup_image_channels),)
+        image_shape = (*image_shape[:-1], len(pileup_image_channels))
 
     return image_shape, replicates
 
@@ -82,23 +82,22 @@ def write_webdataset(filename, output_dir, output_filename, reader_threads:int =
 
     dataset = load_tfrecord_dataset(filename, num_parallel_reads=reader_threads)
     for features, real_label in tqdm(dataset, desc="Flattening images"):
-        _, [contig, start, end, svtype] = tf.io.decode_proto(
+        _, [contig, start, end, svtype, svlen] = tf.io.decode_proto(
             features["variant/encoded"],
             "npsv2.StructuralVariant",
-            ["contig", "start", "end", "svtype"],
-            [tf.string, tf.int64, tf.int64, tf.int32], # svtype is an enum
+            ["contig", "start", "end", "svtype", "svlen"],
+            [tf.string, tf.int64, tf.int64, tf.int32, tf.int64], # svtype is an enum
             descriptor_source=descriptor_source,
         )
 
         region = f"{tf.squeeze(contig).numpy().decode('utf-8')}:{tf.squeeze(start)}-{tf.squeeze(end)}"
-        key = f"{tf.squeeze(contig).numpy().decode('utf-8')}_{tf.squeeze(start)}_{tf.squeeze(end)}_{npsv2_pb2.StructuralVariant.Type.Name(int(tf.squeeze(svtype)))}"
-
+        key = f"{tf.squeeze(contig).numpy().decode('utf-8')}_{tf.squeeze(start)}_{tf.squeeze(end)}_{npsv2_pb2.StructuralVariant.Type.Name(int(tf.squeeze(svtype)))}_{'_'.join(map(str, svlen.numpy()))}"
         sample = {
            "__key__": key,
             "region.txt": region,
             "image.npy.gz": features["image"].numpy(),
             "label.cls": int(real_label),
-            "sim.image.npy.gz": features["sim/images"].numpy(),
+            "sim.images.npy.gz": features["sim/images"].numpy(),
         }
         writer.write(sample)
 

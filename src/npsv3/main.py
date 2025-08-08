@@ -44,10 +44,7 @@ def main(cfg: DictConfig) -> None:
         from npsv3.util.sample import compute_read_stats
 
         # If no output file is specified, create a fixed file in the Hydra output directory
-        if OmegaConf.is_missing(cfg, "output"):
-            output = "stats.json"
-        else:
-            output = hydra.utils.to_absolute_path(cfg.output)
+        output = "stats.json" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         _make_paths_absolute(cfg, ["reference"])
 
@@ -64,10 +61,7 @@ def main(cfg: DictConfig) -> None:
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
-        if OmegaConf.is_missing(cfg, "output"):
-            output = os.getcwd()
-        else:
-            output = hydra.utils.to_absolute_path(cfg.output)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         vcf_to_examples = hydra.utils.get_method(cfg.pileup.example_fn)
         vcf_to_examples(
@@ -88,17 +82,18 @@ def main(cfg: DictConfig) -> None:
         torch.set_num_threads(cfg.threads)
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
-        if OmegaConf.is_missing(cfg, "output"):
-            output = os.getcwd()
-        else:
-            output = hydra.utils.to_absolute_path(cfg.output)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
         if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
             OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
-        train(cfg, output_dir=output, limit_train_batches=1.0)
-        # TODO: Create link to the best model to serve as the final model
+        checkpoint = train(cfg, output_dir=output)
+        # Create a symlink to the returned checkpoint, removing existing symlink if it exists
+        final_checkpoint = os.path.join(output, "model.ckpt")
+        if os.path.exists(final_checkpoint):
+            os.unlink(final_checkpoint)
+        os.symlink(checkpoint, final_checkpoint)
 
     elif cfg.command == "full_train":
         import torch
@@ -125,9 +120,9 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
         # print("\ncheckpoint path:",ckpt_path)
         OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
-        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}", merge=False)
+        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}-{train_loss}", merge=False)
         ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
-        # assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
         # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
 
     elif cfg.command == "assess_accuracy":
@@ -144,7 +139,7 @@ def main(cfg: DictConfig) -> None:
     elif cfg.command == "test":
         import torch
 
-        from npsv3.models.paired import test
+        from npsv3.models.runners import test
 
         torch.set_num_threads(cfg.threads)
 
@@ -161,7 +156,7 @@ def main(cfg: DictConfig) -> None:
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
-        OmegaConf.update(cfg, "data.prediction_urls", _to_webdataset_urls(cfg.data.prediction_urls), merge=False)
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
 
         predict(cfg)
 

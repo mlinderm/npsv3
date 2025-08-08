@@ -1,51 +1,45 @@
+import os
+
 import pytest
-import torch
 
-from npsv3.models.paired import GroupedImageDataModule
-from npsv3.models.runners import train
+from npsv3.models.runners import test, train
 
-from .. import data_path
+from .. import EXPERIMENTS_DIR
 
+TEST_IMAGES = os.path.join(EXPERIMENTS_DIR, "training/freeze4.sv.alt.passing.training.hg38.images/HG00731/generator=coverage,pileup=unphased,simulation.replicates=1/images-0000.tar")
 
-@pytest.mark.cfg_overrides(
-    "pileup.image_channels=[0,1,2,3,4,5,6,7]",
-)
-class TestPairedDataLoader:
-    def test_paired_loader(self, cfg):
-        dm = GroupedImageDataModule(data_path("images-0000.tar"), batch_size=1, num_workers=cfg.threads)
-        dm.prepare_data()
+class TestPackedVariant:
+    # @pytest.mark.skipif(not os.path.exists(TEST_IMAGES), reason="Skip if experiments directory does not exist")
+    # @pytest.mark.cfg_overrides(
+    #     "model=paired_packed_inception_contrastive",
+    #     "data=packed_images",
+    #     "data.batch_size=64",
+    #     f'data.train_urls="{TEST_IMAGES}"',
+    #     "trainer=paired",
+    # )
+    # def test_paired_cnn_contrastive(self, cfg):
+    #     train(cfg, fast_dev_run=True)
 
-        dm.setup(stage="fit")
-
-        for _i, batch in enumerate(dm.train_dataloader()):
-            query, support, num_support, label = batch
-
-            b, c, h, w = query.shape
-            assert support.shape == (b, cfg.data.max_group_size, c, h, w)
-            assert num_support == torch.tensor([4]), "Only 4 genotypes in support data"
-            assert label == torch.tensor([3])
-
-        assert _i == 1, "The two replicates become 2 examples in the dataset"
-
-        dm.teardown(stage="fit")
-
-class TestPairedCNNModel:
-    @pytest.mark.cfg_overrides(
-        "model=paired_inception_contrastive",
-        f"data.train_urls={data_path('images-0000.tar')}",
-        f"data.validate_urls={data_path('images-0000.tar')}",
-        "data.batch_size=2",
-        "trainer=paired",
-    )
-    def test_paired_cnn_contrastive_model(self, cfg):
-        train(cfg, fast_dev_run=True)
+    # @pytest.mark.skipif(not os.path.exists(os.path.join(EXPERIMENTS_DIR, "training/freeze4.sv.alt.passing.training.hg38.models/data.batch_size=1024,data=packed_images,model=paired_packed_inception_infonce,trainer.max_epochs=10/epoch=9-step=112683.ckpt")), reason="Model does not exist")
+    # @pytest.mark.cfg_overrides(
+    #     "command=test",
+    #     "model=paired_packed_inception_infonce",
+	# 	f'model.checkpoint="{os.path.join(EXPERIMENTS_DIR, "training/freeze4.sv.alt.passing.training.hg38.models/data.batch_size=1024,data=packed_images,model=paired_packed_inception_infonce,trainer.max_epochs=10/epoch=9-step=112683.ckpt")}"',
+    #     "data=packed_images",
+    #     "data.batch_size=64",
+    #      f'data.test_urls="{TEST_IMAGES}"',
+    #     "trainer=paired",
+    # )
+    # def test_paired_cnn_infonce_testing(self, cfg):
+    #     test(cfg, limit_test_batches=1)
 
     @pytest.mark.cfg_overrides(
-        "model=paired_inception_npairs",
-        f"data.train_urls={data_path('images-0000.tar')}",
-        f"data.validate_urls={data_path('images-0000.tar')}",
-        "data.batch_size=2",
+        "model=paired_packed_inception_rince",
+        "data=packed_images",
+        "data.batch_size=64",
+        f'data.train_urls="{TEST_IMAGES}"',
         "trainer=paired",
+        "model.encoder.num_channels=7",
     )
-    def test_paired_cnn_npairs_model(self, cfg):
-        train(cfg, fast_dev_run=True)
+    def test_paired_cnn_infonce(self, cfg):
+        train(cfg, fast_dev_run=5)

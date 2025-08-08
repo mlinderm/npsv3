@@ -5,6 +5,8 @@ import os
 
 from omegaconf import OmegaConf
 
+RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
+EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
 
 def _first_existing(*paths):
     for path in paths:
@@ -12,23 +14,18 @@ def _first_existing(*paths):
             return path
     return None
 
-B37_REF_FASTA = "/data/human_g1k_v37.fasta"
-for alt_ref in (
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta",
-    "/storage/mlinderman/projects/sv/npsv2-experiments/resources/human_g1k_v37.fasta",
-):
-    if not os.path.exists(B37_REF_FASTA) and os.path.exists(alt_ref):
-        B37_REF_FASTA = alt_ref
-        break
 
-HG38_REF_FASTA = "/data/Homo_sapiens_assembly38.fasta"
-for alt_ref in (
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta",
+B37_REF_FASTA = _first_existing(
+    "/data/human_g1k_v37.fasta",
+    os.path.join(RESOURCES_DIR, "human_g1k_v37.fasta"),
+    "/storage/mlinderman/projects/sv/npsv2-experiments/resources/human_g1k_v37.fasta",
+)
+
+HG38_REF_FASTA = _first_existing(
+    "/data/Homo_sapiens_assembly38.fasta",
+    os.path.join(RESOURCES_DIR, "Homo_sapiens_assembly38.fasta"),
     "/storage/mlinderman/projects/sv/npsv2-experiments/resources/Homo_sapiens_assembly38.fasta",
-):
-    if not os.path.exists(HG38_REF_FASTA) and os.path.exists(alt_ref):
-        HG38_REF_FASTA = alt_ref
-        break
+)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 RESULT_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -43,17 +40,18 @@ HG00731_SV_VCF = _first_existing(
     "/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00731.freeze4.sv.alt.passing.training.hg38.vcf.gz",
 )
 
-SYNDIP_VCF = _first_existing(
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/syndip.genotyped.passing.b37.vcf.gz"
-)
+SYNDIP_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.genotyped.passing.b37.vcf.gz"))
+SYNDIP_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.sv.genotyped.passing.b37.vcf.gz"))
+SYNDIP_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/CHM1_CHM13_2.b37.bam"))
 
-SYNDIP_SV_VCF = _first_existing(
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/syndip.sv.genotyped.passing.b37.vcf.gz"
-)
+HG002_DIPCALL_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.hg38.vcf.gz"))
+HG002_DIPCALL_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"))
+HG002_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG002-ready.hg38.bam"))
 
-SYNDIP_BAM = _first_existing(
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/CHM1_CHM13_2.b37.bam"
-)
+NA12878_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.alt.passing.hg38.vcf.gz"))
+NA12878_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.sv.alt.passing.hg38.vcf.gz"))
+NA12878_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/NA12878.final.cram"))
+
 
 def data_path(path: str) -> str:
     return os.path.join(DATA_DIR, path)
@@ -62,6 +60,7 @@ def data_path(path: str) -> str:
 def result_path(path: str) -> str:
     os.makedirs(RESULT_DIR, exist_ok=True)
     return os.path.join(RESULT_DIR, path)
+
 
 # Match resolvers available in main.py
 OmegaConf.register_new_resolver("len", lambda arg: len(arg))
