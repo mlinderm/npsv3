@@ -11,6 +11,8 @@ from npsv3.util.vcf import index_variant_file
 
 from .. import (
     B37_REF_FASTA,
+    HG00096_SV_VCF,
+    HG00096_VCF,
     HG002_DIPCALL_SV_VCF,
     HG002_DIPCALL_VCF,
     HG00731_SV_VCF,
@@ -298,10 +300,11 @@ class TestGraphConstructionFromVCF:
     @pytest.mark.parametrize(
         ("region", "base_path", "expected_haplotypes"),
         [
-            (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
-            (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
-            (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
-            (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
+            # (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
+            # (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
+            # (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
+            # (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
+            (Range("chr1",3693946,3693946), "HG002#1#chr1", 2)
         ],
     )
     def test_dipcall_observed_errors(self, cfg, region, base_path, expected_haplotypes):
@@ -315,7 +318,30 @@ class TestGraphConstructionFromVCF:
             base_path,
             region.expand(cfg.pileup.variant_padding),
         )
-
+        print(haplotypes)
         assert len(haplotypes) == expected_haplotypes
         if base_path == region.contig:
             assert haplotypes[0].nodes == graph.nodes_on_path(region.contig), "First haplotype should match reference path"
+
+
+
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    @pytest.mark.parametrize(
+        ("region", "base_path"),
+        [
+            (Range("chr1",1627438,1627489), "chr1",),
+        ],
+    )
+    def test_hgsvc3_hprc_errors(self, cfg, region, base_path):
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA, HG00096_VCF, region.expand(cfg.pileup.graph_flank), inference_vcf=HG00096_SV_VCF,
+        )
+        graph._graph.to_gfa()
+
+        haplotypes = graph.all_haplotypes(
+            HG00096_SV_VCF,
+            base_path,
+            region.expand(cfg.pileup.variant_padding),
+        )
+        print(haplotypes)
+

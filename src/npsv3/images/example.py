@@ -46,7 +46,9 @@ def example_to_image(
         replicates = min(replicates, max_replicates)
 
         image = Image.new(real_image.mode, (width + (genotypes - 1) * (width + margin), height + replicates * (height + margin)))
-        image.paste(real_image, (width + margin, 0))
+        # Paste the real image overlapping the correct genotype
+        label = example.get("label", 0)
+        image.paste(real_image, (label * width + max(label - 1, 0) * margin, 0))
 
         synth_tensor = example["sim.images"]
         for gt in range(genotypes):

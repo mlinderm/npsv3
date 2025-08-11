@@ -6,6 +6,14 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models
 
+from npsv3.models.metrics import (
+    GenotypingConcordance,
+    GenotypingNonRefConcordance,
+    GenotypingNonRefF1,
+    GenotypingNonRefPrecision,
+    GenotypingNonRefRecall,
+)
+
 
 class InceptionEncoder(nn.Module):
     def __init__(self, num_channels=8, projection_size=512):
@@ -13,7 +21,7 @@ class InceptionEncoder(nn.Module):
         self.num_channels = num_channels
         self.projection_size = projection_size
 
-        self.inception = models.inception_v3(weights=None, aux_logits=False)
+        self.inception = models.inception_v3(init_weights=True, aux_logits=False)
 
         # Replace the first layer for our number of channels
         self.inception.Conv2d_1a_3x3.conv = nn.Conv2d(num_channels, 32, kernel_size=(3, 3), stride=(2, 2), bias=False)
@@ -139,32 +147,6 @@ class MaximizingPredictor(nn.Module):
         return torch.argmax(metric, dim=1)
 
 
-class GenotypingAccuracy(torchmetrics.Metric):
-    """
-    Compute genotyping accuracy(ies), allowing for multiple correct support images per variant.
-
-    Predicted genotype labeled as 1 is considered correct, while incorrect predictions of 0 do not contribute to the calculated accuracy.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
-        """Update accuracy measures with |variants|, dense integer prediction tensor and |variants|,|support| nested one-hot target tensor"""
-        padded_target = torch.nested.to_padded_tensor(target, 0)
-        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
-
-        # TODO: Also collect non-reference concordance (need to know which are reference genotypes)
-        # Treat "first-rank" and "second-rank" positives (same genotype, different phase) as correct
-        self.correct += torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
-        self.total += target.shape[0]
-
-    def compute(self) -> torch.Tensor:
-        return self.correct.float() / self.total
-
-
 class PackedVariant(L.LightningModule):
     ignored_hyperparameters = ("encoder", "metric", "loss", "predictor")
 
@@ -185,13 +167,22 @@ class PackedVariant(L.LightningModule):
         self.loss = loss
         self.predictor = predictor
 
-        self.train_acc = GenotypingAccuracy()
-        self.val_acc = GenotypingAccuracy()
-        self.test_acc = GenotypingAccuracy()
+        self.train_metrics = torchmetrics.MetricCollection({
+            "concordance": GenotypingConcordance(),
+            "nonrefconcordance": GenotypingNonRefConcordance(),
+        }, prefix="train_")
+        self.val_metrics = self.train_metrics.clone(prefix="val_")
+        self.test_metrics = torchmetrics.MetricCollection({
+            "concordance": GenotypingConcordance(),
+            "nonrefconcordance": GenotypingNonRefConcordance(),
+            "nonrefprecision": GenotypingNonRefPrecision(),
+            "nonrefrecall": GenotypingNonRefRecall(),
+            "nonreff1": GenotypingNonRefF1(),
+        }, prefix="test_")
 
     def on_train_start(self) -> None:
         # Reset validation metrics at the start of training to avoid effects of sanity batches
-        self.val_acc.reset()
+        self.val_metrics.reset()
 
     def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
         """Compute (metric, preds, labels, *metadata) as nested tensors from a batch of packed images, labels, and offsets."""
@@ -253,25 +244,29 @@ class PackedVariant(L.LightningModule):
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label, *_ = self._model_step(batch, batch_idx)
-        num_variants = label.size(0)
+
         self.log("train_loss", loss, prog_bar=True)
-        self.train_acc(preds, label)
-        self.log("train_acc", self.train_acc, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        batch_value = self.train_metrics(preds, label)
+        num_variants = label.size(0)
+        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label, batch_size = self._model_step(batch, batch_idx)
-        num_variants = label.size(0)
+
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        self.val_acc(preds, label)
-        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        batch_value = self.val_metrics(preds, label)
+        num_variants = label.size(0)
+        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label, batch_size = self._model_step(batch, batch_idx)
-        num_variants = label.size(0)
+
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        self.test_acc(preds, label)
-        self.log("test_acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        batch_value = self.test_metrics(preds, label)
+        num_variants = label.size(0)
+        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         return self(batch)

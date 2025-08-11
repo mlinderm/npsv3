@@ -19,13 +19,17 @@ from npsv3.util.range import Range
 from .. import (
     B37_REF_FASTA,
     EXPERIMENTS_DIR,
+    HG002_B37_BAM,
     HG002_DIPCALL_SV_VCF,
     HG002_DIPCALL_VCF,
+    HG002_GIAB_SV_VCF,
+    HG002_GIAB_VCF,
     HG002_HG38_BAM,
     HG38_REF_FASTA,
     NA12878_BAM,
     NA12878_SV_VCF,
     NA12878_VCF,
+    RESULT_DIR,
     SYNDIP_BAM,
     SYNDIP_SV_VCF,
     SYNDIP_VCF,
@@ -76,7 +80,7 @@ class TestRegionToExample:
 
 
 @pytest.mark.skipif(
-    not all((B37_REF_FASTA, bwa_index_loaded(B37_REF_FASTA))), reason="B37 reference in SHM required"
+    not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
 )
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
@@ -168,6 +172,57 @@ class TestB37GraphToExample:
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
 
+    @pytest.mark.skipif(
+        not HG002_B37_BAM or not HG002_GIAB_VCF or not HG002_GIAB_SV_VCF, reason="HG002 dataset required"
+    )
+    @pytest.mark.parametrize(
+        "region",
+        [
+            Range("1",16490549,16490549) # A hom. ref. INS that can be a FP with incomplete GATK-produced background (missing 10bp DEL, SNV)
+        ],
+    )
+    def test_hg002_images(self, cfg, hg002_sample, region):
+        local_conf = OmegaConf.from_dotlist([
+            #f"simulation.save_sim_bam_dir={RESULT_DIR}",
+        ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG002_B37_BAM,
+            hg002_sample,
+            HG002_GIAB_VCF,
+            HG002_GIAB_SV_VCF,
+        )
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    @pytest.mark.skipif(not HG002_B37_BAM, reason="HG002 dataset required")
+    def test_ins_background_images(self, cfg, hg002_sample):
+        local_conf = OmegaConf.from_dotlist([
+            #f"simulation.save_sim_bam_dir={RESULT_DIR}",
+        ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        region = Range("1", 16490549, 16490549)
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG002_B37_BAM,
+            hg002_sample,
+            data_path("1_16490549_16490549.vcf.gz"),
+            data_path("1_16490549_16490549.sv.vcf.gz"),
+        )
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+
+
 @pytest.mark.skipif(
     not all((HG38_REF_FASTA, bwa_index_loaded(HG38_REF_FASTA))), reason="HG38 reference in SHM required"
 )
@@ -210,9 +265,22 @@ class TestHG38GraphToExample:
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
 
-    def test_hg002_dipcall_images(self, cfg, hg002_hg38_sample):
-        region = Range.parse_literal("chr11:24919131-24919131")
-        local_conf = OmegaConf.from_dotlist([ ])
+
+    @pytest.mark.skipif(
+        not HG002_HG38_BAM or not HG002_DIPCALL_VCF or not HG002_DIPCALL_SV_VCF, reason="HG002 dataset required"
+    )
+    @pytest.mark.parametrize(
+        "region",
+        [
+            #Range("chr11",24919131,24919131),
+            Range("chr1",3693946,3693946), # FP INS (called as 1/1 instead of 0/1)
+        ],
+    )
+    def test_hg002_dipcall_images(self, cfg, hg002_hg38_sample, region):
+        local_conf = OmegaConf.from_dotlist([
+            f"simulation.save_sim_bam_dir={RESULT_DIR}",
+            f"pileup.variant_padding=256",
+        ])
         cfg = OmegaConf.merge(cfg, local_conf)
 
         example = make_graph_example_from_region(
@@ -225,7 +293,7 @@ class TestHG38GraphToExample:
         )
         #png_path = str(tmp_path / "test.png")
         png_path = result_path("test.png")
-        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=False, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
 
 

@@ -563,6 +563,25 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
         # collapse we only remove right padding when both (ref, alt) alleles have length > 1.
 
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    def test_duplicate_variants(self, tmp_path):
+        region = Range.parse_literal("chr1:1627438-1627489")
+        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	1627438	.	CCCTGGGGTGAGGCCTGGGAGGGGCCCGGCCGGCGGGGCTGAGCCTGTGCGT	C	.	.	SVTYPE=DEL;SVLEN=-51	GT	0|0
+chr1	1627438	.	CCCTGGGGTGAGGCCTGGGAGGGGCCCGGCCGGCGGGGCTGAGCCTGTGCGT	C	.	.	SVTYPE=DEL;SVLEN=-51	GT	0|1
+"""
+        )  # fmt: skip
+        # construct.to_gfa(HG38_REF_FASTA)
+
+        # Preparation with vcflib (bub, wave and norm) seems to lead to duplicate variants with possibly inconsistent genotypes
+        # due to shifting during normalization.
+
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_inconsistent_haplotypes(self, caplog, tmp_path):
         region = Range.parse_literal("chr1:6012332-6012402")
         construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2

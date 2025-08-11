@@ -128,7 +128,7 @@ class ImageGenerator:
         margin=5,
     ):
         # TODO: Better combine all the channels into a single image, perhaps ALIGNED, PAIRED_CHANNEL, ALLELE (with mapq as alpha)...
-        combined_image = Image.fromarray(image_tensor[:, :, select_channels], mode="RGB")
+        combined_image = Image.fromarray(image_tensor[:, :, select_channels])
 
         if render_channels:
             height, width, num_channels = image_tensor.shape
@@ -136,7 +136,7 @@ class ImageGenerator:
             image.paste(combined_image, ((image.width - width) // 2, 0))
 
             for i in range(num_channels):
-                channel_image = Image.fromarray(image_tensor[:, :, [i] * 3], mode=combined_image.mode)
+                channel_image = Image.fromarray(image_tensor[:, :, [i] * 3])
                 coord = (i * (width + margin), height + margin)
                 image.paste(channel_image, coord)
 

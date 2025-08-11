@@ -100,10 +100,15 @@ def main(cfg: DictConfig) -> None:
 
         torch.set_num_threads(cfg.threads)
 
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.test_urls", _to_webdataset_urls(cfg.data.test_urls), merge=False)
 
-        test(cfg)
+        metrics = test(cfg)
+        with open(os.path.join(output, "metrics.json"), "w") as file:
+            json.dump(metrics, file, indent=2)
 
     elif cfg.command == "predict":
         import torch

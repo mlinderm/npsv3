@@ -63,4 +63,4 @@ def test(cfg, **kw_args):
     )
 
     trainer = hydra.utils.instantiate(cfg.trainer, **kw_args)
-    trainer.test(model=model, datamodule=dm)
+    return trainer.test(model=model, datamodule=dm)

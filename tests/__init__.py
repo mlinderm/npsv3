@@ -44,6 +44,10 @@ SYNDIP_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.genotyped.passi
 SYNDIP_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "syndip.sv.genotyped.passing.b37.vcf.gz"))
 SYNDIP_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/CHM1_CHM13_2.b37.bam"))
 
+HG002_GIAB_VCF = _first_existing(os.path.join(RESOURCES_DIR, "HG002.ashkenazi-gatk-haplotype-annotated.phased.vcf.gz"))
+HG002_GIAB_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "HG002_SVs_Tier1_v0.6.genotyped.passing.tier1and2.b37.vcf.gz"))
+HG002_B37_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG002-ready.b37.bam"))
+
 HG002_DIPCALL_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.hg38.vcf.gz"))
 HG002_DIPCALL_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.sv.hg38.vcf.gz"))
 HG002_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG002-ready.hg38.bam"))
@@ -51,6 +55,9 @@ HG002_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG002-rea
 NA12878_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.alt.passing.hg38.vcf.gz"))
 NA12878_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.sv.alt.passing.hg38.vcf.gz"))
 NA12878_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/NA12878.final.cram"))
+
+HG00096_VCF = _first_existing("/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00096.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38-vcfbub.a100k.wave.norm.passing.training.hg38.vcf.gz")
+HG00096_SV_VCF = _first_existing("/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00096.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38-vcfbub.a100k.wave.norm.sv.passing.training.hg38.vcf.gz")
 
 
 def data_path(path: str) -> str:
