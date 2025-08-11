@@ -39,6 +39,7 @@ OmegaConf.register_new_resolver("len", lambda arg: len(arg))
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
+    # print("\ncommand:",cfg.command)
     if cfg.command == "preprocess":
         from npsv3.util.sample import compute_read_stats
 
@@ -74,6 +75,7 @@ def main(cfg: DictConfig) -> None:
         )
     elif cfg.command == "train":
         import torch
+        torch.set_float32_matmul_precision("high")
 
         from npsv3.models.runners import train
 
@@ -92,6 +94,47 @@ def main(cfg: DictConfig) -> None:
         if os.path.exists(final_checkpoint):
             os.unlink(final_checkpoint)
         os.symlink(checkpoint, final_checkpoint)
+
+    elif cfg.command == "full_train":
+        import torch
+        torch.set_float32_matmul_precision("high")
+
+        from npsv3.models.runners import train, assess_accuracy
+
+        torch.set_num_threads(cfg.threads)
+
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        if OmegaConf.is_missing(cfg, "output"):
+            output = os.getcwd()
+        else:
+            output = hydra.utils.to_absolute_path(cfg.output)
+
+        OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
+        if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
+            OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
+
+        pretraining_model = cfg.model
+        # print(cfg.data.train_urls)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
+        OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
+        # print("\ncheckpoint path:",ckpt_path)
+        OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
+        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}-{train_loss}", merge=False)
+        ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
+        # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
+
+    elif cfg.command == "assess_accuracy":
+        # print("\nassessing accuracy")
+        import torch
+        torch.set_float32_matmul_precision("high")
+        from npsv3.models.runners import assess_accuracy
+
+        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
+
+        ckpt_path = cfg.pretrained.path
+        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
 
     elif cfg.command == "test":
         import torch

@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/cachang/npsv3/cmake_install.cmake",
+		"/home/cachang/npsv3/lib/pybind11/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

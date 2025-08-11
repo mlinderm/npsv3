@@ -6,6 +6,8 @@ defaults:
   - data: grouped_images
   - trainer: paired
   - command: images
+  - pretrained: MiM
+  - checkpoint: base
   - _self_
   - override hydra/help: custom_help
 

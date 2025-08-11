@@ -42,7 +42,8 @@ dependencies = [
   "torchvision",
   "lightning",
   "torchmetrics",
-  "tensorboard",
+  "transformers",
+  "tensorboard"
 ]
 
 [project.urls]

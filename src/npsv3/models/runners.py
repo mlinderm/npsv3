@@ -10,9 +10,32 @@ def train(cfg, output_dir=None, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = hydra.utils.instantiate(cfg.model)
 
-    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(dirpath=output_dir)
+    if cfg.model.checkpoint is None:
+        model = hydra.utils.instantiate(cfg.model)
+    else:
+        # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
+        model_cls = hydra.utils.get_class(cfg.model._target_)
+
+        model_args = {}
+        for key, value in cfg.model.items():
+            if key in model_cls.ignored_hyperparameters and "_target_" in value:
+                model_args[key] = hydra.utils.instantiate(value)
+
+        model = model_cls.load_from_checkpoint(
+            cfg.model.checkpoint,
+            strict=False,
+            **model_args,
+        )
+
+    # Make model compilation optional
+    #model = torch.compile(model)
+
+    # Create callback for saving checkpoints in the specified directory
+    checkpoint_callback = hydra.utils.instantiate(
+        cfg.checkpoint_callback,
+        dirpath=output_dir,
+    )
 
     if cfg.data.validate_urls:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
@@ -26,12 +49,11 @@ def train(cfg, output_dir=None, **kw_args):
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,
+        # Decrease TQDM progress refresh rate to mitigate performance issues
         callbacks=[checkpoint_callback, L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
-        #profiler=L.pytorch.profilers.PyTorchProfiler(dirpath="/storage/mlinderman/tmp/profiler", filename="profile"),
-        #profiler=L.pytorch.profilers.AdvancedProfiler(dirpath="/storage/mlinderman/tmp/profiler", dump_stats=True),
         **kw_args,
     )
 
@@ -40,6 +62,7 @@ def train(cfg, output_dir=None, **kw_args):
     trainer.fit(model=model, datamodule=dm)
 
     return checkpoint_callback.best_model_path
+
 
 def test(cfg, **kw_args):
     # Reduce precision to enable use of GPU tensor cores

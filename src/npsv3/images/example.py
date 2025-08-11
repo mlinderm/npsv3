@@ -471,6 +471,7 @@ def vcf_to_variant_examples(
         pool = ray.util.ActorPool(actors)
 
         gen = pool.map_unordered(lambda actor, region: actor.from_region.remote(region), regions)
+
         for _ in tqdm(gen, total=len(regions), disable=not progress_bar):
             pass
 

@@ -1,0 +1,1 @@
+path: "training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=classifier,pileup=unphased_variant,trainer.max_epochs=50/epoch=0-step=10184.ckpt"

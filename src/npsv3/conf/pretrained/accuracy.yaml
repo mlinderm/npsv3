@@ -1,0 +1,1 @@
+path: "/storage/mlinderman/projects/sv/npsv3-experiments/training/freeze4.sv.alt.passing.training.hg38.models/data._target_=npsv3.models.transformer.RealImageDataModule,data.batch_size=256,data.mask_scheme=[random,50],data.patch_size=16,data=real_image,model=MiM,pileup=unphased_variant,trainer.max_epochs=20/full_train-step=211518-train_loss=0.21255327761173248.ckpt"
