@@ -98,7 +98,7 @@ class InfoNCE(nn.Module):
 
     Inputs:
         metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
-        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes.
 
     Returns:
         tuple[torch.Tensor]: Scalar tensor representing the average InfoNCE loss across variant groups and the number of variants in batch
@@ -129,6 +129,65 @@ class InfoNCE(nn.Module):
             loss += variant_loss
 
         return -loss / metric.size(0), metric.size(0)  # Average loss across all variants
+
+    
+class RINCE(nn.Module):
+    """
+    Implements the Ranking Info Noise Contrastive Estimation (RINCE) loss for contrastive learning using precomputed similarity scores
+
+    Args:
+        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+
+    Inputs:
+        metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes
+        
+
+    Returns:
+        torch.Tensor: Scalar tensor representing the average RINSE loss across variant groups.
+    """
+
+    def __init__(self, temperature= [0.1, 0.225 , 0.5], max_rank=3, ignore=0.0):
+        super().__init__()
+        self.temperature = torch.tensor(temperature, dtype=torch.float32)
+        self.max_rank = max_rank
+        self.ignore = ignore  # Value to ignore in the target tensor, e.g., for padding
+
+    def forward(self, metric: torch.Tensor, target: torch.Tensor):
+        loss = torch.tensor(0.0, dtype=metric.dtype, device=metric.device)
+
+        for variant_metric, variant_target in zip(metric.unbind(), target.unbind(), strict=True):
+            negative_mask = variant_target == 0
+            hard_negatives = variant_metric[negative_mask]
+            variant_loss = 0 
+            for rank in range(1, self.max_rank + 1): 
+                #Rank 1 positives
+                
+                R1mask = variant_target == rank
+                positivesR1 = variant_metric[R1mask]
+
+                if rank > 1:
+                    positivesR1 = positivesR1[positivesR1 >= self.ignore] #Threshold for rank 1 positives
+
+                #Skip empty ranks
+                if positivesR1.numel() == 0:
+                    continue
+
+                R2mask = variant_target > rank
+                positivesR2 = variant_metric[R2mask]
+                positivesR2 = positivesR2[positivesR2 >= self.ignore] #Threshold for rank 2 positives
+
+                numerator = torch.sum(torch.exp(positivesR1/self.temperature[rank-1]))
+                posR2 = torch.sum(torch.exp(positivesR2/self.temperature[rank-1]))
+
+                denominator = numerator + posR2 + torch.sum(torch.exp(hard_negatives/self.temperature[rank-1]))
+
+                variant_loss += -torch.log(numerator/denominator + 1e-8)
+                #ranks[rank-1] += -torch.log(numerator/denominator + 1e-8)
+            loss += variant_loss
+            #ranks = ranks/metric.size(0)
+            #loss = ranks.mean()
+        return loss / metric.size(0), metric.size(0) # Average loss across all variants
 
 
 class MinimizingPredictor(nn.Module):
@@ -185,7 +244,7 @@ class PackedVariant(L.LightningModule):
         self.val_metrics.reset()
 
     def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
-        """Compute (metric, preds, labels, *metadata) as nested tensors from a batch of packed images, labels, and offsets."""
+        """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
         images, labels, offsets, *metadata = batch
         image_embeddings = self.encoder(images)
 
@@ -290,5 +349,18 @@ def predict(cfg, **kw_args):
     trainer = L.Trainer(limit_predict_batches=2)
     for prediction in trainer.predict(model, dm):
         metrics, preds, labels_nt, *metadata = prediction
-        print(metrics.offsets(), metrics.values(), preds, labels_nt.values(), *metadata, sep="\n")
+        print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
+              "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
+        padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
+        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
+ 
+        correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
+        total = labels_nt.shape[0]
+        
+        targ = padded_target > 0
+        indices = torch.arange(targ.size(0))
+        non_reference_concordance = torch.sum(targ[indices, preds])
+
+        print("\nAccuracy", correct.float() / total, 
+                "\nnon-reference concordance", non_reference_concordance.float() / total)
 
