@@ -79,6 +79,7 @@ def main(cfg: DictConfig) -> None:
 
         torch.set_num_threads(cfg.threads)
 
+        _make_paths_absolute(cfg, ["model.checkpoint"])
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 

@@ -128,7 +128,10 @@ class RINCE(nn.Module):
     Implements the Ranking Info Noise Contrastive Estimation (RINCE) loss for contrastive learning using precomputed similarity scores
 
     Args:
-        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+        temperature (list of floats, optional): Scaling factor applied to similarity scores before exponentiation. Default is [0.1, 0.15 , 0.25],
+        max_rank (int, optional): maximum rank to consider in the loss. Defaults to 3.
+        ignore (float, optional): threshold to ignore low-confidence positives. Defauts to -1.0 (No threshold).
+
 
     Inputs:
         metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
@@ -136,10 +139,10 @@ class RINCE(nn.Module):
         
 
     Returns:
-        torch.Tensor: Scalar tensor representing the average RINSE loss across variant groups.
+        torch.Tensor: Scalar tensor representing the average RINSE loss across variants
     """
 
-    def __init__(self, temperature= [0.1, 0.225 , 0.5], max_rank=3, ignore=0.0):
+    def __init__(self, temperature= [0.1, 0.15 , 0.25], max_rank=3, ignore=-1.0):
         super().__init__()
         self.temperature = torch.tensor(temperature, dtype=torch.float32)
         self.max_rank = max_rank
@@ -153,8 +156,7 @@ class RINCE(nn.Module):
             hard_negatives = variant_metric[negative_mask]
             variant_loss = 0 
             for rank in range(1, self.max_rank + 1): 
-                #Rank 1 positives
-                
+                #Current rank  positives
                 R1mask = variant_target == rank
                 positivesR1 = variant_metric[R1mask]
 
@@ -164,10 +166,11 @@ class RINCE(nn.Module):
                 #Skip empty ranks
                 if positivesR1.numel() == 0:
                     continue
-
+                #rank > current rank positives for denominator
                 R2mask = variant_target > rank
                 positivesR2 = variant_metric[R2mask]
-                positivesR2 = positivesR2[positivesR2 >= self.ignore] #Threshold for rank 2 positives
+                if rank > 1:
+                    positivesR2 = positivesR2[positivesR2 >= self.ignore] #Threshold for rank 2 and 3 positives
 
                 numerator = torch.sum(torch.exp(positivesR1/self.temperature[rank-1]))
                 posR2 = torch.sum(torch.exp(positivesR2/self.temperature[rank-1]))
@@ -175,10 +178,7 @@ class RINCE(nn.Module):
                 denominator = numerator + posR2 + torch.sum(torch.exp(hard_negatives/self.temperature[rank-1]))
 
                 variant_loss += -torch.log(numerator/denominator + 1e-8)
-                #ranks[rank-1] += -torch.log(numerator/denominator + 1e-8)
             loss += variant_loss
-            #ranks = ranks/metric.size(0)
-            #loss = ranks.mean()
         return loss / metric.size(0), metric.size(0) # Average loss across all variants
 
 
@@ -358,21 +358,37 @@ def predict(cfg, **kw_args):
         loss=hydra.utils.instantiate(cfg.model.loss),
         predictor=hydra.utils.instantiate(cfg.model.predictor),
     )
-    trainer = L.Trainer(limit_predict_batches=2)
+    trainer = L.Trainer(limit_predict_batches=1)
+    
     for prediction in trainer.predict(model, dm):
         metrics, preds, labels_nt, *metadata = prediction
-        print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
-              "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
+        # print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
+        #        "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
+
+        #Neatly print results
+        offsets = metrics.offsets().tolist()
+        labels = labels_nt.values().tolist()
+        predictions = preds.tolist()
+        meta = metadata[0]  #Assuming only one metadata tensor
+        metric = metrics.values().tolist()
+
+        print("\n[Metdadata, Prediction idx, Labels, Metrics]\n")
+        for i in range(1, len(offsets)):
+            print("[", meta[i-1],"|", predictions[i-1],"|", labels[offsets[i-1]:offsets[i]], "|", metric[offsets[i-1]:offsets[i]], "]")
+        
+        
+        #Accuracy
         padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
         onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
  
         correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
         total = labels_nt.shape[0]
-        
+
+        #Non-reference Concordance
         targ = padded_target > 0
         indices = torch.arange(targ.size(0))
         non_reference_concordance = torch.sum(targ[indices, preds])
 
         print("\nAccuracy", correct.float() / total, 
-                "\nnon-reference concordance", non_reference_concordance.float() / total)
-
+            "\nnon-reference concordance", non_reference_concordance.float() / total)
+        
