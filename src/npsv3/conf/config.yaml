@@ -2,12 +2,11 @@ defaults:
   - pileup: unphased
   - simulation
   - generator: coverage
-  - model: paired_inception_contrastive
-  - data: grouped_images
+  - model: paired_packed_inception_contrastive
+  - data: packed_images
   - trainer: paired
   - command: images
-  - pretrained: MiM
-  - checkpoint: base
+  - checkpoint_callback: base
   - _self_
   - override hydra/help: custom_help
 
@@ -51,3 +50,4 @@ cache_dir: null
 
 timeout: 1800
 
+torch_compile: false

@@ -1,20 +1,234 @@
 import io
 import os
+import random
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Generator, Iterable, Optional, Tuple, Union
 
 import hydra
-import random
 import lightning as L
-import torch
-import time
-import webdataset as wds
-from dataclasses import dataclass
-from typing import Union, Optional, Tuple
-from PIL import Image
 import numpy as np
+import timm
+import torch
+import webdataset as wds
+from PIL import Image
 from torch import nn
 from torchvision.transforms import v2 as transforms
-from transformers import ViTConfig, ViTPreTrainedModel, ViTModel, ViTForImageClassification
+from transformers import ViTConfig, ViTForImageClassification, ViTModel, ViTPreTrainedModel
+
 from npsv3.models.dvae import Denormalize
+from npsv3.models.loaders import ntuple
+
+# https://github.com/huggingface/pytorch-image-models/issues/1477
+
+class Identity(nn.Module):
+    """A more flexible indentity module that allows keyword arguments in forward"""
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        super().__init__()
+
+    def forward(self, input: torch.Tensor, **kwargs) -> torch.Tensor:  # noqa: ARG002
+        return input
+
+
+class MaskableVisionTransformer(timm.models.VisionTransformer):
+    def __init__(self, *args, use_mask_token: bool = False, **kwargs):
+        """Extension to timm VisionTransformer to support masked image modeling.
+
+        Supports all of timm's VisionTransformer arguments.
+
+        Args:
+            use_mask_token (bool, optional): Implement masking. Defaults to False.
+        """
+        super().__init__(*args, **kwargs)
+        assert self.global_pool in ('token',)
+
+        self.num_channels = kwargs.get("in_chans", 3)
+
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim)) if use_mask_token else None
+
+        # Apply mask (adapted from https://github.com/huggingface/transformers/blob/68a13cd4a65d0624a5b87827c6e0709a882613f0/src/transformers/models/vit/modeling_vit.py#L109C8-L114C72)
+        def _apply_mask(embeddings: torch.Tensor, *, bool_masked_pos: torch.Tensor) -> torch.Tensor:
+            batch_size, seq_length, *_ = embeddings.shape
+            mask_tokens = self.mask_token.expand(batch_size, seq_length, -1)
+            # Replace the masked visual tokens by mask_tokens
+            mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
+            return embeddings * (1.0 - mask) + mask_tokens * mask
+        self.apply_mask = _apply_mask if use_mask_token else Identity()
+
+
+    @torch.jit.ignore
+    def no_weight_decay(self) -> set[str]:
+        """Set of parameters that should not use weight decay."""
+        no_decay = super().no_weight_decay()
+        if self.mask_token is not None:
+            no_decay.add("mask_token")
+        return no_decay
+
+    def forward_features(self, pixel_values: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, bool_masked_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass through feature layers (embeddings, transformer blocks, post-transformer norm)"""
+        # This is a copy of timm's forward_features with the addition of the mask application
+        embeddings = self.patch_embed(pixel_values)
+        embeddings = self.apply_mask(embeddings, bool_masked_pos=bool_masked_pos)
+        embeddings = self._pos_embed(embeddings)
+        embeddings = self.patch_drop(embeddings)
+
+        output = self.norm_pre(embeddings)
+        if attn_mask is not None:
+            # If attn mask provided, we need to apply blocks one by one
+            for blk in self.blocks:
+                output = blk(output, attn_mask=attn_mask)
+        elif self.grad_checkpointing and not torch.jit.is_scripting():
+            output = timm.models._manipulate.checkpoint_seq(self.blocks, output)
+        else:
+            output = self.blocks(output)
+        return self.norm(output)
+
+class MaskedL1Loss(nn.Module):
+     def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+     def forward(self, pixel_values: torch.Tensor, reconstructed_pixel_values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        reconstruction_loss = nn.functional.l1_loss(pixel_values, reconstructed_pixel_values, reduction="none")
+        # Normalize by the number of masked pixels and the number of channels
+        return (reconstruction_loss * mask).sum() / (mask.sum() + self.eps) / pixel_values.size(1)
+
+# We tried to implement an equivalent to timm's Cosine scheduler using combinations of Pytorch LR schedulers but could not implement
+# the decay feature due to limitations in the ChainedScheduler (which doesn't pass the step through to the underlying schedulers). W
+# would likely need to implement a custom scheduler to achieve the same functionality.
+
+# Adapted from: https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/vit/modeling_vit.py#L610
+class MaskedImageModeling(L.LightningModule):
+    ignored_hyperparameters = ("encoder", "loss")
+
+    def __init__(self, encoder: nn.Module, loss: nn.Module, optimizer: Callable[...,torch.optim.Optimizer], scheduler: Callable):
+        super().__init__()
+
+        self.image_size = encoder.patch_embed.img_size
+        self.num_channels = encoder.num_channels
+        self.patch_size = encoder.patch_embed.patch_size
+        self.grid_size = encoder.patch_embed.grid_size
+
+        # Limitation introduced by PixelShuffle in the decoder
+        assert self.patch_size[0] == self.patch_size[1], "Currently only square patches supported"
+        self.save_hyperparameters(ignore=type(self).ignored_hyperparameters)
+
+        self.encoder = encoder
+        self.loss = loss
+        self.decoder = nn.Sequential(
+            nn.Conv2d(
+                in_channels=encoder.embed_dim,
+                out_channels=self.patch_size[0] * self.patch_size[1] * self.num_channels,
+                kernel_size=1,
+            ),
+            nn.PixelShuffle(self.patch_size[0]),
+        )
+
+    @torch.jit.ignore
+    def no_weight_decay(self) -> set[str]:
+        """Set of parameters that should not use weight decay."""
+        # This is used by timm's optimizers to determine which parameters should not use weight decay
+        return { f"encoder.{name}" for name in self.encoder.no_weight_decay() }
+
+    def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+        pixel_values, bool_masked_pos = batch
+        sequence_output = self.encoder.forward_features(pixel_values, bool_masked_pos=bool_masked_pos)
+
+        # Reshape to BCHW
+        sequence_output = sequence_output[:, self.encoder.num_prefix_tokens:]
+        b, _s, c = sequence_output.shape
+        sequence_output = sequence_output.permute(0, 2, 1).reshape(b, c, self.grid_size[0], self.grid_size[1])
+
+        # Reconstruct pixel values
+        return self.decoder(sequence_output)
+
+    def _model_step(self, batch, batch_idx):
+        pixel_values, bool_masked_pos = batch
+        reconstructed_pixel_values = self(batch)
+
+        bool_masked_pos = bool_masked_pos.reshape(-1, self.grid_size[0], self.grid_size[1])
+        mask = (bool_masked_pos
+            .repeat_interleave(self.patch_size[0], 1)
+            .repeat_interleave(self.patch_size[1], 2)
+            .unsqueeze(1)
+            .contiguous()
+        )
+        loss = self.loss(pixel_values, reconstructed_pixel_values, mask)
+        return loss, reconstructed_pixel_values
+
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, *_ = self._model_step(batch, batch_idx)
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        loss, *_ = self._model_step(batch, batch_idx)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        return loss
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        return self(batch)
+
+    def configure_optimizers(self):
+        # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
+        optimizer = self.hparams.optimizer(self.trainer.model)
+        scheduler= self.hparams.scheduler(optimizer=optimizer)
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+
+    def lr_scheduler_step(self, scheduler, metric):
+        # timm's schedulers appear to need the "next" epoch at each step
+        # https://github.com/huggingface/pytorch-image-models/blob/954613a470652e4a113ff45b62dbd15c4e229218/train.py#L1067
+        scheduler.step(epoch=self.current_epoch + 1)
+
+
+class MaskedImageReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
+    def __init__(self, output_dir: str, patch_size: tuple[int, int]|int = 16, mean=(0.5,), std=(0.5,)):
+        """Callback to save masked image reconstructions to a WebDataset during prediction.
+
+        Args:
+            output_dir (str): Directory to save output images.
+            patch_size (tuple[int, int]|int, optional): Size of the image patches. Defaults to 16.
+            mean (tuple, optional): Mean values for denormalization. Defaults to (0.5,).
+            std (tuple, optional): Standard deviation values for denormalization. Defaults to (0.5,).
+        """
+        self.patch_size = ntuple(patch_size, 2)
+
+        pattern = os.path.join(output_dir, "reconstructions-%04d.tar.gz")
+        self._writer = wds.ShardWriter(pattern, maxsize=500e6, verbose=0)
+
+        self.denormalize = transforms.Compose(  # Reverse the normalization applied to the images
+            [
+                Denormalize(mean=mean, std=std),
+                transforms.ToDtype(torch.uint8, scale=True),
+            ]
+        )
+
+    def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
+        images, bool_masks_pos = batch
+        reconstructed_images = outputs
+
+        grid_size = (images.shape[2] // self.patch_size[0], images.shape[3] // self.patch_size[1])
+
+        for i, (real_image, bool_masked_pos, recon_image), in enumerate(zip(images, bool_masks_pos, reconstructed_images, strict=True)):
+            bool_masked_pos = bool_masked_pos.reshape(grid_size[0], grid_size[1])
+            mask = (bool_masked_pos
+                .repeat_interleave(self.patch_size[0], 0)
+                .repeat_interleave(self.patch_size[1], 1)
+                .contiguous()
+            )
+            # We only reconstruct the masked pixels, so make the reconstruction the composite of the original and the reconstructed patches
+            recon_image = recon_image * mask + real_image * (~mask)
+            sample = {
+                "__key__": f"{batch_idx:04d}-{i:04d}",
+                "image.npy": self.denormalize(real_image).permute(1, 2, 0).cpu().numpy(),
+                "recon_image.npy": self.denormalize(recon_image).permute(1, 2, 0).cpu().numpy(),
+                "mask.npy": mask.cpu().numpy(),
+            }
+            self._writer.write(sample)
+
+    def on_predict_end(self, trainer, model):  # noqa: ARG002
+        self._writer.close()
 
 class RealImageDataModule(L.LightningDataModule):
     def __init__(
@@ -75,7 +289,7 @@ class RealImageDataModule(L.LightningDataModule):
             # performance?
             if self.mask_scheme[0] == "data_driven":
                 bool_masked_pos = data_driven_masking(pixel_values, num_patches, self.configuration.patch_size, init_bool_mask_pos)
-            
+
             label = data["label.cls"]
             # print("\nloaded label: ",label)
 

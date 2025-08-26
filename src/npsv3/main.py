@@ -6,6 +6,7 @@ import typing
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
+from npsv3.util.config import setup_resolvers
 from npsv3.simulation import bwa_index_loaded
 
 
@@ -33,9 +34,8 @@ def _to_webdataset_urls(urls: str | typing.Iterable[str]) -> str:
     list_of_urls = [hydra.utils.to_absolute_path(url) for url in list_of_urls]
     return "::".join(list_of_urls)
 
-
-OmegaConf.register_new_resolver("strip_ext", lambda path: os.path.splitext(path)[0])
-OmegaConf.register_new_resolver("len", lambda arg: len(arg))
+# Register resolvers for OmegaConf
+setup_resolvers()
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
@@ -89,11 +89,12 @@ def main(cfg: DictConfig) -> None:
             OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
         checkpoint = train(cfg, output_dir=output)
-        # Create a symlink to the returned checkpoint, removing existing symlink if it exists
-        final_checkpoint = os.path.join(output, "model.ckpt")
-        if os.path.exists(final_checkpoint):
-            os.unlink(final_checkpoint)
-        os.symlink(checkpoint, final_checkpoint)
+        if not OmegaConf.select(cfg, "trainer.fast_dev_run", default=False):
+            # If checkpoints are active, create a symlink to the returned checkpoint, removing existing symlink if it exists
+            final_checkpoint = os.path.join(output, "model.ckpt")
+            if os.path.exists(final_checkpoint):
+                os.unlink(final_checkpoint)
+            os.symlink(checkpoint, final_checkpoint)
 
     elif cfg.command == "full_train":
         import torch

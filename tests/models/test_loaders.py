@@ -7,12 +7,12 @@ import webdataset as wds
 from npsv3.images.example import (
     example_to_image,
 )
-from npsv3.models.loaders import PackedImageDataModule
+from npsv3.models.loaders import AllImageDataModule, MaskedImageDataModule, PackedImageDataModule
 
 from .. import EXPERIMENTS_DIR, data_path, result_path
 
 
-class TestPackedDataLoader:
+class TestPackedImageDataLoader:
     def test_packed_loader(self, cfg):
         dm = PackedImageDataModule(train_urls=data_path("images-0000.tar"), batch_size=64, num_workers=cfg.threads)
         dm.prepare_data()
@@ -33,7 +33,7 @@ class TestPackedDataLoader:
 
         dm.teardown(stage="fit")
 
-    def test_packed_and_paired_loader(self, cfg):
+    def test_packed_and_padded_loader(self, cfg):
         dm = PackedImageDataModule(train_urls=data_path("images-0000.tar"), batch_size=64, pad=True, num_workers=cfg.threads)
         dm.prepare_data()
 
@@ -52,6 +52,49 @@ class TestPackedDataLoader:
         assert _i == 0, "The 8 support images are packed into a single batch with the query image"
 
         dm.teardown(stage="fit")
+
+class TestMaskedImageDataLoader:
+    def test_masked_loader(self, cfg):
+        dm = MaskedImageDataModule(train_urls=data_path("images-0000.tar"), batch_size=2, num_workers=cfg.threads, patch_size=(16,16), mask_fraction=0.5)
+        dm.prepare_data()
+
+        dm.setup(stage="fit")
+
+        for _i, batch in enumerate(dm.train_dataloader()):
+            images, masks = batch
+
+            b, _c, h, w = images.shape
+            assert b == 2
+
+            num_patches = (h // 16) * (w // 16)
+            assert masks.shape == (b, num_patches), f"Masks must be 2D tensor with {num_patches} patches per image"
+            assert torch.equal(masks.sum(dim=1), torch.tensor([int(0.5 * num_patches)]*b)), "Each image should have 50% of patches masked"
+
+        assert _i == 3, "The 9 images packed into 4 complete batches of 2 images each, with the remaining partial batch dropped"
+
+        dm.teardown(stage="fit")
+
+    def test_partial_masked_loader(self, cfg):
+        dm = MaskedImageDataModule(test_urls=data_path("images-0000.tar"), batch_size=64, num_workers=cfg.threads, patch_size=(8,8), mask_fraction=0.8)
+        dm.prepare_data()
+
+        # Ensure partial batches are included
+        dm.setup(stage="test")
+
+        for _i, batch in enumerate(dm.test_dataloader()):
+            images, masks = batch
+
+            b, _c, h, w = images.shape
+            assert b == 2*4+1, "Batch size must be 2 replicates of 4 genotypes + 1 query image"
+
+            num_patches = (h // 8) * (w // 8)
+            assert masks.shape == (b, num_patches), f"Masks must be 2D tensor with {num_patches} patches per image"
+            assert torch.equal(masks.sum(dim=1), torch.tensor([int(0.8 * num_patches)]*b)), "Each image should have 80% of patches masked"
+
+
+        assert _i == 0, "All 9 images are packed into a single partial batch"
+
+        dm.teardown(stage="test")
 
 class TestNPSV2Examples:
     @pytest.mark.skipif(

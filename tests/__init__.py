@@ -5,6 +5,8 @@ import os
 
 from omegaconf import OmegaConf
 
+from npsv3.util.config import setup_resolvers
+
 RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
 EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
 
@@ -69,5 +71,5 @@ def result_path(path: str) -> str:
     return os.path.join(RESULT_DIR, path)
 
 
-# Match resolvers available in main.py
-OmegaConf.register_new_resolver("len", lambda arg: len(arg))
+# Register resolvers for OmegaConf
+setup_resolvers()

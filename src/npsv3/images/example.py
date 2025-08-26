@@ -18,6 +18,7 @@ from npsv3.graphs.graph import Graph
 from npsv3.images.generator import ImageGenerator
 from npsv3.realigner import FragmentRealigner
 from npsv3.simulation import augment_sample, simulate_variant_sequencing
+from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
@@ -429,7 +430,8 @@ def vcf_to_region_examples(
     with tempfile.TemporaryDirectory() as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)
+        # To ensure Ray worker processes know about our custom resolvers, we set up the runtime environment with a worker process hook.
+        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
 
         actors = [
             RegionWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf)
@@ -462,7 +464,7 @@ def vcf_to_variant_examples(
     with tempfile.TemporaryDirectory() as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)
+        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
 
         actors = [
             VariantWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf, ploidy=ploidy)
@@ -522,7 +524,7 @@ def vcf_to_graph_examples(
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False)
+        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
 
         actors = [
             GraphWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf, ploidy=ploidy)

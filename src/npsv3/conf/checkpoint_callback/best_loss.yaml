@@ -1,0 +1,6 @@
+defaults:
+  - base
+  
+monitor: "train_loss"
+mode: "min"
+save_top_k: 1

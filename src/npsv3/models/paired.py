@@ -6,8 +6,6 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models
 from torchvision.transforms import v2 as transforms
-from transformers import ViTConfig, ViTModel
-from npsv3.models.transformer import Classifier
 
 from npsv3.models.metrics import (
     GenotypingConcordance,
@@ -16,6 +14,7 @@ from npsv3.models.metrics import (
     GenotypingNonRefPrecision,
     GenotypingNonRefRecall,
 )
+from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
 
 
 class InceptionEncoder(nn.Module):
@@ -33,13 +32,6 @@ class InceptionEncoder(nn.Module):
         self.inception.fc = nn.Linear(self.inception.fc.in_features, projection_size, bias=False)
         self.bn = nn.BatchNorm1d(projection_size)
 
-    # @staticmethod
-    # def load_model(self, path=None, **kwd):
-    #     if path:
-    #         return __class__.load_checkpoint(path)
-    #     else:
-    #         return __class__(**kwd)
-        
     def forward(self, x):
         embeddings = self.inception(x)
         return self.bn(embeddings)

@@ -11,7 +11,7 @@ def train(cfg, output_dir=None, **kw_args):
 
     dm = hydra.utils.instantiate(cfg.data)
 
-    if cfg.model.checkpoint is None:
+    if (checkpoint := OmegaConf.select(cfg, "model.checkpoint")) is None:
         model = hydra.utils.instantiate(cfg.model)
     else:
         # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
@@ -23,13 +23,14 @@ def train(cfg, output_dir=None, **kw_args):
                 model_args[key] = hydra.utils.instantiate(value)
 
         model = model_cls.load_from_checkpoint(
-            cfg.model.checkpoint,
+            checkpoint,
             strict=False,
             **model_args,
         )
 
-    # Make model compilation optional
-    #model = torch.compile(model)
+    # Compile the model (if requested) to attempt to speed up training
+    if cfg.torch_compile:
+        model = torch.compile(model)
 
     # Create callback for saving checkpoints in the specified directory
     checkpoint_callback = hydra.utils.instantiate(
@@ -81,9 +82,41 @@ def test(cfg, **kw_args):
 
     model = model_cls.load_from_checkpoint(
         cfg.model.checkpoint,
-        callbacks=[L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
         **model_args,
     )
 
-    trainer = hydra.utils.instantiate(cfg.trainer, **kw_args)
+    trainer_args = {
+        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        **kw_args,
+    }
+
+    trainer = hydra.utils.instantiate(cfg.trainer, **trainer_args)
     return trainer.test(model=model, datamodule=dm)
+
+def predict(cfg, **kw_args):
+    # Reduce precision to enable use of GPU tensor cores
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
+    dm = hydra.utils.instantiate(cfg.data)
+
+    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+
+    model_args = {}
+    for key, value in cfg.model.items():
+        if key in model_cls.ignored_hyperparameters and "_target_" in value:
+            model_args[key] = hydra.utils.instantiate(value)
+
+    model = model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+        **model_args,
+    )
+
+    trainer_args = {
+        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        **kw_args,
+    }
+
+    trainer = hydra.utils.instantiate(cfg.trainer, **trainer_args)
+    return trainer.predict(model=model, datamodule=dm)

@@ -1,0 +1,2 @@
+_target_: lightning.pytorch.callbacks.ModelCheckpoint
+enable_version_counter: true
