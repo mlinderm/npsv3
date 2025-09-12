@@ -1,5 +1,15 @@
+# @package _global_
 defaults:
-  - base
+  - /trainer/base@trainer
 
-# Utilize mixed precision
-precision: "16-mixed"
+trainer:
+  # Utilize mixed precision
+  precision: "16-mixed"
+
+  # As described in: https://arxiv.org/pdf/2106.10270
+  gradient_clip_val: 1.0
+
+model:
+  optimizer:
+    # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
+    eps: 1e-7

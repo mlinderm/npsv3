@@ -182,6 +182,22 @@ class MaskedImageModeling(L.LightningModule):
         scheduler.step(epoch=self.current_epoch + 1)
 
 
+class VisionTransformerEncoder(timm.models.VisionTransformer):
+    def __init__(self, *args, checkpoint_path: Optional[str] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Load pre-training checkpoint (from masked image modeling) if provided. We assume the relevant weights are prefixed with "encoder."
+        if checkpoint_path:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            encoder_weights = { k.removeprefix("encoder."): v for k, v in checkpoint["state_dict"].items() if k.startswith("encoder.")}
+            self.load_state_dict(encoder_weights, strict=False)
+
+    def forward(self, pixel_values: torch.Tensor):
+        sequence_output = self.forward_features(pixel_values)
+        return sequence_output[:, 0] # Use CLS token
+        # An alternate approach that incorporates FC norm and dropout layers
+        return self.forward_head(self.forward_features(pixel_values), pre_logits=True)
+
+
 class MaskedImageReconstructionToWebDatasetCallback(L.pytorch.callbacks.Callback):
     def __init__(self, output_dir: str, patch_size: tuple[int, int]|int = 16, mean=(0.5,), std=(0.5,)):
         """Callback to save masked image reconstructions to a WebDataset during prediction.

@@ -9,3 +9,20 @@ def index_variant_file(filename: str):
         bcftools.index("-t", filename, catch_stdout=False)
     elif filename.endswith(".bcf"):
         bcftools.index("-c", filename, catch_stdout=False)
+
+
+def bcftools_format(filename: str) -> str:
+    """Return bcftools type string based on filename extensions, e.g. 'vcf.gz' -> 'z'"""
+    if filename.endswith("vcf.gz"):
+        return "z"
+    if filename.endswith(".bcf"):
+        return "b"
+    return "v"
+
+def bcftools_index(filename: str) -> tuple[str]:
+    """"Return bcftools index arguments based on filename extensions, e.g. 'vcf.gz' -> ('-W','tbi')"""
+    if filename.endswith("vcf.gz"):
+        return ("-W","tbi")
+    if filename.endswith(".bcf"):
+        return ("-W","csi")
+    return ()

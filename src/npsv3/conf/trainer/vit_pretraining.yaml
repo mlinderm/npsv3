@@ -13,3 +13,5 @@ model:
   optimizer:
     # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
     eps: 1e-7
+
+# https://openaccess.thecvf.com/content/CVPR2023/supplemental/Li_Scaling_Language-Image_Pre-Training_CVPR_2023_supplemental.pdf

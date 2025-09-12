@@ -4,6 +4,9 @@ validate_urls: null
 test_urls: null
 predict_urls: null
 batch_size: 256
-pad: false
 num_workers: ${threads}
-shuffle_size: 1000 
+shuffle_size: 1000
+pad: false
+resampled: false
+epoch_batches: null
+patch_size: 16

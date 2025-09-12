@@ -4,6 +4,21 @@ import torch
 from omegaconf import OmegaConf
 
 
+def load_model_from_checkpoint(cfg, *, strict=True):
+    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
+    model_cls = hydra.utils.get_class(cfg.model._target_)
+
+    model_args = {}
+    for key, value in cfg.model.items():
+        if key in model_cls.ignored_hyperparameters and "_target_" in value:
+            model_args[key] = hydra.utils.instantiate(value)
+
+    return model_cls.load_from_checkpoint(
+        cfg.model.checkpoint,
+        strict=strict,
+        **model_args,
+    )
+
 def train(cfg, output_dir=None, **kw_args):
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
@@ -11,22 +26,10 @@ def train(cfg, output_dir=None, **kw_args):
 
     dm = hydra.utils.instantiate(cfg.data)
 
-    if (checkpoint := OmegaConf.select(cfg, "model.checkpoint")) is None:
+    if OmegaConf.is_missing(cfg, "model.checkpoint"):
         model = hydra.utils.instantiate(cfg.model)
     else:
-        # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
-        model_cls = hydra.utils.get_class(cfg.model._target_)
-
-        model_args = {}
-        for key, value in cfg.model.items():
-            if key in model_cls.ignored_hyperparameters and "_target_" in value:
-                model_args[key] = hydra.utils.instantiate(value)
-
-        model = model_cls.load_from_checkpoint(
-            checkpoint,
-            strict=False,
-            **model_args,
-        )
+        model = load_model_from_checkpoint(cfg, strict=False)
 
     # Compile the model (if requested) to attempt to speed up training
     if cfg.torch_compile:
@@ -71,19 +74,7 @@ def test(cfg, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-
-    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-
-    model_args = {}
-    for key, value in cfg.model.items():
-        if key in model_cls.ignored_hyperparameters and "_target_" in value:
-            model_args[key] = hydra.utils.instantiate(value)
-
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-        **model_args,
-    )
+    model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
@@ -99,19 +90,7 @@ def predict(cfg, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-
-    # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-
-    model_args = {}
-    for key, value in cfg.model.items():
-        if key in model_cls.ignored_hyperparameters and "_target_" in value:
-            model_args[key] = hydra.utils.instantiate(value)
-
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-        **model_args,
-    )
+    model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],

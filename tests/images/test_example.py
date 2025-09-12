@@ -18,7 +18,6 @@ from npsv3.util.range import Range
 
 from .. import (
     B37_REF_FASTA,
-    EXPERIMENTS_DIR,
     HG002_B37_BAM,
     HG002_DIPCALL_SV_VCF,
     HG002_DIPCALL_VCF,

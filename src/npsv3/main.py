@@ -39,7 +39,6 @@ setup_resolvers()
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    # print("\ncommand:",cfg.command)
     if cfg.command == "preprocess":
         from npsv3.util.sample import compute_read_stats
 
@@ -52,6 +51,25 @@ def main(cfg: DictConfig) -> None:
         with open(output, "w") as file:
             json.dump(stats, file)
 
+    elif cfg.command == "genotype":
+        from npsv3.genotype import genotype
+        from npsv3.util.sample import Sample
+
+        _make_paths_absolute(cfg, ["reference", "stats_path"])
+        _check_shared_reference(cfg)
+
+        sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
+
+        # If no output file is specified, create a fixed file in the Hydra output directory
+        output = "genotypes.vcf" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        genotype(
+            cfg,
+            hydra.utils.to_absolute_path(cfg.reads),
+            sample,
+            hydra.utils.to_absolute_path(cfg.input),
+            output,
+        )
     elif cfg.command == "images":
         from npsv3.util.sample import Sample
 
@@ -75,7 +93,6 @@ def main(cfg: DictConfig) -> None:
         )
     elif cfg.command == "train":
         import torch
-        torch.set_float32_matmul_precision("high")
 
         from npsv3.models.runners import train
 
@@ -83,6 +100,8 @@ def main(cfg: DictConfig) -> None:
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        _make_paths_absolute(cfg, ["model.encoder.checkpoint_path"])
 
         OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
         if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:

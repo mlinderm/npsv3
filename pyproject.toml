@@ -76,6 +76,9 @@ check = "mypy --install-types --non-interactive {args:src/npsv3 tests}"
 
 [tool.hatch.envs.hatch-test]
 installer = "pip"
+extra-dependencies = [
+  "pytest-timeout",
+]
 
 [tool.hatch.envs.hatch-static-analysis]
 dependencies = ["ruff==0.11.2"]

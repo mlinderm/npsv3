@@ -1,3 +1,4 @@
+from typing import Callable, Optional
 import hydra
 import lightning as L
 import torch
@@ -245,6 +246,7 @@ class PackedVariant(L.LightningModule):
         loss: nn.Module,
         optimizer: torch.optim.Optimizer,
         predictor: nn.Module,
+        scheduler: Optional[Callable] = None,
     ):
         super().__init__()
 
@@ -267,6 +269,12 @@ class PackedVariant(L.LightningModule):
             "nonrefrecall": GenotypingNonRefRecall(),
             "nonreff1": GenotypingNonRefF1(),
         }, prefix="test_")
+
+    @torch.jit.ignore
+    def no_weight_decay(self) -> set[str]:
+        """Set of parameters that should not use weight decay."""
+        # This is used by timm's optimizers to determine which parameters should not use weight decay
+        return { f"encoder.{name}" for name in self.encoder.no_weight_decay() }
 
     def on_train_start(self) -> None:
         # Reset validation metrics at the start of training to avoid effects of sanity batches
@@ -360,8 +368,22 @@ class PackedVariant(L.LightningModule):
         return self(batch)
 
     def configure_optimizers(self):
-        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-        return {"optimizer": optimizer}
+        if self.hparams.scheduler is None:
+            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+            return { "optimizer": optimizer }
+
+        # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
+        optimizer = self.hparams.optimizer(self.trainer.model)
+        scheduler= self.hparams.scheduler(optimizer=optimizer)
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+
+    def lr_scheduler_step(self, scheduler, metric):
+        if self.hparams.scheduler is None:
+            super().lr_scheduler_step(scheduler, metric)
+        else:
+            # timm's schedulers appear to need the "next" epoch at each step
+            # https://github.com/huggingface/pytorch-image-models/blob/954613a470652e4a113ff45b62dbd15c4e229218/train.py#L1067
+            scheduler.step(epoch=self.current_epoch + 1)
 
 
 def predict(cfg, **kw_args):

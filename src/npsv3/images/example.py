@@ -333,6 +333,7 @@ class ExampleActor:
 
         self._writer = wds.TarWriter(self.output_path)
 
+    # TODO: Convert this to a finalizer? https://docs.python.org/3/library/weakref.html#comparing-finalizers-with-del-methods
     def cleanup(self):
         self._writer.close()
 
@@ -497,12 +498,6 @@ def vcf_to_graph_examples(
     group_padding = cfg.pileup.variant_padding // 2
     for region, records in overlapping_records(inference_vcf, flank=group_padding):
         count = len(records)
-
-        # TODO: Filter out Ns
-        # for record in records:
-        #     if vg_variant_id(record) == "cd8536300a04f95e268065d36bb58150081a8f65":
-        #         print(region, record)
-        #print(region.expand(-group_padding))
 
         running_total += count
         running_max = max(running_max, count)

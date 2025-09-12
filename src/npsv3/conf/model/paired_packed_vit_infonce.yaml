@@ -1,19 +1,36 @@
 _target_: npsv3.models.paired.PackedVariant
 encoder:
-  _target_: npsv3.models.paired.ViTEncoder
-  num_channels: ${len:${pileup.image_channels}}
-  projection_size: 512
-  pretrained_path: null
+  _target_: npsv3.models.transformer.VisionTransformerEncoder
+  img_size: 
+    - ${pileup.image_height}
+    - ${pileup.image_width}
+  in_chans: ${len:${pileup.image_channels}}
+  # ViT-B/${data.patch_size} configuration
+  patch_size: ${data.patch_size}
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  num_classes: 0
+  checkpoint_path: null
 metric:
   _target_: torch.nn.CosineSimilarity
 loss:
   _target_: npsv3.models.paired.InfoNCE
 optimizer:
-  _target_: torch.optim.AdamW
+  _target_: timm.optim.create_optimizer_v2
   _partial_: true
+  opt: "adamw"
   lr: 0.001
   betas: [0.9, 0.999]
-  eps: 1e-8
   weight_decay: 0.01
+scheduler:
+  _target_: timm.scheduler.cosine_lr.CosineLRScheduler
+  _partial_: true
+  lr_min: 0.00001
+  t_initial: 5
+  cycle_limit: 1
+  warmup_t: 5
+  warmup_lr_init: 0.0001
+  warmup_prefix: true
 predictor:
   _target_: npsv3.models.paired.MaximizingPredictor

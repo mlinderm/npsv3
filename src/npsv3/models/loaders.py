@@ -64,6 +64,7 @@ class BaseDataModule(L.LightningDataModule, ABC):
         shuffle_size=1000,
         mean=(0.5,),
         std=(0.5,),
+        **_kwargs,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["training_urls", "validation_urls", "prediction_urls", "test_urls"])
@@ -249,32 +250,42 @@ class PackedImageDataModule(BaseDataModule):
         num_workers (int, optional): Number of workers in torch.DataLoader. Defaults to 1.
         shuffle_size (int, optional): Size of the shuffle buffer for training loaders. Defaults to 1000.
         pad (bool, optional): Pad batches to maximum size. Defaults to False.
+        resampled (bool, optional): Resample to make dataset "infinite". Defaults to False.
+        epoch_batches (int | None, optional): Number of batches per epoch. Required if resampled is True. Defaults to None.
     """
 
     def __init__(
         self,
         *,
         pad=False,
+        resampled: bool = False,
+        epoch_batches: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.save_hyperparameters({"pad": pad})  # Save hyperparameters specific to the derived class
+        if resampled and epoch_batches is None:
+            raise ValueError("epoch_batches must be specified if resampled is True")
+        self.save_hyperparameters({"pad": pad, "resampled": resampled, "epoch_batches": epoch_batches})  # Save hyperparameters specific to the derived class
 
     def make_loader(self, urls, mode):
-        dataset = self._make_base_dataset(urls, mode=mode).compose(
+        dataset = self._make_base_dataset(urls, mode=mode, resampled=self.hparams.resampled).compose(
             pack_and_pad_images(
                 batch_size=self.hparams.batch_size, image_transform=self.transforms, pad=self.hparams.pad
             )
         )
 
         # Since the data is pre-batched, we set batch_size to None and don't further shuffle (to reduce memory usage).
-        return wds.WebLoader(
+        loader = wds.WebLoader(
             dataset,
             batch_size=None,
             shuffle=False,
             num_workers=self.hparams.num_workers,
             pin_memory=torch.cuda.is_available(),
         )
+        if self.hparams.epoch_batches is not None:
+            # Set length of otherwise unknown/infinite dataset
+            loader = loader.with_epoch(self.hparams.epoch_batches)
+        return loader
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         # We currently only need to transfer the images, labels, and offsets to the device, e.g., GPU
@@ -347,7 +358,7 @@ class MaskedImageDataModule(BaseDataModule):
         # Adapted from: https://github.com/webdataset/webdataset/blob/main/examples/out/train-resnet50-multiray-wds.ipynb
 
         # Combine query and support images into a single batch
-        dataset = self._make_base_dataset(urls, mode=mode, resampled=True).compose(
+        dataset = self._make_base_dataset(urls, mode=mode, resampled=self.hparams.resampled).compose(
             mask_images(
                 image_transform=self.transforms,
                 patch_size=self.hparams.patch_size,
