@@ -41,6 +41,17 @@ def hg002_sample():
     )
 
 @pytest.fixture
+def hg002_hg38_sample():
+    return Sample(
+        "HG002",
+        mean_coverage=23.50,
+        mean_insert_size=472.38,
+        std_insert_size=156.24,
+        sequencer="HS25",
+        read_length=148,
+    )
+
+@pytest.fixture
 def syndip_sample():
     return Sample(
         "CHM1_CHM13",
@@ -63,12 +74,23 @@ def na12878_sample():
     )
 
 @pytest.fixture
-def hg002_hg38_sample():
+def hg00733_sample():
     return Sample(
-        "HG002",
-        mean_coverage=23.50,
-        mean_insert_size=472.38,
-        std_insert_size=156.24,
-        sequencer="HS25",
-        read_length=148,
+        "HG00733",
+        mean_coverage=31.41,
+        mean_insert_size=454.57,
+        std_insert_size=106.63,
+        sequencer="HSXn",
+        read_length=150,
+    )
+
+@pytest.fixture
+def hg00731_sample():
+    return Sample(
+        "HG00731",
+        mean_coverage=29.33,
+        mean_insert_size=428.99,
+        std_insert_size=100.72,
+        sequencer="HSXn",
+        read_length=150,
     )

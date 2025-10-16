@@ -5,8 +5,8 @@ encoder:
     - ${pileup.image_height}
     - ${pileup.image_width}
   in_chans: ${len:${pileup.image_channels}}
-  # ViT-B/${data.patch_size} configuration
-  patch_size: ${data.patch_size}
+  # ViT-B/${patch_size} configuration
+  patch_size: 16
   embed_dim: 768
   depth: 12
   num_heads: 12

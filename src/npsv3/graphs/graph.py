@@ -349,6 +349,7 @@ class Graph:
             path.append(node)
 
             while True:
+                # TODO: Edges that imply two alleles in the same variant should be excluded
                 next_nodes = []
                 self._graph.follow_edges(node_handle, False, lambda n: next_nodes.append(n))  # noqa: B023
                 if len(next_nodes) == 0:

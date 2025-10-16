@@ -5,7 +5,7 @@ defaults:
   - model: paired_packed_inception_contrastive
   - data: packed_images
   - trainer: paired
-  - command: images
+  - command: genotype
   - checkpoint_callback: base
   - _self_
   - override hydra/help: custom_help
@@ -45,7 +45,7 @@ output: ???
 # Name of the sample
 sample: null
 
-# Root path to download pre-trained models. Defaults to Keras cache dir: ~/.keras
+# Root path to download pre-trained models.
 cache_dir: null
 
 timeout: 1800

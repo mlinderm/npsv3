@@ -58,9 +58,13 @@ NA12878_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.alt.p
 NA12878_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "NA12878.freeze4.sv.alt.passing.hg38.vcf.gz"))
 NA12878_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/NA12878.final.cram"))
 
-HG00096_VCF = _first_existing("/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00096.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38-vcfbub.a100k.wave.norm.passing.training.hg38.vcf.gz")
-HG00096_SV_VCF = _first_existing("/storage/mlinderman/projects/sv/npsv3-experiments/training/training_vcfs/HG00096.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38-vcfbub.a100k.wave.norm.sv.passing.training.hg38.vcf.gz")
+HG00733_DIPCALL_VCF = _first_existing(os.path.join(RESOURCES_DIR, "HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz"))
+HG00733_DIPCALL_SV_VCF = _first_existing(os.path.join(RESOURCES_DIR, "HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.sv.hg38.vcf.gz"))
+HG00733_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG00733.final.cram"))
 
+HG00731_TRAINING_VCF = _first_existing(os.path.join(EXPERIMENTS_DIR, "training", "training_vcfs", "HG00731.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38.vcfbub.a100k.wave.passing.training.hg38.vcf.gz"))
+HG00731_TRAINING_SV_VCF = _first_existing(os.path.join(EXPERIMENTS_DIR, "training", "training_vcfs", "HG00731.hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38.vcfbub.a100k.wave.sv.passing.training.hg38.vcf.gz"))
+HG00731_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG00731.final.cram"))
 
 def data_path(path: str) -> str:
     return os.path.join(DATA_DIR, path)

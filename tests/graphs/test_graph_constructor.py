@@ -9,6 +9,7 @@ from npsv3.graphs.graph_constructor import (
     GraphConstructor,
     ReferenceSpan,
     variant_path_name,
+    vcf_to_paths,
 )
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
@@ -23,7 +24,7 @@ def _construct_from_vcf(tmp_path, region: Range, vcf: bytes, expand=10) -> Graph
         vcf_file.write(vcf)
     index_variant_file(vcf_path)
 
-    return GraphConstructor(region.expand(expand), vcf_path)
+    return GraphConstructor(region.expand(expand), vcf_path), vcf_path
 
 
 class TestGraphConstructor:
@@ -197,16 +198,14 @@ class TestGraphConstructor:
 
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     @pytest.mark.skipif(not HG00731_VCF, reason="HG00731 VCF required")
-    def test_gfa_generation(self, tmp_path, cfg):
+    def test_gfa_generation(self, cfg):
         region = Range("chr1", 5246615, 5246691)
         construct = GraphConstructor(
             region.expand(cfg.pileup.graph_flank),
             HG00731_VCF,
         )
-
         # Generate complete GFA without error
-        gfa_path = os.path.join(tmp_path, "test.gfa")
-        construct.to_gfa(HG38_REF_FASTA, gfa_path)
+        construct.to_gfa(HG38_REF_FASTA)
 
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     @pytest.mark.parametrize(("variant", "additional_paths"), [
@@ -217,7 +216,7 @@ class TestGraphConstructor:
     ])  # fmt: skip
     def test_unphased_transitions(self, tmp_path, variant, additional_paths):
         region = Range.parse_literal("1:1000000-1000001")
-        construct = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=1,length=249250621>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -242,7 +241,7 @@ class TestGraphConstructor:
     ])  # fmt: skip
     def test_global_transitions(self, tmp_path, variant, addl_paths):
         region = Range.parse_literal("1:1000000-1000001")
-        construct = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=1,length=249250621>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -268,7 +267,7 @@ class TestGraphConstructor:
     ])  # fmt: skip
     def test_local_transitions(self, tmp_path, variant, addl_paths):
         region = Range.parse_literal("1:1000000-1000001")
-        construct = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, f"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=1,length=249250621>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -287,7 +286,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_node_finding_error(self, tmp_path):
         region = Range("11", 61910157, 61910683).expand(10)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=11,length=135006516>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -297,7 +296,7 @@ class TestGraphConstructor:
 11	61910471	.	GTGTCCAGGGCCACCTGCCAGGGGGACAGGGAAAGAACAACACATAGGATTTGGCCACACTTTTGGGATCACAGCTCCTCCTCTGAGTTTTGACTTGGCAGCTTTCTCTGTCCAGGGTCGCCTGGCAGGGGGACAGACAGAAGAGCAACACACAGGGTTTGGCCCACACTTTTGGGATCACAGCTCCTCCCTCGAATTTTGACTTGGCAGCTT	CAGAG	.	.	.	GT	0/0
 """
         )  # fmt: skip
-        construct.to_gfa(B37_REF_FASTA)
+        # construct.to_gfa(B37_REF_FASTA)
 
         # The root cause of the original issue is that the variants are not in sorted order based
         # actual reference region (61910472 for the insertion vs 61910471 for the deletion).
@@ -310,7 +309,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_list_index_error(self, tmp_path):
         region = Range("12", 17827560, 17827841)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=12,length=133851895>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -325,7 +324,7 @@ class TestGraphConstructor:
 12	17827840	.	AC	A	.	PASS	.	GT:PS	0|1:17827816
 """
         )  # fmt: skip
-        construct.to_gfa(B37_REF_FASTA)
+        # construct.to_gfa(B37_REF_FASTA)
 
         # The original issue was the sorting. The insertion at 17827816 should be sorted
         # before the deletion at 17827816 even though both have the same starting position.
@@ -343,12 +342,12 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_list_index_error2(self, tmp_path):
         region = Range("18", 75991730, 75992484)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, vcf_path, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=18,length=78077248>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG002
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
 18	75991731	.	TC	T	.	PASS	.	GT	0/1
 18	75992379	.	CAG	C	.	PASS	.	GT:PS	0|1:75992379
 18	75992380	.	AGGTGTGGACGTGCTGTTGCTCCTGACGGCTAATTACTTCTCCTGTCAGCGCCATCTTGGTGTGCTACCTAATGTGGTTATTTCCAAGATGATACATCAAATCTT	GTA	.	PASS	.	GT	0/1
@@ -357,10 +356,35 @@ class TestGraphConstructor:
         )  # fmt: skip
         # construct.to_gfa(B37_REF_FASTA)
 
+        # # Use vg to test path generation
+        # gfa_path = os.path.join(tmp_path, "test.gfa")
+        # construct.to_gfa(B37_REF_FASTA, gfa_path)
+        # for name, _strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
+        #     print(name, nodes)
+
+        # There is a potentially valid phasing for the last 3 variants such that they could be combined in a single path. At
+        # present we apply the larger deletion first. And do not attempt 1|0 for the locally phased variants (since they are
+        # phased). If we did, and could consistently phase that set, we could discover that path. Our current more conservative approach
+        # is to break the paths. TODO: We find a consistent phasing for the overlapping reference alleles go with that instead of breaking
+        # that haplotype. It is not clear we want to do that.
+        expected_paths = {
+            "Sample#0#18#0": [1, 2, 4],
+            "Sample#1#18#0": [1, 3, 4],
+            # If we could phased the last 3 variants together
+            # "Sample#0#18#1": [5, 8, 10, 11, 12],
+            # "Sample#1#18#1": [6, 12],
+            # With path breaking we get:
+            "Sample#0#18#1": [5, 8, 9, 11, 12],
+            "Sample#1#18#1": [6],
+            "Sample#1#18#2": [7, 8, 10, 11, 12],
+        } # fmt: skip
+        for name, nodes in expected_paths.items():
+            assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
+
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_vestigial_star(self, tmp_path):
         region = Range("12", 18249397, 18249654)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=12,length=133851895>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -375,7 +399,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_star_allele(self, tmp_path):
         region = Range("14", 77187572, 77187592)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=14,length=107349540>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -392,7 +416,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_reversed_star_allele(self, tmp_path):
         region = Range("1", 5474211, 5474287)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=1,length=249250621>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -413,7 +437,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_compound_star_alleles(self, tmp_path):
         region = Range("10", 62230222, 62230225)
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=10,length=135534747>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -435,7 +459,7 @@ class TestGraphConstructor:
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_implicit_overlap(self, tmp_path):
         region = Range.parse_literal("chr1:8978661-8978675")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -457,7 +481,7 @@ chr1	8978664	.	A	C	.	PASS	.	GT	0|0
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_implicit_ins_overlap(self, tmp_path):
         region = Range.parse_literal("chr1:5246237-5246237")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -480,7 +504,7 @@ chr1	5246237	.	C	CCTTT	.	.	.	GT	0|1
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_star_allele_overlap_end_padding(self, caplog, tmp_path):
         region = Range.parse_literal("chr1:3999762-3999880")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
@@ -491,6 +515,7 @@ chr1	3999762	6281	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTG
 chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
 """
         )  # fmt: skip
+        # construct.to_gfa(HG38_REF_FASTA)
 
         # This VCF implies an MNV for the first variant, second allele that is really a SNV at the padding base. With the
         # subsequent variant overlapped by the deletion. Our approach to graph construction allows for both the SNV and the
@@ -504,7 +529,7 @@ chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     def test_mixed_alleles(self, tmp_path):
         region = Range.parse_literal("1:1000000-1000006")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=1,length=249250621>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -534,19 +559,11 @@ chr1	3999776	6282	T	C,*	.	.	.	GT	1|2
         for name, nodes in expected_paths.items():
             assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
 
-        # # Use vg to test path generation
-        # # Note: vg does not seem to take into account the PS tag
-        # gfa_path = os.path.join(tmp_path, "test.gfa")
-        # construct.to_gfa(B37_REF_FASTA, gfa_path)
-        # with open(gfa_path, "r") as gfa_file:
-        #     for name, _strand, nodes in vcf_to_paths(gfa_path, vcf_path, region):
-        #         print(name, nodes)
-        #         #assert construct.paths.get(name) == [int(n) for n in nodes], f"Path {name} does not match expected nodes"
 
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_adjacent_inserts(self, tmp_path):
         region = Range.parse_literal("chr4:99588036-99590036")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr4,length=190214555>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
@@ -565,7 +582,7 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_duplicate_variants(self, tmp_path):
         region = Range.parse_literal("chr1:1627438-1627489")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
@@ -584,7 +601,7 @@ chr1	1627438	.	CCCTGGGGTGAGGCCTGGGAGGGGCCCGGCCGGCGGGGCTGAGCCTGTGCGT	C	.	.	SVTYPE
     @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
     def test_inconsistent_haplotypes(self, caplog, tmp_path):
         region = Range.parse_literal("chr1:6012332-6012402")
-        construct = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
@@ -597,12 +614,45 @@ chr1	6012378	.	T	C	.	.	.	GT	0|1
         )  # fmt: skip
         construct.to_gfa(HG38_REF_FASTA)
 
-        # The second variant creates an inconsistent haplotype for Sample#0#chr1#1. We currently warn and skip the variant.
-        # An alternative would be to break the haplotypes and create a new path starting as the inconsistent variant. That
-        # is what VG seems to do.
+        # The second variant creates an inconsistent haplotype for Sample#0#chr1#1. Introduce a haplotype break.
+        expected_paths = {
+            "Sample#0#chr1#0": [1, 3, 7],
+            "Sample#1#chr1#0": [1, 3],
+            # We should potentially also have an initial node 2, but we don't re-add all references nodes that might have been previously deleted, 
+            # just those needed to restart the haplotype.
+            "Sample#1#chr1#1": [5, 6, 7],
+        }
+        assert sum(path.startswith("Sample") for path in construct.paths) == len(expected_paths), "Inconsistent haplotypes should result in a path break"
+        for name, nodes in expected_paths.items():
+            assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
 
-        assert len(caplog.records) == 1, "Should log a warning about inconsistent haplotypes"
-        # assert "Sample#0#chr1#1" in construct.paths, "Inconsistent haplotypes should result in a path break"
+
+    @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
+    def test_inconsistent_haplotypes2(self, tmp_path):
+        region = Range("2", 39714038, 39714038)
+        construct, *_ = _construct_from_vcf(tmp_path, region, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=2,length=243199373>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+2	39714038	.	T	G,TCG	30	.	.	GT	2|1
+2	39714038	.	T	TCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCG	20	PASS	SVTYPE=INS;SVLEN=54	GT	1/1
+"""
+        )  # fmt: skip
+        construct.to_gfa(B37_REF_FASTA)
+
+        # The second variant creates an inconsistent haplotype for Sample#0#2#0, so we should get a path break.
+        expected_paths = {
+            "Sample#0#2#0": [1, 2, 5],
+            "Sample#1#2#0": [1, 3, 6, 7],
+            "Sample#0#2#1": [6, 7],
+        }
+        assert sum(path.startswith("Sample") for path in construct.paths) == len(expected_paths), "Inconsistent haplotypes should result in a path break"
+        for name, nodes in expected_paths.items():
+            assert construct.paths.get(name) == nodes, f"Path {name} does not match expected nodes"
+
 
     @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     @pytest.mark.parametrize(("region", "vcf_path", "expected_warnings"), [

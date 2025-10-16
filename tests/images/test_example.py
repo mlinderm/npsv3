@@ -24,6 +24,12 @@ from .. import (
     HG002_GIAB_SV_VCF,
     HG002_GIAB_VCF,
     HG002_HG38_BAM,
+    HG00731_HG38_BAM,
+    HG00731_TRAINING_SV_VCF,
+    HG00731_TRAINING_VCF,
+    HG00733_DIPCALL_SV_VCF,
+    HG00733_DIPCALL_VCF,
+    HG00733_HG38_BAM,
     HG38_REF_FASTA,
     NA12878_BAM,
     NA12878_SV_VCF,
@@ -84,7 +90,6 @@ class TestRegionToExample:
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
 )
-@pytest.mark.usefixtures("ray_setup")
 class TestB37GraphToExample:
     def test_single_del(self, tmp_path, cfg, hg002_sample):
         region = Range("12", 22129564, 22130387)
@@ -97,7 +102,7 @@ class TestB37GraphToExample:
             data_path("12_22129565_22130387.vcf.gz"),
         )
 
-        assert example["region"] == str(region)
+        assert Range.parse_literal(example["region"]) >= region
         assert example["image"].shape == (cfg.pileup.image_height, cfg.pileup.image_width, len(cfg.pileup.image_channels))
         assert example["label"] == 3  # 1/1 genotype
 
@@ -110,10 +115,10 @@ class TestB37GraphToExample:
         ), "Bi-allelic variant with single background should have 4 phased diploid genotypes"
 
         png_path = str(tmp_path / "test.png")
-        # png_path = result_path("test.png")
         example_to_image(cfg, example, png_path, with_simulations=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
 
+    @pytest.mark.usefixtures("ray_setup")
     def test_vcf_to_shards(self, tmp_path, cfg, hg002_sample):
         output_dir = str(tmp_path / "shards")
         vcf_to_graph_examples(
@@ -290,6 +295,62 @@ class TestHG38GraphToExample:
             HG002_DIPCALL_VCF,
             HG002_DIPCALL_SV_VCF,
         )
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    @pytest.mark.skipif(
+        not HG00733_HG38_BAM or not HG00733_DIPCALL_VCF or not HG00733_DIPCALL_SV_VCF, reason="HG00733 dataset required"
+    )
+    @pytest.mark.parametrize(
+        "region",
+        [
+            Range("chr13",58895789,58895790),
+        ],
+    )
+    def test_hg00733_dipcall_images(self, cfg, hg00733_sample, region):
+        local_conf = OmegaConf.from_dotlist([
+        ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG00733_HG38_BAM,
+            hg00733_sample,
+            HG00733_DIPCALL_VCF,
+            HG00733_DIPCALL_SV_VCF,
+        )
+        print(example)
+        #png_path = str(tmp_path / "test.png")
+        png_path = result_path("test.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    @pytest.mark.skipif(
+        not HG00731_HG38_BAM or not HG00731_TRAINING_VCF or not HG00731_TRAINING_SV_VCF, reason="HG00731 dataset required"
+    )
+    @pytest.mark.parametrize(
+        "region",
+        [
+            Range("chr15", 68409525, 68409557),
+        ],
+    )
+    def test_hg00731_training_images(self, cfg, hg00731_sample, region):
+        local_conf = OmegaConf.from_dotlist([
+        ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG00731_HG38_BAM,
+            hg00731_sample,
+            HG00731_TRAINING_VCF,
+            HG00731_TRAINING_SV_VCF,
+        )
+        print(example)
         #png_path = str(tmp_path / "test.png")
         png_path = result_path("test.png")
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE

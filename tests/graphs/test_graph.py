@@ -6,18 +6,20 @@ import pysam
 import pytest
 
 from npsv3.graphs.graph import Graph
+from npsv3.graphs.graph_constructor import variant_path_to_id
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
 
 from .. import (
     B37_REF_FASTA,
-    HG00096_SV_VCF,
-    HG00096_VCF,
     HG002_DIPCALL_SV_VCF,
     HG002_DIPCALL_VCF,
+    HG002_GIAB_SV_VCF,
+    HG002_GIAB_VCF,
     HG00731_SV_VCF,
     HG00731_VCF,
     HG38_REF_FASTA,
+    RESOURCES_DIR,
     data_path,
 )
 
@@ -139,7 +141,7 @@ class TestGraphConstructionFromVCF:
                 Range("chr1", 41824764, 41824818),
                 "chr1_41823764_41825818.vcf.gz",
                 "chr1_41823764_41825818.sv.vcf.gz",
-                (2, 2), # < 50bp deletion is not considered, making this a bi-allelic site
+                (2, 2),  # < 50bp deletion is not considered, making this a bi-allelic site
             ),
         ],
     )
@@ -300,16 +302,20 @@ class TestGraphConstructionFromVCF:
     @pytest.mark.parametrize(
         ("region", "base_path", "expected_haplotypes"),
         [
-            # (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
-            # (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
-            # (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
-            # (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
-            (Range("chr1",3693946,3693946), "HG002#1#chr1", 2)
+            (Range.parse_literal("chr1:1139780-1140337"), "chr11", 3), # '*' allele in a SV (2 SVs are mutually exclusive)
+            (Range.parse_literal("chr1:3999762-3999900"), "chr11", 6), # Multi-allelic DEL, MNV followed by bi-allelic INS (not mutually exclusive)
+            (Range.parse_literal("chr11:61205612-61224442"), "HG002#0#chr11", 3), # Larger multi-allelic SV with overlapped SNVs
+            (Range.parse_literal("chr4:99589036-99589036"), "chr4", 4), # 2 abutting but otherwise independent insertions
+            (Range("chr1",3693946,3693946), "HG002#1#chr1", 2),
+            (Range.parse_literal("chr1:3999762-3999954"), "HG002#1#chr1", 6,), # Multi-allelic SNV that shouldn't allow paths with both alternate alleles
         ],
-    )
+    ) # fmt: skip
     def test_dipcall_observed_errors(self, cfg, region, base_path, expected_haplotypes):
         graph = Graph.from_vcf(
-            HG38_REF_FASTA, HG002_DIPCALL_VCF, region.expand(cfg.pileup.graph_flank), inference_vcf=HG002_DIPCALL_SV_VCF,
+            HG38_REF_FASTA,
+            HG002_DIPCALL_VCF,
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf=HG002_DIPCALL_SV_VCF,
         )
         graph._graph.to_gfa()
 
@@ -318,30 +324,56 @@ class TestGraphConstructionFromVCF:
             base_path,
             region.expand(cfg.pileup.variant_padding),
         )
-        print(haplotypes)
+
         assert len(haplotypes) == expected_haplotypes
         if base_path == region.contig:
-            assert haplotypes[0].nodes == graph.nodes_on_path(region.contig), "First haplotype should match reference path"
+            assert haplotypes[0].nodes == graph.nodes_on_path(region.contig), (
+                "First haplotype should match reference path"
+            )
 
+        # No haplotype should have multiple alleles from the same variant
+        for i, h in enumerate(haplotypes):
+            unique_variant_ids = {variant_path_to_id(path) for path in h.paths}
+            assert len(unique_variant_ids) == len(h.paths), (
+                f"Haplotype {i}: Has multiple alleles from the same variant ({h})"
+            )
 
-
-    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    @pytest.mark.skipif(not B37_REF_FASTA, reason="B37 reference required")
     @pytest.mark.parametrize(
-        ("region", "base_path"),
+        ("region", "base_path", "background_vcf"),
         [
-            (Range("chr1",1627438,1627489), "chr1",),
+            #(Range("1", 1317610, 1317610), "1", os.path.join(RESOURCES_DIR, "ashkenazi-gatk-haplotype-annotated.phased.vcf.gz")), # TODO: Having other samples in VCF seems to lead to error
+            (Range("2", 39714038, 39714038), "2", os.path.join(RESOURCES_DIR, "hg002v1.1.dipcall.passing.small.b37.vcf.gz")),  # Background variants/genotypes inconsistent with SVs
         ],
     )
-    def test_hgsvc3_hprc_errors(self, cfg, region, base_path):
+    def test_giab_errors(self, cfg, region, base_path, background_vcf):
         graph = Graph.from_vcf(
-            HG38_REF_FASTA, HG00096_VCF, region.expand(cfg.pileup.graph_flank), inference_vcf=HG00096_SV_VCF,
+            B37_REF_FASTA,
+            background_vcf,
+            region.expand(cfg.pileup.graph_flank),
+            inference_vcf=HG002_GIAB_SV_VCF,
         )
         graph._graph.to_gfa()
 
         haplotypes = graph.all_haplotypes(
-            HG00096_SV_VCF,
+            HG002_GIAB_SV_VCF,
             base_path,
             region.expand(cfg.pileup.variant_padding),
         )
         print(haplotypes)
 
+
+class TestGraphGenerationFromVCF:
+    @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference required")
+    @pytest.mark.skipif(not HG002_DIPCALL_VCF or not HG002_DIPCALL_SV_VCF, reason="HG002 dipcall VCFs required")
+    def test_dipcall_graphs(self):
+        region = Range("chr1", 3693501, 3695231)
+        graph = Graph.from_vcf(
+            HG38_REF_FASTA,
+            HG002_DIPCALL_VCF,
+            region,
+            inference_vcf=HG002_DIPCALL_SV_VCF,
+        )
+        graph._graph.to_gfa()
+
+        print(graph.sequence(graph.shortest_path("HG002#0#chr1")))

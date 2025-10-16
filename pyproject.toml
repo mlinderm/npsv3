@@ -45,6 +45,7 @@ dependencies = [
   "transformers",
   "timm",
   "tensorboard",
+  "mosaicml-streaming",
 ]
 
 [project.urls]
@@ -78,6 +79,7 @@ check = "mypy --install-types --non-interactive {args:src/npsv3 tests}"
 installer = "pip"
 extra-dependencies = [
   "pytest-timeout",
+  "debugpy>=1.8.0", # Needed by Ray
 ]
 
 [tool.hatch.envs.hatch-static-analysis]

@@ -3,6 +3,8 @@ import lightning as L
 import torch
 from omegaconf import OmegaConf
 
+from npsv3.models.paired import WorstLossCallback
+
 
 def load_model_from_checkpoint(cfg, *, strict=True):
     # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
@@ -26,7 +28,7 @@ def train(cfg, output_dir=None, **kw_args):
 
     dm = hydra.utils.instantiate(cfg.data)
 
-    if OmegaConf.is_missing(cfg, "model.checkpoint"):
+    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
         model = hydra.utils.instantiate(cfg.model)
     else:
         model = load_model_from_checkpoint(cfg, strict=False)
@@ -67,7 +69,6 @@ def train(cfg, output_dir=None, **kw_args):
 
     return checkpoint_callback.best_model_path
 
-
 def test(cfg, **kw_args):
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
@@ -84,7 +85,7 @@ def test(cfg, **kw_args):
     trainer = hydra.utils.instantiate(cfg.trainer, **trainer_args)
     return trainer.test(model=model, datamodule=dm)
 
-def predict(cfg, **kw_args):
+def predict(cfg, return_predictions=None, **kw_args):
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
@@ -93,9 +94,9 @@ def predict(cfg, **kw_args):
     model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
-        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50), WorstLossCallback()],
         **kw_args,
     }
 
     trainer = hydra.utils.instantiate(cfg.trainer, **trainer_args)
-    return trainer.predict(model=model, datamodule=dm)
+    return trainer.predict(model=model, datamodule=dm, return_predictions=return_predictions)

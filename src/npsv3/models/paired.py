@@ -1,4 +1,6 @@
+import heapq
 from typing import Callable, Optional
+
 import hydra
 import lightning as L
 import torch
@@ -39,26 +41,20 @@ class InceptionEncoder(nn.Module):
 
 
 class ViTEncoder(nn.Module):
-    def __init__(self, num_channels=8, projection_size=512, pretrained_path=None):
+    def __init__(self, num_channels=8, pretrained_path=None):
         super(ViTEncoder, self).__init__()
         self.num_channels = num_channels
-        # self.projection_size = projection_size
 
         config = ViTConfig(num_channels=self.num_channels, image_size = (96, 288), )
 
         if pretrained_path:
             checkpoint = torch.load(pretrained_path, map_location=torch.device('cpu'), weights_only=False)
             self.model = ViTModel(config, add_pooling_layer=False)
-            print(list(checkpoint["state_dict"].keys()))
             encoder_weights = {k.removeprefix("model.vit."): v for k, v in checkpoint["state_dict"].items() if k.startswith("model.vit.")}
             self.model.load_state_dict(encoder_weights, strict=False)
         else:
             self.model = ViTModel(config, add_pooling_layer=False)
 
-        # self.inception.Conv2d_1a_3x3.conv = nn.Conv2d(num_channels, 32, kernel_size=(3, 3), stride=(2, 2), bias=False)
-
-        # self.inception.fc = nn.Linear(self.inception.fc.in_features, projection_size, bias=False)
-        # self.bn = nn.BatchNorm1d(projection_size)
 
     def forward(self, x):
         outputs = self.model(x)
@@ -364,6 +360,8 @@ class PackedVariant(L.LightningModule):
         num_variants = label.size(0)
         self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
 
+        return loss
+
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         return self(batch)
 
@@ -384,6 +382,26 @@ class PackedVariant(L.LightningModule):
             # timm's schedulers appear to need the "next" epoch at each step
             # https://github.com/huggingface/pytorch-image-models/blob/954613a470652e4a113ff45b62dbd15c4e229218/train.py#L1067
             scheduler.step(epoch=self.current_epoch + 1)
+
+
+class WorstLossCallback(L.pytorch.callbacks.Callback):
+    def __init__(self, k=5):
+        super().__init__()
+        self.k = k
+        self.worst_losses = []
+
+    def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
+        metric, _preds, labels, metadata = outputs
+        loss, _batch_size = model.loss(metric, labels)
+
+        if len(self.worst_losses) < self.k:
+            heapq.heappush(self.worst_losses, (loss.item(), metric, labels, metadata))
+        elif loss.item() > self.worst_losses[0][0]:
+            heapq.heappushpop(self.worst_losses, (loss.item(), metric, labels, metadata))
+
+    def on_predict_end(self, trainer, model):  # noqa: ARG002
+        for loss, metric, labels, metadata in sorted(self.worst_losses, reverse=True):
+            print(loss, metric.offsets(), metric.values(), labels.values(), metadata)
 
 
 def predict(cfg, **kw_args):

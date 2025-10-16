@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import logging
 import os
@@ -258,12 +259,12 @@ class _SymbolicDeletionVariant(Variant):
         return ""
 
 
-def overlapping_records(vcf_path: str, flank=0):
+def overlapping_records(vcf_path: str|pysam.VariantFile, flank=0):
     # We assume VCF is in sorted order
     current_range = None
     current_records = []
 
-    with pysam.VariantFile(vcf_path) as vcf_file:
+    with contextlib.nullcontext(vcf_path) if isinstance(vcf_path, pysam.VariantFile) else pysam.VariantFile(vcf_path) as vcf_file:
         for record in vcf_file:
             variant = Variant.from_pysam(record)
             variant_range = variant.reference_region.expand(flank)

@@ -6,8 +6,8 @@ import typing
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from npsv3.util.config import setup_resolvers
 from npsv3.simulation import bwa_index_loaded
+from npsv3.util.config import setup_resolvers
 
 
 def _check_shared_reference(cfg: DictConfig):
@@ -55,13 +55,13 @@ def main(cfg: DictConfig) -> None:
         from npsv3.genotype import genotype
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "stats_path"])
+        _make_paths_absolute(cfg, ["reference", "stats_path", "model.checkpoint"])
         _check_shared_reference(cfg)
 
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
 
         # If no output file is specified, create a fixed file in the Hydra output directory
-        output = "genotypes.vcf" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+        output = "genotypes.vcf.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         genotype(
             cfg,
@@ -69,6 +69,7 @@ def main(cfg: DictConfig) -> None:
             sample,
             hydra.utils.to_absolute_path(cfg.input),
             output,
+            background_vcf=hydra.utils.to_absolute_path(cfg.background),
         )
     elif cfg.command == "images":
         from npsv3.util.sample import Sample
@@ -115,47 +116,6 @@ def main(cfg: DictConfig) -> None:
                 os.unlink(final_checkpoint)
             os.symlink(checkpoint, final_checkpoint)
 
-    elif cfg.command == "full_train":
-        import torch
-        torch.set_float32_matmul_precision("high")
-
-        from npsv3.models.runners import train, assess_accuracy
-
-        torch.set_num_threads(cfg.threads)
-
-        # If no output directory is specified, use the Hydra output directory (the current working directory)
-        if OmegaConf.is_missing(cfg, "output"):
-            output = os.getcwd()
-        else:
-            output = hydra.utils.to_absolute_path(cfg.output)
-
-        OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
-        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
-        if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
-            OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
-
-        pretraining_model = cfg.model
-        # print(cfg.data.train_urls)
-        ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
-        OmegaConf.update(cfg, "model._target_", "npsv3.models.transformer.Classifier", merge=False)
-        # print("\ncheckpoint path:",ckpt_path)
-        OmegaConf.update(cfg, "pretrained.path", ckpt_path, merge=False)
-        OmegaConf.update(cfg, "checkpoint.name", "full_train-{step}-{train_loss}", merge=False)
-        ckpt_path = train(cfg, output_dir=output, limit_train_batches=1.0)
-        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
-        # print(cfg.data._target_, cfg.data.batch_size, cfg.data, pretraining_model, cfg.pileup, cfg.trainer.max_epochs)
-
-    elif cfg.command == "assess_accuracy":
-        # print("\nassessing accuracy")
-        import torch
-        torch.set_float32_matmul_precision("high")
-        from npsv3.models.runners import assess_accuracy
-
-        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
-
-        ckpt_path = cfg.pretrained.path
-        assess_accuracy(cfg, ckpt_path, limit_predict_batches=1.0)
-
     elif cfg.command == "test":
         import torch
 
@@ -176,14 +136,14 @@ def main(cfg: DictConfig) -> None:
     elif cfg.command == "predict":
         import torch
 
-        from npsv3.models.paired import predict
+        from npsv3.models.runners import predict
 
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
 
-        predict(cfg)
+        predict(cfg, return_predictions=False)
 
     elif cfg.command == "encode":
         import torch
@@ -192,16 +152,25 @@ def main(cfg: DictConfig) -> None:
 
         torch.set_num_threads(cfg.threads)
 
-         # If no output directory is specified, use the Hydra output directory (the current working directory)
-        if OmegaConf.is_missing(cfg, "output"):
-            output = os.getcwd()
-        else:
-            output = hydra.utils.to_absolute_path(cfg.output)
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
 
         encode(cfg, output_dir=output)
+
+    elif cfg.command == "split_and_filter":
+        from npsv3.images.example import split_and_filter_vcf
+
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        split_and_filter_vcf(
+            cfg,
+            hydra.utils.to_absolute_path(cfg.input),
+            output,
+        )
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

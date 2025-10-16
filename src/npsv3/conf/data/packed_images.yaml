@@ -9,4 +9,4 @@ shuffle_size: 1000
 pad: false
 resampled: false
 epoch_batches: null
-patch_size: 16
+patch_size: ${oc.select:model.patch_size,16}
