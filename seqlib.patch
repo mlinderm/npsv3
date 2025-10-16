@@ -1,4 +1,3 @@
-Submodule bwa contains modified content
 diff --git a/bwa/Makefile b/bwa/Makefile
 index 478aec8..6164a87 100644
 --- a/bwa/Makefile
@@ -182,7 +181,6 @@ index 0d59484..4f8946d 100644
  
  #define RLE_MIN_SPACE 18
  #define rle_nptr(block) ((uint16_t*)(block))
-Submodule fermi-lite contains modified content
 diff --git a/fermi-lite/Makefile b/fermi-lite/Makefile
 index 4929693..6e05c5b 100644
 --- a/fermi-lite/Makefile
@@ -593,3 +591,19 @@ index ded8719..e008f89 100644
  libseqlib_a_SOURCES = FastqReader.cpp BFC.cpp ReadFilter.cpp SeqPlot.cpp ssw_cpp.cpp ssw.c \
  			GenomicRegion.cpp RefGenome.cpp BamWriter.cpp BamReader.cpp \
  			BWAWrapper.cpp BamRecord.cpp FermiAssembler.cpp BamHeader.cpp jsoncpp.cpp
+diff --git a/htslib/Makefile b/htslib/Makefile
+index 9a44b62..ce0cf4a 100644
+--- a/htslib/Makefile
++++ b/htslib/Makefile
+@@ -245,9 +245,9 @@ BUILT_PLUGINS = $(PLUGIN_OBJS:.o=$(PLUGIN_EXT))
+ plugins: $(BUILT_PLUGINS)
+ 
+ 
+-libhts.a: $(LIBHTS_OBJS)
++libhts.a: $(LIBHTS_OBJS:.o=.pico)
+        @-rm -f $@
+-       $(AR) -rc $@ $(LIBHTS_OBJS)
++       $(AR) -rc $@ $(LIBHTS_OBJS:.o=.pico)
+        -$(RANLIB) $@
+ 
+ print-config:

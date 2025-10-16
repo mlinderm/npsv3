@@ -1,71 +1,83 @@
 ARG BASE_IMAGE=ubuntu:24.04
 
-FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}
+FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS build
 
 RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
-  art-nextgen-simulation-tools \
-  bcftools \
-  bedtools \
   build-essential \
-  bwa \
   ca-certificates \
   cmake \
   curl \
   gawk \
   git \
   libbz2-dev \
+  libjansson-dev \
   libjemalloc-dev \
   liblzma-dev \
-  libsdsl-dev \
   pkg-config \
   protobuf-compiler \
   python3-dev \
-  python3-pip \
-  python3-pkgconfig \
+  cython3 \
+  art-nextgen-simulation-tools \
+  bcftools \
+  bedtools \
+  bwa \
   sambamba \
   samtools \
   tabix \
-  && \
-  apt-get clean -y && \
-  rm -rf /var/lib/apt/lists/*
+  && apt-get clean -y \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install vg
+# Install pip>=25 manually to enable SPDX license identifiers (like used in whatshap)
+RUN curl -O https://bootstrap.pypa.io/get-pip.py \
+  && python3 get-pip.py --break-system-packages \
+  && rm -f get-pip.py
+
+# Install libbdsg, gbwt and gbwtgraph libraries
+RUN git clone --recursive https://github.com/vgteam/libbdsg.git /opt/libbdsg \
+  && cd /opt/libbdsg \
+  && mkdir build \
+  && cd build \
+  && cmake .. -DRUN_DOXYGEN=OFF -DBUILD_PYTHON_BINDINGS=OFF -DCMAKE_BUILD_TYPE=Release \
+  && make -j $(nproc) \
+  && INSTALL_PREFIX=/usr/local make install
+
+RUN mkdir -p /opt/gbwt \
+  && curl -SL https://github.com/jltsiren/gbwt/archive/refs/tags/v1.4.tar.gz \
+  | tar -xzC /opt/gbwt --strip-components=1 \
+  && make SDSL_DIR=/opt/libbdsg/bdsg/deps/sdsl-lite -C /opt/gbwt all -j $(nproc) \
+  && cp -R /opt/gbwt/include/gbwt /usr/local/include \
+  && cp /opt/gbwt/lib/libgbwt.a /usr/local/lib/
+
+RUN mkdir -p /opt/gbwtgraph \
+  && curl -SL https://github.com/jltsiren/gbwtgraph/archive/refs/tags/v1.1.tar.gz \
+  | tar -xzC /opt/gbwtgraph --strip-components=1 \
+  && make SDSL_DIR=/opt/libbdsg/bdsg/deps/sdsl-lite -C /opt/gbwtgraph all -j $(nproc)\
+  && cp -R /opt/gbwtgraph/include/gbwtgraph /usr/local/include \
+  && cp /opt/gbwtgraph/lib/libgbwtgraph.a /usr/local/lib/
+
+# Install vg, samblaster and goleft executables
 RUN case ${TARGETPLATFORM} in \
     "linux/arm64") VG_DOWNLOAD=vg-arm64 ;; \
     *) VG_DOWNLOAD=vg ;; \
   esac && \
-  curl -SL "https://github.com/vgteam/vg/releases/download/v1.54.0/${VG_DOWNLOAD}" \
+  curl -SL "https://github.com/vgteam/vg/releases/download/v1.67.0/${VG_DOWNLOAD}" \
     -o /usr/local/bin/vg && \
   chmod +x /usr/local/bin/vg
 
-# Install odgi (and libraries)
-# RUN mkdir -p /opt/odgi \
-#   && curl -SL https://github.com/pangenome/odgi/releases/download/v0.8.3/odgi-v0.8.3.tar.gz \
-#   | tar -xzC /opt/odgi --strip-components=1 \
-#   && cmake -S /opt/odgi -B /opt/odgi/build \
-#   && cmake --build /opt/odgi/build -- -j 2
-
-# During development we are mounting our local fork of odgi into the containter
-
-# Needed for odgi Python bindings
-ENV LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
-  PYTHONPATH="/opt/odgi/lib:${PYTHON_PATH}" \
-  PATH="/opt/odgi/bin:${PATH}"
-
 RUN mkdir -p /opt/samblaster && \
-    curl -SL https://github.com/GregoryFaust/samblaster/releases/download/v.0.1.26/samblaster-v.0.1.26.tar.gz \
-      | tar -xzC /opt/samblaster --strip-components=1 && \
-    make -C /opt/samblaster && \
-    cp /opt/samblaster/samblaster /usr/local/bin/.
+  curl -SL https://github.com/GregoryFaust/samblaster/releases/download/v.0.1.26/samblaster-v.0.1.26.tar.gz \
+    | tar -xzC /opt/samblaster --strip-components=1 && \
+  make -C /opt/samblaster -j $(nproc) && \
+  cp /opt/samblaster/samblaster /usr/local/bin/.
 
 RUN case ${TARGETPLATFORM} in \
-      "linux/arm64") GOLEFT_DOWNLOAD=goleft_linux_aarch64 ;; \
-      *) GOLEFT_DOWNLOAD=goleft_linux64 ;; \
-    esac && \
-    curl -SL "https://github.com/brentp/goleft/releases/download/v0.2.6/${GOLEFT_DOWNLOAD}" \
-      -o /usr/local/bin/goleft && \
-    chmod +x /usr/local/bin/goleft
-       
+    "linux/arm64") GOLEFT_DOWNLOAD=goleft_linux_aarch64 ;; \
+    *) GOLEFT_DOWNLOAD=goleft_linux64 ;; \
+  esac && \
+  curl -SL "https://github.com/brentp/goleft/releases/download/v0.2.6/${GOLEFT_DOWNLOAD}" \
+    -o /usr/local/bin/goleft && \
+  chmod +x /usr/local/bin/goleft
+
 # Install hatch for development
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
   hatch
@@ -74,8 +86,44 @@ ADD . /opt/npsv3
 
 WORKDIR /opt/npsv3
 
-# Install the package, preferentially installing PyTorch from the CPU-only wheel
-RUN python3 -m pip install --break-system-packages --no-cache-dir \
+# Install the package as a user (to prepare for multistage build), preferentially installing PyTorch
+# from the CPU-only wheel
+ENV PATH=/root/.local/bin:$PATH
+RUN python3 -m pip install --user --break-system-packages --no-cache-dir \
   --index-url https://download.pytorch.org/whl/cpu \
   --extra-index-url https://pypi.org/simple/ \
   .
+
+# Install odgi (and libraries) During development we are mounting our local fork of odgi into the container
+ENV LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
+  PYTHONPATH="/opt/odgi/lib:${PYTHON_PATH}" \
+  PATH="/opt/odgi/bin:${PATH}"
+# RUN mkdir -p /opt/odgi \
+#   && curl -SL https://github.com/pangenome/odgi/releases/download/v0.8.3/odgi-v0.8.3.tar.gz \
+#   | tar -xzC /opt/odgi --strip-components=1 \
+#   && cmake -S /opt/odgi -B /opt/odgi/build \
+#   && cmake --build /opt/odgi/build -- -j 2
+
+
+# TODO: Multistage build to reduce image size and avoid installing build dependencies in the final image
+# Adapted from: https://pythonspeed.com/articles/multi-stage-docker-python/
+# FROM --platform=$BUILDPLATFORM ${BASE_IMAGE}
+
+# # Copy installed Python packages, libraries and binaries
+# COPY --from=build /root/.local /root/.local
+# COPY --from=build /usr/local/bin/vg /usr/local/bin/samblaster /usr/local/bin/goleft /usr/local/bin
+
+# RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
+#   art-nextgen-simulation-tools \
+#   bcftools \
+#   bedtools \
+#   bwa \
+#   sambamba \
+#   samtools \
+#   tabix \
+#   && \
+#   apt-get clean -y && \
+#   rm -rf /var/lib/apt/lists/*
+
+# ENV PATH=/root/.local/bin:$PATH
+# CMD ["npsv3"]

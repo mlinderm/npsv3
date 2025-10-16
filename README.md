@@ -81,6 +81,33 @@ python3 -m pip install -e .
 
 You can run the unit tests with `hatch test`.
 
+## Development
+
+### arm64
+
+
+```
+docker build -f Dockerfile.arm64 --target build -t npsv3-build .
+```
+
+```
+docker run --rm --entrypoint /bin/bash \
+    --shm-size=8g \
+    -v ~/Research/data:/data \
+    -v `pwd`/../odgi:/opt/odgi \
+    -v `pwd`:/opt/npsv3 \
+    -w /opt/npsv3 \
+    -it npsv3-build
+```
+
+For easily rebuilding when making changes to the C++ extension
+```
+hatch -e hatch-test.py3.12 shell
+pip install nanobind scikit-build-core[pyproject]
+pip install --no-build-isolation -ve .
+pytest tests
+```
+
 ## License
 
 `npsv3` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
