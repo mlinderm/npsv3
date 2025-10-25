@@ -11,7 +11,7 @@ from npsv3.realigner import (
     FragmentRealigner,
     realign_fragment,
 )
-from npsv3._native import test_realign_read_pair as realign_read_pair, test_score_alignment as score_alignment
+from npsv3._native_realign import test_realign_read_pair as realign_read_pair, test_score_alignment as score_alignment
 
 from . import data_path
 

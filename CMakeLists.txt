@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15...3.27)
 project(npsv3 CXX)
-
+#set(CMAKE_FIND_DEBUG_MODE 1)
 # Nanobind configuration adapted from: https://nanobind.readthedocs.io/en/latest/packaging.html
 if (NOT SKBUILD)
   message(WARNING "\
@@ -40,6 +40,7 @@ endif()
 
 find_package(nanobind CONFIG REQUIRED)
 
+include(FetchContent)
 include(ExternalProject)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -51,10 +52,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(LibLZMA REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(BZip2 REQUIRED)
-find_package(SeqLib REQUIRED) # This will also patch SeqLib as needed
 
-find_package(LibBDSG REQUIRED)
-find_package(GBWT REQUIRED)
+find_package(SeqLib REQUIRED) # This will also patch SeqLib as needed
+find_package(HTSLib 1.17 REQUIRED)
+find_package(ODGI REQUIRED)
+
+# Find (or build) Boost 
+find_package(Boost 1.88 HINTS "${CMAKE_BINARY_DIR}/lib/boost")
+if (NOT Boost_FOUND)
+  message(STATUS "Boost not found, downloading and building Boost...")
+  ExternalProject_Add(
+		Boost
+    URL https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2
+    URL_HASH SHA256=85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a
+    PREFIX "${CMAKE_BINARY_DIR}/lib/boost"
+		UPDATE_COMMAND ""
+		CONFIGURE_COMMAND ./bootstrap.sh --prefix=<INSTALL_DIR>
+		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 install
+		BUILD_IN_SOURCE true
+		INSTALL_COMMAND ""
+	)
+  ExternalProject_Get_Property(Boost install_dir)
+  set(Boost_FOUND true)
+  set(Boost_INCLUDE_DIRS "${install_dir}/include")
+  
+  # INTERFACE_INCLUDE_DIRECTORIES must be defined, so create the relevant directory if it doesn't exist
+  # https://stackoverflow.com/questions/45516209/cmake-how-to-use-interface-include-directories-with-externalproject
+  file(MAKE_DIRECTORY ${Boost_INCLUDE_DIRS})
+
+  add_library(Boost::boost INTERFACE IMPORTED)
+  target_include_directories(Boost::boost INTERFACE ${Boost_INCLUDE_DIRS})
+endif()
 
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
@@ -62,25 +90,85 @@ find_package(Threads REQUIRED)
 
 # Set source directory
 set(SOURCE_DIR "src/npsv3")
+set(TEST_DIR "tests")
 
-include_directories(${SOURCE_DIR} ${SEQLIB_INCLUDE_DIRS})
-set(SOURCES "${SOURCE_DIR}/bindings.cpp" "${SOURCE_DIR}/realigner.cpp")
-
-# Add bindings here
-nanobind_add_module(_native STABLE_ABI ${SOURCES})
-
-target_link_libraries(_native
+# We construct two separate modules because SeqLib and our own native code use inconsistent versions of HTSlib
+nanobind_add_module(_native_realign STABLE_ABI 
+  "${SOURCE_DIR}/native/realigner_bindings.cpp"
+  "${SOURCE_DIR}/native/realigner.cpp"
+)
+target_include_directories(_native_realign
   PRIVATE
-  ${SEQLIB_LIBRARIES}
+  "${SOURCE_DIR}/native"
+  ${SEQLIB_INCLUDE_DIRS}
+) 
+target_link_libraries(_native_realign
+  PRIVATE
   ${ZLIB_LIBRARIES}
   ${LIBLZMA_LIBRARIES}
   ${BZIP2_LIBRARIES}
   Threads::Threads
-  LibBDSG::LibBDSG
-  GBWT::GBWT
+  ${SEQLIB_LIBRARIES}
+)
+
+set(GRAPH_SOURCES
+  "${SOURCE_DIR}/native/range.cpp"
+  "${SOURCE_DIR}/native/fasta.cpp"
+  "${SOURCE_DIR}/native/variant.cpp"
+  "${SOURCE_DIR}/native/graph.cpp"
+)
+
+nanobind_add_module(_native_graph STABLE_ABI 
+  "${SOURCE_DIR}/native/graph_bindings.cpp"
+  ${GRAPH_SOURCES}
+)
+target_include_directories(_native_graph
+  PRIVATE
+  "${SOURCE_DIR}/native"
+) 
+target_link_libraries(_native_graph
+  PRIVATE
+  HTSLib::Static
+  ODGI::ODGI
+  Boost::boost
 )
 
 # Install directive for scikit-build-core, including installing additional scripts 
 # (in place of using setup.py scripts)
-install(TARGETS _native LIBRARY DESTINATION npsv3)
+install(TARGETS _native_realign LIBRARY DESTINATION npsv3)
+install(TARGETS _native_graph LIBRARY DESTINATION npsv3)
 install(PROGRAMS scripts/synthBAM DESTINATION ${SKBUILD_SCRIPTS_DIR})
+
+# C++ unit tests using GoogleTest
+FetchContent_Declare(
+  googletest
+  # Release 1.17.0
+  URL https://github.com/google/googletest/archive/52eb8108c5bdec04579160ae17225d66034bd723.zip
+)
+
+set(INSTALL_GTEST OFF CACHE BOOL "Disable installation of googletest" FORCE)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(googletest)
+
+enable_testing()
+
+add_executable(graph_test
+  "${TEST_DIR}/native/test_variant.cpp"
+  "${TEST_DIR}/native/test_graph.cpp"
+  ${GRAPH_SOURCES}
+)
+target_include_directories(graph_test
+  PRIVATE
+  "${SOURCE_DIR}/native"
+) 
+target_link_libraries(graph_test
+  GTest::gtest_main
+  HTSLib::Static
+  ODGI::ODGI
+  Boost::boost
+)
+
+include(GoogleTest)
+gtest_discover_tests(graph_test)

@@ -2,7 +2,7 @@ import numpy as np
 import pysam
 from scipy.special import logsumexp
 
-from npsv3._native import FragmentRealigner
+from npsv3._native_realign import FragmentRealigner
 from npsv3.pileup import AlleleAssignment, AlleleRealignment, Fragment
 
 

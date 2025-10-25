@@ -1,0 +1,27 @@
+#include "fasta.hpp"
+
+namespace npsv3 {
+FastaReader::FastaReader(const std::string& fasta_path) {
+  // Don't create an index if it doesn't exist
+  faidx_t* fai = fai_load3(fasta_path.c_str(), NULL, NULL, 0);
+  if (!fai) {
+    throw std::runtime_error("Failed to load FASTA index for file: " + fasta_path);
+  }
+  file_ = FaidxPtr(fai);
+}
+
+std::string FastaReader::FetchSequence(const Range& region) {
+  int64_t seq_len = 0;
+  // faidx_fetch_seq* uses an inclusive end coordinate
+  char* seq = faidx_fetch_seq64(file_.get(), region.Contig().c_str(), region.Start(), region.End()-1, &seq_len);
+  if (!seq) {
+    throw std::runtime_error("Failed to fetch sequence for region: " +
+                             region.Contig().get() + ":" +
+                             std::to_string(region.Start()) + "-" +
+                             std::to_string(region.End()));
+  }
+  std::string result(seq, seq_len);
+  free(seq);
+  return result;
+}
+} // namespace npsv3

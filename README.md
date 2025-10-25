@@ -83,6 +83,34 @@ You can run the unit tests with `hatch test`.
 
 ## Development
 
+### Building and testing the native extension
+
+The C++ extension build is implemented with scikit-build-score. For easily rebuilding when making changes to the C++ extension
+```
+hatch -e hatch-test.py3.12 shell
+pip install nanobind scikit-build-core[pyproject]
+pip install --no-build-isolation -ve .
+```
+
+at which point you can run the tests with `pytest <pytest args...>`, e.g., `pytest tests` to run all tests. There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.11. If not use the correct build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
+
+```
+cmake --build build/cp311-cp311-linux_x86_64 -t graph_test
+ctest --test-dir build/cp311-cp311-linux_x86_64
+```
+
+To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--dist no` disables the distributed test plugin.
+```
+pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"`
+gdb -args python3 -m pytest --dist no tests
+```
+To use valgrind, similarly build with debug symbols, then run python3 under valgrind. `-p no:warnings` prevents warnings related to NumPy from blocking the tests from running.
+```
+valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt python3 -m pytest -p no:warnings tests
+```
+
+To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE_ARGS="--fresh"`.
+
 ### arm64
 
 
@@ -107,6 +135,7 @@ pip install nanobind scikit-build-core[pyproject]
 pip install --no-build-isolation -ve .
 pytest tests
 ```
+
 
 ## License
 

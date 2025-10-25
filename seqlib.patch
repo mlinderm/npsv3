@@ -592,7 +592,7 @@ index ded8719..e008f89 100644
  			GenomicRegion.cpp RefGenome.cpp BamWriter.cpp BamReader.cpp \
  			BWAWrapper.cpp BamRecord.cpp FermiAssembler.cpp BamHeader.cpp jsoncpp.cpp
 diff --git a/htslib/Makefile b/htslib/Makefile
-index 9a44b62..ce0cf4a 100644
+index 9a44b626..ce0cf4ad 100644
 --- a/htslib/Makefile
 +++ b/htslib/Makefile
 @@ -245,9 +245,9 @@ BUILT_PLUGINS = $(PLUGIN_OBJS:.o=$(PLUGIN_EXT))
@@ -601,9 +601,9 @@ index 9a44b62..ce0cf4a 100644
  
 -libhts.a: $(LIBHTS_OBJS)
 +libhts.a: $(LIBHTS_OBJS:.o=.pico)
-        @-rm -f $@
--       $(AR) -rc $@ $(LIBHTS_OBJS)
-+       $(AR) -rc $@ $(LIBHTS_OBJS:.o=.pico)
-        -$(RANLIB) $@
+ 	@-rm -f $@
+-	$(AR) -rc $@ $(LIBHTS_OBJS)
++	$(AR) -rc $@ $^
+ 	-$(RANLIB) $@
  
  print-config:

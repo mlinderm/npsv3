@@ -68,15 +68,18 @@ else()
     add_dependencies(libbwa seqlib)
 
     set_target_properties(libseqlib PROPERTIES
-        "IMPORTED_LOCATION" "${binary_dir}/src/libseqlib.a"
+        IMPORTED_LOCATION "${binary_dir}/src/libseqlib.a"
+        INCLUDE_DIRECTORIES "${source_dir}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SEQLIB_INCLUDE_DIRS}"
     )
 
     set_target_properties(libhts PROPERTIES
-        "IMPORTED_LOCATION" "${binary_dir}/htslib/libhts.a"
+        IMPORTED_LOCATION "${binary_dir}/htslib/libhts.a"
+        INCLUDE_DIRECTORIES "${source_dir}/htslib"
     )
 
     set_target_properties(libbwa PROPERTIES
-        "IMPORTED_LOCATION" "${binary_dir}/bwa/libbwa.a"
+        IMPORTED_LOCATION "${binary_dir}/bwa/libbwa.a"
     )
 
     set(SEQLIB_LIBRARIES libseqlib libhts libbwa)

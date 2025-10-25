@@ -9,6 +9,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+.nfs*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
