@@ -13,12 +13,12 @@ FastaReader::FastaReader(const std::string& fasta_path) {
 std::string FastaReader::FetchSequence(const Range& region) {
   int64_t seq_len = 0;
   // faidx_fetch_seq* uses an inclusive end coordinate
-  char* seq = faidx_fetch_seq64(file_.get(), region.Contig().c_str(), region.Start(), region.End()-1, &seq_len);
+  char* seq = faidx_fetch_seq64(file_.get(), region.contig().c_str(), region.start(), region.end()-1, &seq_len);
   if (!seq) {
     throw std::runtime_error("Failed to fetch sequence for region: " +
-                             region.Contig().get() + ":" +
-                             std::to_string(region.Start()) + "-" +
-                             std::to_string(region.End()));
+                             region.contig().get() + ":" +
+                             std::to_string(region.start()) + "-" +
+                             std::to_string(region.end()));
   }
   std::string result(seq, seq_len);
   free(seq);

@@ -17,12 +17,12 @@ namespace fs = std::filesystem;
 class TestVCFFile {
 public:
   explicit TestVCFFile(const std::string& contents) {
-    char temp_template[] = "test.XXXXXX";
-    temp_dir_ = fs::path(::mkdtemp(temp_template));
+    std::string temp_template = (fs::temp_directory_path() / "test.XXXXXX").string();
+    temp_dir_ = fs::path(::mkdtemp(temp_template.data()));
     file_path_ = temp_dir_ / "variant.vcf.gz";
     
     { // Write BGZF-compressed VCF (closing when done or on error)
-      std::unique_ptr<BGZF, npsv3::internal::bgzf_deleter> fp(bgzf_open(file_path_.c_str(), "w"));
+      std::unique_ptr<BGZF, npsv3::detail::bgzf_deleter> fp(bgzf_open(file_path_.c_str(), "w"));
       if (!fp) {
         throw std::runtime_error("failed to open bgzf for writing: " + file_path_.native());
       }

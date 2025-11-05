@@ -45,10 +45,12 @@ endif()
 
 include(ExternalProject)
 ExternalProject_Add(HTSLib
-    URL https://github.com/samtools/htslib/releases/download/1.22.1/htslib-1.22.1.tar.bz2
+    # Downgrade to 1.21 due to this error in 1.22 (https://github.com/samtools/htslib/issues/1940)
+    #URL https://github.com/samtools/htslib/releases/download/1.22.1/htslib-1.22.1.tar.bz2
+    URL https://github.com/samtools/htslib/releases/download/1.21/htslib-1.21.tar.bz2
     PREFIX "${CMAKE_BINARY_DIR}/lib/htslib"
     UPDATE_COMMAND ""
-    CONFIGURE_COMMAND ./configure "CFLAGS=-fPIC" --prefix=<INSTALL_DIR> ${HTSLib_CONFIGURE_OPTIONS}
+    CONFIGURE_COMMAND ./configure "CFLAGS=-g -fPIC" --prefix=<INSTALL_DIR> ${HTSLib_CONFIGURE_OPTIONS}
     BUILD_COMMAND ${MAKE_COMMAND} lib-static
     INSTALL_COMMAND ${MAKE_COMMAND} install
     BUILD_IN_SOURCE true

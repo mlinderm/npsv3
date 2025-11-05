@@ -49,6 +49,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Get external dependencies
+# TODO: Move this into FindSeqLib.cmake
 find_package(LibLZMA REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(BZip2 REQUIRED)
@@ -84,6 +85,38 @@ if (NOT Boost_FOUND)
   target_include_directories(Boost::boost INTERFACE ${Boost_INCLUDE_DIRS})
 endif()
 
+include(FetchContent)
+
+if(DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
+    set(_ORIG_CMAKE_POSITION_INDEPENDENT_CODE "${CMAKE_POSITION_INDEPENDENT_CODE}")
+else()
+    set(_ORIG_CMAKE_POSITION_INDEPENDENT_CODE)
+endif()
+
+# Build fmt with PIC enabled so it can be linked into the Python extension shared library
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+FetchContent_Declare(
+  fmt
+  GIT_REPOSITORY https://github.com/fmtlib/fmt
+  GIT_TAG        e424e3f2e607da02742f73db84873b8084fc714c # 12.0.0
+)
+FetchContent_MakeAvailable(fmt)
+
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog
+  GIT_TAG        v1.16.0
+)
+set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "Use external fmt library instead of bundled") 
+FetchContent_MakeAvailable(spdlog)
+
+# Restore the original CMAKE_POSITION_INDEPENDENT_CODE ordering
+if(DEFINED _ORIG_CMAKE_POSITION_INDEPENDENT_CODE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE "${_ORIG_CMAKE_POSITION_INDEPENDENT_CODE}")
+else()
+    set(CMAKE_POSITION_INDEPENDENT_CODE)
+endif()
+
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
@@ -111,26 +144,32 @@ target_link_libraries(_native_realign
   ${SEQLIB_LIBRARIES}
 )
 
-set(GRAPH_SOURCES
+add_library(graph STATIC
   "${SOURCE_DIR}/native/range.cpp"
   "${SOURCE_DIR}/native/fasta.cpp"
   "${SOURCE_DIR}/native/variant.cpp"
   "${SOURCE_DIR}/native/graph.cpp"
 )
-
-nanobind_add_module(_native_graph STABLE_ABI 
-  "${SOURCE_DIR}/native/graph_bindings.cpp"
-  ${GRAPH_SOURCES}
-)
-target_include_directories(_native_graph
-  PRIVATE
+set_target_properties(graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(graph
+  PUBLIC
   "${SOURCE_DIR}/native"
-) 
-target_link_libraries(_native_graph
-  PRIVATE
+)
+target_link_libraries(graph
+  PUBLIC
   HTSLib::Static
   ODGI::ODGI
   Boost::boost
+  fmt::fmt
+  spdlog::spdlog
+)
+
+nanobind_add_module(_native_graph STABLE_ABI 
+  "${SOURCE_DIR}/native/graph_bindings.cpp"
+)
+target_link_libraries(_native_graph
+  PRIVATE
+  graph
 )
 
 # Install directive for scikit-build-core, including installing additional scripts 
@@ -157,17 +196,12 @@ enable_testing()
 add_executable(graph_test
   "${TEST_DIR}/native/test_variant.cpp"
   "${TEST_DIR}/native/test_graph.cpp"
-  ${GRAPH_SOURCES}
 )
-target_include_directories(graph_test
-  PRIVATE
-  "${SOURCE_DIR}/native"
-) 
 target_link_libraries(graph_test
   GTest::gtest_main
+  graph
   HTSLib::Static
-  ODGI::ODGI
-  Boost::boost
+  spdlog::spdlog
 )
 
 include(GoogleTest)

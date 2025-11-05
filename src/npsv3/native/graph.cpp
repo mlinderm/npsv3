@@ -1,6 +1,8 @@
 #include "graph.hpp"
 
 #include <algorithms/topological_sort.hpp>
+#include <fmt/format.h>
+#include <boost/core/span.hpp>
 
 #include "fasta.hpp"
 #include "variant.hpp"
@@ -27,12 +29,12 @@ class ReferenceNodes {
   }
 
   void CreateRefNode(Pos start, Pos end) {
-    if (!regions_.empty() && start < regions_.back().End()) {
+    if (!regions_.empty() && start < regions_.back().end()) {
       throw std::runtime_error("Reference node regions must be in sorted order");
     }
-    regions_.emplace_back(region_.Contig(), start, end);
+    regions_.emplace_back(region_.contig(), start, end);
     auto next_handle =
-        graph_.create_handle(start == end ? "*" : ref_seq_.substr(start - region_.Start(), end - start));
+        graph_.create_handle(start == end ? "*" : ref_seq_.substr(start - region_.start(), end - start));
     if (!handles_.empty()) {
       graph_.create_edge(handles_.back(), next_handle);
     }
@@ -40,17 +42,15 @@ class ReferenceNodes {
   }
 
   void AddRefPath() {
-    odgi::path_handle_t path_handle = graph_.create_path_handle(region_.Contig());
+    odgi::path_handle_t path_handle = graph_.create_path_handle(region_.contig());
     for (const auto& handle : handles_) {
       graph_.append_step(path_handle, handle);
     }
   }
 
-  handlegraph::path_handle_t AddVariantPath(const Variant::VariantIdType& variant_id, int allele,
-                                            const HandleRange& handles, const std::string& path_prefix = "_alt_") {
-    std::ostringstream path_name_ss(path_prefix, std::ios_base::ate);
-    path_name_ss << variant_id << '_' << allele;
-    handlegraph::path_handle_t path_handle = graph_.create_path_handle(path_name_ss.str());
+  handlegraph::path_handle_t AddVariantPath(const Variant::VariantId& variant_id, int allele,
+                                            const HandleRange& handles, const std::string& path_prefix = "alt") {
+    handlegraph::path_handle_t path_handle = graph_.create_path_handle(fmt::format("_{}_{}_{}", path_prefix, to_string(variant_id), allele));
     for (auto it = handles.first; it != handles.second; ++it) {
       graph_.append_step(path_handle, *it);
     }
@@ -58,22 +58,22 @@ class ReferenceNodes {
   }
 
   HandleRange FindContainedHandles(const Range& region) const {
-    if (region.Length() == 0) {
+    if (region.length() == 0) {
       // There should be one exactly matching zero-length region
-      auto it = std::lower_bound(std::begin(regions_), std::end(regions_), region.Start());
-      if (it == std::end(regions_) || it->Start() != region.Start() || it->End() != region.End()) {
+      auto it = std::lower_bound(std::begin(regions_), std::end(regions_), region.start());
+      if (it == std::end(regions_) || it->start() != region.start() || it->end() != region.end()) {
         throw std::runtime_error("No matching zero-length reference region found");
       }
       auto idx = std::distance(std::begin(regions_), it);
       return std::make_pair(std::begin(handles_) + idx, std::begin(handles_) + idx + 1);
     } else {
-      auto it = std::lower_bound(std::begin(regions_), std::end(regions_), region.Start());
-      if (it == std::end(regions_) || it->Start() != region.Start()) {
+      auto it = std::lower_bound(std::begin(regions_), std::end(regions_), region.start());
+      if (it == std::end(regions_) || it->start() != region.start()) {
         throw std::runtime_error("No matching reference region start found");
       }
       // We assume most regions will be small and so perform linear search for the end
       for (auto end_it = it; end_it != std::end(regions_); ++end_it) {
-        if (end_it->End() == region.End()) {  // There must be a region with a matching end
+        if (end_it->end() == region.end()) {  // There must be a region with a matching end
           auto start_idx = std::distance(std::begin(regions_), it);
           auto end_idx = std::distance(std::begin(regions_), end_it) + 1;
           return std::make_pair(std::begin(handles_) + start_idx, std::begin(handles_) + end_idx);
@@ -93,7 +93,7 @@ class ReferenceNodes {
         return handle;
       }
     }
-    auto handle = graph_.create_handle(std::string(alt_sequence));  // TODO: Do we have to create a string here?
+    auto handle = graph_.create_handle(alt_sequence.size() == 0 ? "*" : std::string(alt_sequence));  // TODO: Do we have to create a string here?
     // Link to the reference nodes before and after
     if (ref_handles.first != std::begin(handles_)) {
       graph_.create_edge(*std::prev(ref_handles.first), handle);
@@ -118,25 +118,25 @@ class ReferenceNodes {
 }  // namespace
 
 Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region) {
-  ReferenceNodes ref_nodes(graph_, reference_fasta_path, region);
   auto vcf_file = VariantFileReader::Open(vcf_path);
 
   // For phases 1 & 2 don't load genotypes, just the variant alleles, to reduce memory usage when storing
   // all variants in the region.
   {  // Scope for vector of variants
+    ReferenceNodes ref_nodes(graph_, reference_fasta_path, region);
     std::vector<VariantFileReader::VariantPtr> variants;
-    {  // Scope of collecting reference breakpoints
+    {  // Scope of collecting reference breakpoints/
       // 1. Collect unique variant breakpoints to construct reference nodes
-      std::vector<Pos> ref_breakpoints = {region.Start(), region.End()}, zero_width_breakpoints;
+      std::vector<Pos> ref_breakpoints = {region.start(), region.end()}, zero_width_breakpoints;
       vcf_file->SetRegion(region);
       while (auto variant = vcf_file->NextVariant()) {
-        for (int i = 1; i < variant->NumAllele(); i++) {
+        for (int i = 1; i < variant->num_alleles(); i++) {
           auto region = variant->AlleleReferenceRegion(i);
           if (region) {
-            ref_breakpoints.push_back(region->Start());
-            ref_breakpoints.push_back(region->End());
-            if (region->Length() == 0) {
-              zero_width_breakpoints.push_back(region->Start());
+            ref_breakpoints.push_back(region->start());
+            ref_breakpoints.push_back(region->end());
+            if (region->length() == 0) {
+              zero_width_breakpoints.push_back(region->start());
             }
           }
         }
@@ -167,10 +167,10 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
 
     // 2. Add variant alleles as paths
     for (const auto& variant : variants) {
-      auto variant_id = variant->VariantId();
+      auto variant_id = variant->variant_id();
 
       std::vector<std::optional<Range> > allele_regions;
-      for (int i = 0; i < variant->NumAllele(); i++) {
+      for (int i = 0; i < variant->num_alleles(); i++) {
         allele_regions.emplace_back(variant->AlleleReferenceRegion(i));
         // Defined ALT region must be fully contained in the REF region
         assert(i == 0 || !allele_regions[i] || (*allele_regions[i] <= *allele_regions[0]));
@@ -179,9 +179,9 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       // Identify the nodes that cover the reference region. If one of the alleles is a simple insertion (i.e., its reference region has
       // zero length), make sure the reference path includes the zero-length node.
       auto ref_handles = ref_nodes.FindContainedHandles(*allele_regions[0]);
-      for (int i = 1; i < variant->NumAllele(); i++) {
+      for (int i = 1; i < variant->num_alleles(); i++) {
         auto alt_region = allele_regions[i];
-        if (!alt_region || alt_region->Length() > 0) {
+        if (!alt_region || alt_region->length() > 0) {
           continue;  // Spanning deletion or non-zero length region, nothing to do here
         }
         auto alt_handles = ref_nodes.FindContainedHandles(*alt_region);
@@ -193,7 +193,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       ref_nodes.AddVariantPath(variant_id, 0, ref_handles);
 
       // Add the path for each ALT allele
-      for (int i = 1; i < variant->NumAllele(); i++) {
+      for (int i = 1; i < variant->num_alleles(); i++) {
         auto alt_region = allele_regions[i];
         if (!alt_region) {
           continue;  // Spanning deletion, no path to add
@@ -220,15 +220,99 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     }
   }
   
-  // 3. Add genotype paths
+  // 3. Perform topological sort and compaction of the graph to prepare for subsequent steps. Since the VCF
+  // is by definition a DAG we can use odgi's `lazier_topological_order` algorithm.
+  graph_.apply_ordering(odgi::algorithms::lazier_topological_order(&graph_), true /* compact IDs */);
+
+  // 4. Add genotype paths
+  auto ref_nodes = PathNodes(region.contig()); // All samples share the same reference path
+  assert(std::is_sorted(std::begin(ref_nodes), std::end(ref_nodes)));
+  
+  std::vector<detail::Polytype> polytypes;
+  for (const auto& sample : vcf_file->Samples()) {
+    polytypes.emplace_back(2 /* ploidy */, *this, ref_nodes, sample, region.contig());
+  }
+
+  
+  std::optional<Range> prev_range;  // Region of previous vartiant(s)
+  
   vcf_file->SetRegion(region);
   while (auto variant = vcf_file->NextVariant(BCF_UN_ALL)) {
     std::cerr << *variant;
+    if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
+      continue; // Skip variants with only '*' ALTS
+    }
+    
+    auto genotypes = variant->Genotypes();
+    assert(genotypes.size() == polytypes.size());
+
+    int star_allele_index = -1;
+    if (variant->has_flag(Variant::kHasStarAllele)) {
+      // Skip variants with all genotypes just '*'
+      star_allele_index = variant->AlleleIndex("*");
+      assert(star_allele_index > 0);
+      if (std::all_of(std::begin(genotypes), std::end(genotypes), [star_allele_index](const Variant::Genotype& genotype) {
+            return genotype.AllAlleles(star_allele_index);
+          })) {
+        continue;
+      }
+      
+      if (!std::any_of(std::begin(genotypes), std::end(genotypes), [star_allele_index](const Variant::Genotype& genotype) {
+        return genotype.AnyAllele(star_allele_index);
+      })) {
+        // Only note '*' if present in one of the genotypes
+        star_allele_index = -1;
+      }
+    }
+
+    auto variant_range = variant->ReferenceRegion();
+    if (prev_range && (*prev_range == variant_range || prev_range->Overlaps(variant_range))) {
+      // Coordinate overlap with previous variant(s)
+      prev_range->UnionWith(variant_range);
+      variant->add_flag(Variant::kIsOverlapping);
+    } else if (!prev_range && star_allele_index > 0) {
+      // Treat variants with explicit '*' alleles as overlapping, even if there is not actual coordinate overlap
+      prev_range = variant_range;
+      variant->add_flag(Variant::kIsOverlapping);
+    } else {
+      // TODO: Look for overlaps in entire record region (i.e., including padding bases)?
+      prev_range = variant_range;
+    }
+
+    // Extract reference and alternate allele paths
+    PathHandleSeq allele_paths;
+    {
+      auto variant_id = variant->variant_id();
+      for (int i=0; i < variant->num_alleles(); i++) {
+        auto allele_path_name = fmt::format("_alt_{}_{}", to_string(variant_id), i);
+        if (HasPath(allele_path_name)) {
+          allele_paths.push_back(graph_.get_path_handle(allele_path_name));
+        } else {
+          allele_paths.push_back(handlegraph::path_handle_t()); // Likely a '*' allele (with no path)
+        }
+      }
+    }
+    
+    // Extract the index range of reference nodes for the REF allele, since that is constant for all samples
+    NodeIdRange ref_allele_indices;
+    {
+      auto ref_allele_nodes = PathNodes(allele_paths[0]);
+      assert(!ref_allele_nodes.empty());
+      auto it = std::lower_bound(std::begin(ref_nodes), std::end(ref_nodes), ref_allele_nodes[0]);
+      assert(std::distance(it, std::end(ref_nodes)) >= ref_allele_nodes.size() && std::equal(std::begin(ref_allele_nodes), std::end(ref_allele_nodes), it));
+      auto start_idx = std::distance(std::begin(ref_nodes), it);
+      ref_allele_indices = std::make_pair(start_idx, start_idx + ref_allele_nodes.size());
+    }
+
+    for (int i=0; i < polytypes.size(); i++) {
+      polytypes[i].AddGenotype(*variant, allele_paths, ref_allele_indices, genotypes[i], star_allele_index);
+    }
   }
 
-  // 4. Perform topological sort and compaction of the graph to prepare for subsequent analyses. Since the VCF
-  // is by definition a DAG we can use odgi's `lazier_topological_order` algorithm.
-  graph_.apply_ordering(odgi::algorithms::lazier_topological_order(&graph_), true /* compact IDs */);
+  // Finalize any incomplete paths
+  for (auto& polytype : polytypes) {
+    polytype.FinalizePaths();
+  }
 
   graph_.to_gfa(std::cerr);
 }
@@ -242,10 +326,177 @@ std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_na
   return handles;
 }
 
-namespace test {
-void TestCreateGraph(const std::string& reference_fasta_path, const std::string& vcf_path) {
-  Graph graph(reference_fasta_path, vcf_path, Range("chr1", 3693757, 3693777));
+std::vector<odgi::nid_t> Graph::PathNodes(handlegraph::path_handle_t path_handle) const {
+  std::vector<odgi::nid_t> nodes;
+  graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
+    nodes.emplace_back(graph_.get_id(graph_.get_handle_of_step(step)));
+  });
+  return nodes;
 }
-}  // namespace test
 
+std::vector<odgi::nid_t> Graph::PathNodes(const std::string& path_name) const {
+  return PathNodes(graph_.get_path_handle(path_name));
+}
+
+std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {
+  std::vector<std::string> samples;
+  for (auto & node : nodes) {
+    auto handle = graph_.get_handle(node);
+    graph_.for_each_step_on_handle(handle, [this, &samples](const handlegraph::step_handle_t& step) {
+      auto path_name = graph_.get_path_name(graph_.get_path_handle_of_step(step));
+      auto end_of_sample = path_name.find('#'); // Sample haplotypes are named Sample#HaplotypeIndex#Contig#SegmentIndex
+      if (end_of_sample != std::string::npos) {
+        samples.emplace_back(path_name.substr(0, end_of_sample));
+      }
+    });
+  }
+  return samples;
+}
+
+
+namespace detail {
+
+void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
+                           const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
+                           int star_allele_index) {
+  assert(genotype.num_alleles() > 0);
+  if (genotype.num_alleles() != haplotypes_.size()) {
+    throw std::runtime_error("Different ploidy for genotypes not currently supported");
+  }
+
+  auto variant_phase = genotype.phase();
+  bool permute_alleles = false;
+  if (variant_phase == Phase::kUnphased && star_allele_index > 0 && (genotype.AlleleCount(star_allele_index) == genotype.num_alleles() - 1)) {
+    variant_phase = Phase(Phase::kImplicit); // Implicitly phase variants with '*' alleles
+    permute_alleles = true; // Permute alleles of originally unphased variants if needed to try to find a consistent phasing
+  }
+
+  auto [next_phase, break_before] = NextPhase(variant_phase);
+
+  Variant::Genotype::AlleleIndices indices(genotype.allele_indices());
+  bool added_genotype = false;
+  do {
+    try {
+      for (int i = 0; i < genotype.num_alleles(); ++i) {
+        if (indices[i] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[i] == star_allele_index)) {
+          continue; // Skip missing alleles or '*' alleles
+        }
+        haplotypes_[i].AddGenotypeAllele(variant, ref_allele_indices, indices[i], allele_paths[indices[i]], break_before);
+      }
+      added_genotype = true;
+      break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
+    } catch (const NonRefAlleleOverlappingError&) {
+      // TODO: Undo any partial additions to haplotypes
+      continue;
+    } 
+  } while (permute_alleles && std::next_permutation(std::begin(indices), std::begin(indices) + genotype.num_alleles()));
+  
+  if (!added_genotype) {
+    // TODO: Re-add the alleles, but break haplotypes on overlap errors
+    throw std::runtime_error("Could not add genotype alleles due to overlapping non-reference alleles");
+  }
+
+  current_phase_ = next_phase;
+}
+
+std::tuple<Phase,bool> Polytype::NextPhase(const Phase& var_phase) const {
+  #define NEXT_CASE(curr, var, next, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(Phase(Phase::next), break_before); }
+  #define NEXT_CASE_VAR(curr, var, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(var_phase, break_before); }
+  #define NEXT_CASE_CURR(curr, var, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(current_phase_, break_before); }
+
+  NEXT_CASE(kUnphased, kUnphased, kUnphased, true)
+  NEXT_CASE(kUnphased, kGlobal, kGlobal, true)
+  NEXT_CASE_VAR(kUnphased, kLocal, true)
+  NEXT_CASE(kUnphased, kImplicit, kUnphased, false)
+  
+  NEXT_CASE(kGlobal, kUnphased, kUnphased, true)
+  NEXT_CASE(kGlobal, kGlobal, kGlobal, false)
+  NEXT_CASE_VAR(kGlobal, kLocal, true)
+  NEXT_CASE(kGlobal, kImplicit, kGlobal, false)
+
+  NEXT_CASE(kLocal, kUnphased, kUnphased, true)
+  NEXT_CASE(kLocal, kGlobal, kGlobal, true)
+  if (current_phase_ == Phase::kLocal && var_phase == Phase::kLocal) {
+    return std::make_tuple(var_phase, current_phase_ != var_phase);
+  }
+  NEXT_CASE_CURR(kLocal, kImplicit, false)
+
+  NEXT_CASE(kImplicit, kUnphased, kUnphased, false)
+  NEXT_CASE(kImplicit, kGlobal, kGlobal, false)
+  NEXT_CASE_VAR(kImplicit, kLocal, false)
+  NEXT_CASE(kImplicit, kImplicit, kImplicit, false)
+  else {
+    throw std::runtime_error("Phasing transition not yet implemented");
+  }
+
+  #undef NEXT_CASE_CURR
+  #undef NEXT_CASE_VAR
+  #undef NEXT_CASE
+}
+
+void Polytype::FinalizePaths() {
+  for (auto& haplotype : haplotypes_) {
+    haplotype.FinalizePaths();
+  }
+}
+
+Haplotype::Haplotype(int index, Graph& graph, const Graph::NodeIdSeq& ref_nodes, const std::string& sample, const ContigName& contig) : index_(index), graph_(graph), ref_nodes_(ref_nodes), sample_(sample), contig_(contig) {
+  current_segment_handle_ = graph_.graph_.create_path_handle(PathName());
+}
+
+void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRange& ref_allele_indices, int allele_index, const Graph::PathHandleSeq::value_type& allele_path, bool break_before) {
+  if (ref_allele_indices.first < next_ref_index_) {
+    if (variant.has_flag(Variant::kIsOverlapping) && allele_index == 0) {
+      // We have likely found an overlapping reference allele (without an explicit * allele). Skip it.
+      return;
+    }
+    throw NonRefAlleleOverlappingError();
+  }
+  if (break_before) { // Introduce a break in the haplotype
+    // Fill in any pending reference nodes
+    for (; next_ref_index_ < ref_allele_indices.first; ++next_ref_index_) {
+      graph_t().append_step(current_segment_handle_, graph_.Handle(ref_nodes_[next_ref_index_]));
+    }
+    curr_segment_++;
+    current_segment_handle_ = graph_.graph_.create_path_handle(PathName());
+  }
+  
+  if (allele_index > 0) { // Insert alternate allele
+    // Fill in any pending reference nodes
+    for (; next_ref_index_ < ref_allele_indices.first; ++next_ref_index_) {
+      graph_t().append_step(current_segment_handle_, graph_.Handle(ref_nodes_[next_ref_index_]));
+    }
+
+    // Insert the ALT allele handles, not including any suffix shared with the REF allele
+    auto alt_allele_nodes = graph_.PathNodes(allele_path);
+    auto ref_allele_nodes = boost::span<const odgi::nid_t>(ref_nodes_).subspan(ref_allele_indices.first, ref_allele_indices.second - ref_allele_indices.first);
+    auto [alt_suffix_it, _ref_suffix_it] = std::mismatch(
+      alt_allele_nodes.rbegin(), 
+      alt_allele_nodes.rend(),
+      ref_allele_nodes.rbegin(),
+      ref_allele_nodes.rend()
+    );
+    auto alt_right_padding = std::distance(alt_allele_nodes.rbegin(), alt_suffix_it);
+    assert(alt_right_padding == std::distance(ref_allele_nodes.rbegin(), _ref_suffix_it));
+    for (int i=0; i < alt_allele_nodes.size() - alt_right_padding; i++) {
+      graph_t().append_step(current_segment_handle_, graph_.Handle(alt_allele_nodes[i]));
+    }
+    
+    // Update next reference index
+    next_ref_index_ = ref_allele_indices.second - alt_right_padding;
+  }
+}
+
+void Haplotype::FinalizePaths() {
+  // Populate final segment with any pending reference nodes
+  for (; next_ref_index_ < ref_nodes_.size(); ++next_ref_index_) {
+    graph_t().append_step(current_segment_handle_, graph_t().get_handle(ref_nodes_[next_ref_index_]));
+  }
+}
+
+std::string Haplotype::PathName() const {
+ return fmt::format("{}#{}#{}#{}", sample_, index_, contig_, curr_segment_);
+}
+
+}  // namespace detail
 }  // namespace npsv3
