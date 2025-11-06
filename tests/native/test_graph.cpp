@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <algorithm>
 
 #include "graph.hpp"
 #include "test_helpers.hpp"
@@ -14,21 +15,33 @@
 namespace fs = std::filesystem;
 using namespace npsv3;
 
+static const std::vector<fs::path> kB37FastaPaths = { fs::path("/data/human_g1k_v37.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta") };
+static const std::vector<fs::path> kHG38FastaPaths = { fs::path("/data/Homo_sapiens_assembly38.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta") };
+
 class GraphConstructionTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    if (!fs::exists(kHG38FastaPath) || !fs::exists(kB37FastaPath)) {
-      GTEST_SKIP() << "Reference FASTA(s) not available";
+    {
+      auto it = std::find_if(kB37FastaPaths.begin(), kB37FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
+      if (it == kB37FastaPaths.end())
+        GTEST_SKIP() << "B37 Reference FASTA is not available";
+      else
+        B37FastaPath_ = *it;
+    }
+
+    {
+      auto it = std::find_if(kHG38FastaPaths.begin(), kHG38FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
+      if (it == kHG38FastaPaths.end())
+        GTEST_SKIP() << "HG38 Reference FASTA is not available";
+      else
+        HG38FastaPath_ = *it;
     }
   }
 
-  static const fs::path kB37FastaPath;
-  static const fs::path kHG38FastaPath;
+  fs::path B37FastaPath_;
+  fs::path HG38FastaPath_;
 };
-const fs::path GraphConstructionTest::kB37FastaPath(
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta");
-const fs::path GraphConstructionTest::kHG38FastaPath(
-    "/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta");
+
 
 TEST_F(GraphConstructionTest, OverlappingVariants) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
@@ -42,7 +55,7 @@ chr1	3693767	.	C	G	30	.	.	GT	./.	./.	./.	./.
 chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	1|2	./.)VCF");
 
   auto region = Range("chr1", 3693757, 3693777);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
   // Although there 4 variants there are only 2 unique REF and 3 unique ALT alleles. With padding nodes, we expect:
   ASSERT_EQ(graph.NodeCount(), 7);
 
@@ -99,7 +112,7 @@ TEST_P(VariantTransitionsGraphConstructionTest, TestVariantTransitions) {
 {})VCF",
                                     variant0, variant1));
   auto region = Range("chr1", 999989, 1000010);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
   int i;
   for (i = 0; i < sample_0_paths; i++) {
@@ -144,7 +157,7 @@ chr14	76721238	.	GCC	G	603.88	PASS	.	GT	0/1
 chr14	76721239	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2)VCF");
 
   auto region = Range("chr14", 76721228, 76721250);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
     // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
     ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
@@ -162,7 +175,7 @@ chr1	5414152	.	CGGGCATCTATGATGCTGATTGATGTCCCCAGCATCCCGGGCATCTATGATGCTGATTGATGTCC
 chr1	5414226	.	CG	*,C	.	PASS	.	GT	1/2)VCF");
 
   auto region = Range("chr1", 5414141, 5414237);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
     // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
     ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
@@ -180,7 +193,7 @@ chr1	8978661	.	AAAAAAAAAAAAAAC	A	.	PASS	.	GT	0|1
 chr1	8978664	.	A	C	.	PASS	.	GT	0|0)VCF");
 
   auto region = Range("chr1", 8978650, 8978685);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
     // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
     ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
@@ -200,7 +213,7 @@ chr1	6012332	.	TGGTGGAGGTGATGAAGGCGGAGGTGGGTGGAGGTGGAGATGGAGGTAGTGGTGGAGGTGATGAA
 chr1	6012378	.	T	C	.	.	.	GT	0|1)VCF");
 
   auto region = Range("chr1", 6012321, 6012412);
-  Graph graph(kHG38FastaPath, vcf.file_path_, region);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
   // Haplotype 0 should have 1 path, haplotype 1 should be broken at the inconsistent 2nd variant
   ASSERT_TRUE(graph.HasPath(fmt::format("Sample#0#{}#0", region.contig())));
@@ -225,7 +238,7 @@ TEST_F(GraphConstructionTest, InconsistentHaplotypes2) {
 2	39714038	.	T	TCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCG	20	PASS	SVTYPE=INS;SVLEN=54	GT	1/1)VCF");
 
   auto region = Range("2", 39714028, 39714048);
-  Graph graph(kB37FastaPath, vcf.file_path_, region);
+  Graph graph(B37FastaPath_, vcf.file_path_, region);
 
   // Haplotype 0 should be broken at the inconsistent 2nd variant, haplotype 1 should have 1 path
   ASSERT_TRUE(graph.HasPath(fmt::format("Sample#1#{}#0", region.contig())));

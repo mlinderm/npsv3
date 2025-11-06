@@ -3,7 +3,6 @@
 #include <stdexcept>
 #include <string>
 
-#include <boost/functional/hash.hpp>
 #include <boost/flyweight.hpp>
 #include <boost/flyweight/tag.hpp>
 #include <boost/flyweight/no_tracking.hpp>

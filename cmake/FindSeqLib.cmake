@@ -1,5 +1,9 @@
 set(SEQLIB_ROOT "${CMAKE_SOURCE_DIR}/lib/seqlib")
 
+find_package(LibLZMA REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(BZip2 REQUIRED)
+
 find_path(
     SEQLIB_INCLUDE_DIR
     NAMES "SeqLib/SeqLibCommon.h"
@@ -37,6 +41,12 @@ if ((EXISTS "${SEQLIB_INCLUDE_DIR}") AND (EXISTS "${SEQLIB_LIBRARY}") AND (EXIST
         ${HTS_LIBRARY}
         ${BWA_LIBRARY}
     )
+    target_link_libraries(HTS_LIBRARY
+        INTERFACE
+        ZLIB::ZLIB
+        LibLZMA::LibLZMA
+        BZip2::BZip2
+    )
     include(FindPackageHandleStandardArgs)
     find_package_handle_standard_args(
         seqlib
@@ -61,6 +71,12 @@ else()
 
     add_library(libseqlib IMPORTED STATIC GLOBAL)
     add_library(libhts IMPORTED STATIC GLOBAL)
+    target_link_libraries(libhts
+        INTERFACE
+        ZLIB::ZLIB
+        LibLZMA::LibLZMA
+        BZip2::BZip2
+    )
     add_library(libbwa IMPORTED STATIC GLOBAL)
 
     add_dependencies(libseqlib seqlib)

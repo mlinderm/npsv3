@@ -10,9 +10,12 @@ RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   gawk \
   git \
   libbz2-dev \
+  libcurl4-openssl-dev \
+  libdeflate-dev \
   libjansson-dev \
   libjemalloc-dev \
   liblzma-dev \
+  libssl-dev \
   pkg-config \
   protobuf-compiler \
   python3-dev \
@@ -32,28 +35,16 @@ RUN curl -O https://bootstrap.pypa.io/get-pip.py \
   && python3 get-pip.py --break-system-packages \
   && rm -f get-pip.py
 
-# Install libbdsg, gbwt and gbwtgraph libraries
-RUN git clone --recursive https://github.com/vgteam/libbdsg.git /opt/libbdsg \
-  && cd /opt/libbdsg \
-  && mkdir build \
-  && cd build \
-  && cmake .. -DRUN_DOXYGEN=OFF -DBUILD_PYTHON_BINDINGS=OFF -DCMAKE_BUILD_TYPE=Release \
-  && make -j $(nproc) \
-  && INSTALL_PREFIX=/usr/local make install
-
-RUN mkdir -p /opt/gbwt \
-  && curl -SL https://github.com/jltsiren/gbwt/archive/refs/tags/v1.4.tar.gz \
-  | tar -xzC /opt/gbwt --strip-components=1 \
-  && make SDSL_DIR=/opt/libbdsg/bdsg/deps/sdsl-lite -C /opt/gbwt all -j $(nproc) \
-  && cp -R /opt/gbwt/include/gbwt /usr/local/include \
-  && cp /opt/gbwt/lib/libgbwt.a /usr/local/lib/
-
-RUN mkdir -p /opt/gbwtgraph \
-  && curl -SL https://github.com/jltsiren/gbwtgraph/archive/refs/tags/v1.1.tar.gz \
-  | tar -xzC /opt/gbwtgraph --strip-components=1 \
-  && make SDSL_DIR=/opt/libbdsg/bdsg/deps/sdsl-lite -C /opt/gbwtgraph all -j $(nproc)\
-  && cp -R /opt/gbwtgraph/include/gbwtgraph /usr/local/include \
-  && cp /opt/gbwtgraph/lib/libgbwtgraph.a /usr/local/lib/
+# Download Boost to speed downstream build (just downloading dependencies)
+RUN git clone https://github.com/boostorg/boost.git -b boost-1.89.0 /opt/boost --depth 1 \
+  && cd /opt/boost \
+  && git submodule update --depth 1 -q --init tools/boostdep \
+  && git submodule update --depth 1 -q --init libs/flyweight && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" flyweight \
+  && git submodule update --depth 1 -q --init libs/hash2 && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" hash2 \
+  && git submodule update --depth 1 -q --init libs/scope && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" scope \
+  && ./bootstrap.sh --prefix=/usr/local \
+  && ./b2 \
+  && ./b2 install
 
 # Install vg, samblaster and goleft executables
 RUN case ${TARGETPLATFORM} in \
@@ -78,6 +69,20 @@ RUN case ${TARGETPLATFORM} in \
     -o /usr/local/bin/goleft && \
   chmod +x /usr/local/bin/goleft
 
+# Install odgi (and libraries) During development we are mounting our local fork of odgi into the container
+RUN git clone --depth 1 --recursive --branch node_del https://github.com/mlinderm/odgi.git /opt/odgi \
+  && cmake -S /opt/odgi -B /opt/odgi/build -DBUILD_STATIC=1 \
+  && cmake --build /opt/odgi/build -- -j $(nproc) \
+  && cp /opt/odgi/bin/odgi /usr/local/bin \
+  && cp /opt/odgi/lib/odgi.*.so /usr/local/lib  
+
+# Force "Unix Makefiles" instead of Ninja due to issues with ExternalProject_Add download and build
+ENV CMAKE_GENERATOR="Unix Makefiles" \
+  CMAKE_INCLUDE_PATH="/opt/odgi/src:${CMAKE_INCLUDE_PATH}" \
+  CMAKE_LIBRARY_PATH="/opt/odgi/fork/build/handlegraph-prefix/lib:/opt/odgi/lib:${CMAKE_LIBRARY_PATH}" \
+  LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
+  PYTHONPATH="/usr/local/lib:${PYTHON_PATH}"
+
 # Install hatch for development
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
   hatch
@@ -87,22 +92,13 @@ ADD . /opt/npsv3
 WORKDIR /opt/npsv3
 
 # Install the package as a user (to prepare for multistage build), preferentially installing PyTorch
-# from the CPU-only wheel
+# from the CPU-only wheel since we are targeting aarch64
 ENV PATH=/root/.local/bin:$PATH
 RUN python3 -m pip install --user --break-system-packages --no-cache-dir \
   --index-url https://download.pytorch.org/whl/cpu \
   --extra-index-url https://pypi.org/simple/ \
   .
 
-# Install odgi (and libraries) During development we are mounting our local fork of odgi into the container
-ENV LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
-  PYTHONPATH="/opt/odgi/lib:${PYTHON_PATH}" \
-  PATH="/opt/odgi/bin:${PATH}"
-# RUN mkdir -p /opt/odgi \
-#   && curl -SL https://github.com/pangenome/odgi/releases/download/v0.8.3/odgi-v0.8.3.tar.gz \
-#   | tar -xzC /opt/odgi --strip-components=1 \
-#   && cmake -S /opt/odgi -B /opt/odgi/build \
-#   && cmake --build /opt/odgi/build -- -j 2
 
 
 # TODO: Multistage build to reduce image size and avoid installing build dependencies in the final image

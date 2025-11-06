@@ -7,7 +7,7 @@ import webdataset as wds
 from npsv3.images.example import (
     example_to_image,
 )
-from npsv3.models.loaders import AllImageDataModule, MaskedImageDataModule, PackedImageDataModule
+from npsv3.models.loaders import MaskedImageDataModule, PackedImageDataModule
 
 from .. import EXPERIMENTS_DIR, data_path, result_path
 

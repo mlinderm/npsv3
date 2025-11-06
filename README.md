@@ -118,11 +118,12 @@ To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE
 docker build -f Dockerfile.arm64 --target build -t npsv3-build .
 ```
 
+    -v `pwd`/../odgi:/opt/odgi \
+
 ```
 docker run --rm --entrypoint /bin/bash \
     --shm-size=8g \
     -v ~/Research/data:/data \
-    -v `pwd`/../odgi:/opt/odgi \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
     -it npsv3-build

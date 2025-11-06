@@ -49,11 +49,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Get external dependencies
-# TODO: Move this into FindSeqLib.cmake
-find_package(LibLZMA REQUIRED)
-find_package(ZLIB REQUIRED)
-find_package(BZip2 REQUIRED)
-
 find_package(SeqLib REQUIRED) # This will also patch SeqLib as needed
 find_package(HTSLib 1.17 REQUIRED)
 find_package(ODGI REQUIRED)
@@ -69,7 +64,7 @@ if (NOT Boost_FOUND)
     PREFIX "${CMAKE_BINARY_DIR}/lib/boost"
 		UPDATE_COMMAND ""
 		CONFIGURE_COMMAND ./bootstrap.sh --prefix=<INSTALL_DIR>
-		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 install
+		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 --with-scope install
 		BUILD_IN_SOURCE true
 		INSTALL_COMMAND ""
 	)
@@ -82,6 +77,7 @@ if (NOT Boost_FOUND)
   file(MAKE_DIRECTORY ${Boost_INCLUDE_DIRS})
 
   add_library(Boost::boost INTERFACE IMPORTED)
+  add_dependencies(Boost::boost Boost)
   target_include_directories(Boost::boost INTERFACE ${Boost_INCLUDE_DIRS})
 endif()
 
@@ -137,11 +133,9 @@ target_include_directories(_native_realign
 ) 
 target_link_libraries(_native_realign
   PRIVATE
-  ${ZLIB_LIBRARIES}
-  ${LIBLZMA_LIBRARIES}
-  ${BZIP2_LIBRARIES}
+  ${SEQLIB_LIBRARIES} # We need to list this library before its dependencies
   Threads::Threads
-  ${SEQLIB_LIBRARIES}
+  Boost::boost
 )
 
 add_library(graph STATIC

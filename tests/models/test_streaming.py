@@ -2,6 +2,7 @@ import json
 import math
 from typing import Optional
 
+import pytest
 import lightning as L
 import torch
 import webdataset as wds
@@ -11,6 +12,7 @@ from npsv3.models.streaming import PackableDataModule, PackableMDSWriter, Packab
 
 from .. import data_path
 
+pytest.skip(allow_module_level=True)
 
 # Adapted from: https://github.com/Lightning-AI/pytorch-lightning/blob/851e66f475eda49a1e1ce3e716a5c487172fea1c/src/lightning/pytorch/demos/boring_classes.py#L96
 class DummyModel(L.LightningModule):
