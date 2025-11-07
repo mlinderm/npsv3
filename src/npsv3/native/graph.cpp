@@ -71,6 +71,8 @@ class ReferenceNodes {
       if (it == std::end(regions_) || it->start() != region.start()) {
         throw std::runtime_error("No matching reference region start found");
       }
+      // Since region has non-zero length, it should come "after" any leading zero length regions
+      for (; it->length() == 0; ++it);
       // We assume most regions will be small and so perform linear search for the end
       for (auto end_it = it; end_it != std::end(regions_); ++end_it) {
         if (end_it->end() == region.end()) {  // There must be a region with a matching end
@@ -233,12 +235,10 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     polytypes.emplace_back(2 /* ploidy */, *this, ref_nodes, sample, region.contig());
   }
 
-  
-  std::optional<Range> prev_range;  // Region of previous vartiant(s)
+  std::optional<Range> prev_range;  // Region of previous variant(s)
   
   vcf_file->SetRegion(region);
   while (auto variant = vcf_file->NextVariant(BCF_UN_ALL)) {
-    std::cerr << *variant;
     if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
       continue; // Skip variants with only '*' ALTS
     }
@@ -285,7 +285,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       auto variant_id = variant->variant_id();
       for (int i=0; i < variant->num_alleles(); i++) {
         auto allele_path_name = fmt::format("_alt_{}_{}", to_string(variant_id), i);
-        if (HasPath(allele_path_name)) {
+        if (has_path(allele_path_name)) {
           allele_paths.push_back(graph_.get_path_handle(allele_path_name));
         } else {
           allele_paths.push_back(handlegraph::path_handle_t()); // Likely a '*' allele (with no path)
@@ -313,8 +313,6 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
   for (auto& polytype : polytypes) {
     polytype.FinalizePaths();
   }
-
-  graph_.to_gfa(std::cerr);
 }
 
 std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_name) const {
@@ -326,7 +324,7 @@ std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_na
   return handles;
 }
 
-std::vector<odgi::nid_t> Graph::PathNodes(handlegraph::path_handle_t path_handle) const {
+std::vector<odgi::nid_t> Graph::PathNodes(const handlegraph::path_handle_t& path_handle) const {
   std::vector<odgi::nid_t> nodes;
   graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
     nodes.emplace_back(graph_.get_id(graph_.get_handle_of_step(step)));
@@ -336,6 +334,20 @@ std::vector<odgi::nid_t> Graph::PathNodes(handlegraph::path_handle_t path_handle
 
 std::vector<odgi::nid_t> Graph::PathNodes(const std::string& path_name) const {
   return PathNodes(graph_.get_path_handle(path_name));
+}
+
+std::string Graph::PathSequence(const handlegraph::path_handle_t& path_handle) const {
+  std::string seq;
+  graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
+    auto handle_seq = graph_.get_sequence(graph_.get_handle_of_step(step));
+    if (handle_seq != "*")
+      seq.append(graph_.get_sequence(graph_.get_handle_of_step(step)));
+  });
+  return seq;
+}
+
+std::string Graph::PathSequence(const std::string& path_name) const {
+  return PathSequence(graph_.get_path_handle(path_name));
 }
 
 std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {
@@ -353,6 +365,9 @@ std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {
   return samples;
 }
 
+void Graph::ToGFA(std::ostream& ostream) {
+  graph_.to_gfa(ostream);
+}
 
 namespace detail {
 
@@ -367,35 +382,48 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
   auto variant_phase = genotype.phase();
   bool permute_alleles = false;
   if (variant_phase == Phase::kUnphased && star_allele_index > 0 && (genotype.AlleleCount(star_allele_index) == genotype.num_alleles() - 1)) {
-    variant_phase = Phase(Phase::kImplicit); // Implicitly phase variants with '*' alleles
-    permute_alleles = true; // Permute alleles of originally unphased variants if needed to try to find a consistent phasing
+    // Implicitly phase variants with '*' alleles, allowing permutation of originally unphased variants
+    // if needed to try to find a consistent phasing.
+    variant_phase = Phase(Phase::kImplicit); 
+    permute_alleles = true;
   }
 
   auto [next_phase, break_before] = NextPhase(variant_phase);
-
+  
   Variant::Genotype::AlleleIndices indices(genotype.allele_indices());
   bool added_genotype = false;
   do {
+    int h = 0;
     try {
-      for (int i = 0; i < genotype.num_alleles(); ++i) {
-        if (indices[i] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[i] == star_allele_index)) {
+      for (; h < genotype.num_alleles(); h++) {
+        if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
           continue; // Skip missing alleles or '*' alleles
         }
-        haplotypes_[i].AddGenotypeAllele(variant, ref_allele_indices, indices[i], allele_paths[indices[i]], break_before);
+        haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]],
+                                         break_before ? Haplotype::kBreakBefore : Haplotype::kBreakNone);
       }
       added_genotype = true;
       break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
     } catch (const NonRefAlleleOverlappingError&) {
-      // TODO: Undo any partial additions to haplotypes
-      continue;
+      // Inconsistent haplotypes, undo any actions taken so far
+      for (int i=0; i <= h; i++) {
+        haplotypes_[i].UndoActions();
+      }
     } 
   } while (permute_alleles && std::next_permutation(std::begin(indices), std::begin(indices) + genotype.num_alleles()));
   
   if (!added_genotype) {
-    // TODO: Re-add the alleles, but break haplotypes on overlap errors
-    throw std::runtime_error("Could not add genotype alleles due to overlapping non-reference alleles");
+    for (int h = 0; h < genotype.num_alleles(); h++) {
+      if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
+        continue; // Skip missing alleles or '*' alleles
+      }
+      haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]], Haplotype::kBreakInconsistent);
+    }
   }
-
+  
+  for (auto & haplotype : haplotypes_) {
+    haplotype.CommitActions();
+  }
   current_phase_ = next_phase;
 }
 
@@ -444,29 +472,30 @@ Haplotype::Haplotype(int index, Graph& graph, const Graph::NodeIdSeq& ref_nodes,
   current_segment_handle_ = graph_.graph_.create_path_handle(PathName());
 }
 
-void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRange& ref_allele_indices, int allele_index, const Graph::PathHandleSeq::value_type& allele_path, bool break_before) {
+void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRange& ref_allele_indices, int allele_index, const Graph::PathHandleSeq::value_type& allele_path, BreakKind break_kind) {
   if (ref_allele_indices.first < next_ref_index_) {
     if (variant.has_flag(Variant::kIsOverlapping) && allele_index == 0) {
-      // We have likely found an overlapping reference allele (without an explicit * allele). Skip it.
+      // We have found an overlapping reference allele (without an explicit * allele). Skip it.
       return;
+    } else if (break_kind == kBreakInconsistent) {
+      // Inconsistent haplotype, introduce break and reset next_ref_index_ to expected nodes
+      AddSegment();
+      next_ref_index_ = ref_allele_indices.first;
+    } else {
+      // Inconsistent haplotype, potentially try to recover by permuting the genotype
+      throw NonRefAlleleOverlappingError();
     }
-    throw NonRefAlleleOverlappingError();
   }
-  if (break_before) { // Introduce a break in the haplotype
-    // Fill in any pending reference nodes
-    for (; next_ref_index_ < ref_allele_indices.first; ++next_ref_index_) {
-      graph_t().append_step(current_segment_handle_, graph_.Handle(ref_nodes_[next_ref_index_]));
-    }
-    curr_segment_++;
-    current_segment_handle_ = graph_.graph_.create_path_handle(PathName());
+  if (break_kind == kBreakBefore) {
+    // Fill in any pending reference nodes before introducing a break in the haplotype
+    AddReferenceNodes(ref_allele_indices.first);
+    AddSegment();
   }
   
   if (allele_index > 0) { // Insert alternate allele
-    // Fill in any pending reference nodes
-    for (; next_ref_index_ < ref_allele_indices.first; ++next_ref_index_) {
-      graph_t().append_step(current_segment_handle_, graph_.Handle(ref_nodes_[next_ref_index_]));
-    }
-
+    // Fill in any pending reference nodes (also saving current state of haplotype to enable undo)
+    AddReferenceNodes(ref_allele_indices.first);
+    
     // Insert the ALT allele handles, not including any suffix shared with the REF allele
     auto alt_allele_nodes = graph_.PathNodes(allele_path);
     auto ref_allele_nodes = boost::span<const odgi::nid_t>(ref_nodes_).subspan(ref_allele_indices.first, ref_allele_indices.second - ref_allele_indices.first);
@@ -479,7 +508,7 @@ void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRan
     auto alt_right_padding = std::distance(alt_allele_nodes.rbegin(), alt_suffix_it);
     assert(alt_right_padding == std::distance(ref_allele_nodes.rbegin(), _ref_suffix_it));
     for (int i=0; i < alt_allele_nodes.size() - alt_right_padding; i++) {
-      graph_t().append_step(current_segment_handle_, graph_.Handle(alt_allele_nodes[i]));
+      graph_t().append_step(current_segment_handle_, graph_.get_handle(alt_allele_nodes[i]));
     }
     
     // Update next reference index
@@ -487,15 +516,58 @@ void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRan
   }
 }
 
+void Haplotype::UndoActions() {
+  std::for_each(actions_.rbegin(), actions_.rend(), [this](const std::unique_ptr<HaplotypeAction>& action) { action->Undo(*this); });
+  actions_.clear();
+}
+
+void Haplotype::CommitActions() {
+  actions_.clear();
+}
+
 void Haplotype::FinalizePaths() {
   // Populate final segment with any pending reference nodes
-  for (; next_ref_index_ < ref_nodes_.size(); ++next_ref_index_) {
-    graph_t().append_step(current_segment_handle_, graph_t().get_handle(ref_nodes_[next_ref_index_]));
-  }
+  AddReferenceNodes(ref_nodes_.size());
 }
 
 std::string Haplotype::PathName() const {
  return fmt::format("{}#{}#{}#{}", sample_, index_, contig_, curr_segment_);
+}
+
+void Haplotype::AddReferenceNodes(size_t end_index) {
+  actions_.push_back(std::move(std::make_unique<HaplotypeAddSteps>(*this)));
+  for (; next_ref_index_ < end_index; ++next_ref_index_) {
+    graph_t().append_step(current_segment_handle_, graph_t().get_handle(ref_nodes_[next_ref_index_]));
+  }
+}
+
+void Haplotype::AddSegment() {
+  actions_.push_back(std::move(std::make_unique<HaplotypeAddSegment>(*this)));
+  curr_segment_++;
+  current_segment_handle_ = graph_t().create_path_handle(PathName());
+}
+
+HaplotypeAddSteps::HaplotypeAddSteps(const Haplotype& haplotype)
+    : curr_next_ref_index_(haplotype.next_ref_index_),
+      curr_step_(haplotype.graph_.path_back(haplotype.current_segment_handle_)) {}
+
+void HaplotypeAddSteps::Undo(Haplotype& haplotype) const {
+  // Remove any steps that were added after the save point and reset the ref index
+  auto end = haplotype.graph_t().path_front_end(haplotype.current_segment_handle_);
+  for (auto step = haplotype.graph_.path_back(haplotype.current_segment_handle_); step != end;
+       step = haplotype.graph_t().get_previous_step(step)) {
+    if (step == curr_step_) break;
+    haplotype.graph_t().destroy_step(step);
+  }
+  haplotype.next_ref_index_ = curr_next_ref_index_;
+}
+
+HaplotypeAddSegment::HaplotypeAddSegment(const Haplotype& haplotype)
+    : current_segment_handle_(haplotype.current_segment_handle_) {}
+
+void HaplotypeAddSegment::Undo(Haplotype& haplotype) const {
+  haplotype.graph_.destroy_path(haplotype.current_segment_handle_);
+  haplotype.current_segment_handle_ = current_segment_handle_;
 }
 
 }  // namespace detail

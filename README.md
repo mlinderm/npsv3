@@ -136,7 +136,7 @@ pip install nanobind scikit-build-core[pyproject]
 pip install --no-build-isolation -ve .
 pytest tests
 ```
-
+ctest --test-dir build/cp312-abi3-linux_aarch64 -R AdjacentInsertion -V -N
 
 ## License
 

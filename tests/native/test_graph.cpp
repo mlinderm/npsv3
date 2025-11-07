@@ -57,7 +57,7 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
   auto region = Range("chr1", 3693757, 3693777);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
   // Although there 4 variants there are only 2 unique REF and 3 unique ALT alleles. With padding nodes, we expect:
-  ASSERT_EQ(graph.NodeCount(), 7);
+  ASSERT_EQ(graph.get_node_count(), 7);
 
   // Variants 1(1) and 4(2), and 3(1) and 4(1) should share alternate allele nodes
   auto handles1_1 = graph.PathHandles("_alt_f4a6f765120d8399c009da996db3017b8aa7d488_1");
@@ -116,13 +116,13 @@ TEST_P(VariantTransitionsGraphConstructionTest, TestVariantTransitions) {
 
   int i;
   for (i = 0; i < sample_0_paths; i++) {
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#0#{}#{}", region.contig(), i)));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#0#{}#{}", region.contig(), i)));
   }
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample#0#{}#{}", region.contig(), i)));
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#0#{}#{}", region.contig(), i)));
   for (i = 0; i < sample_1_paths; i++) {
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#1#{}#{}", region.contig(), i)));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), i)));
   }
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample#1#{}#{}", region.contig(), i)));
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), i)));
 }
 
 // clang-format off
@@ -160,9 +160,12 @@ chr14	76721239	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2)VCF");
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
     // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
-    ASSERT_FALSE(graph.HasPath(fmt::format("Sample#{}#{}#1", i, region.contig())));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#{}#{}#0", i, region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#1", i, region.contig())));
   }
+
+  ASSERT_EQ(graph.PathSequence("Sample#0#chr14#0"), "GATTCCGTTGCAAAAAAAAAACAAAAAAAAGA");
+  ASSERT_EQ(graph.PathSequence("Sample#1#chr14#0"), "GATTCCGTTGAAAAAAAAGA");
 };
 
 TEST_F(GraphConstructionTest, PermuteStarAlleleVariant) {
@@ -178,9 +181,12 @@ chr1	5414226	.	CG	*,C	.	PASS	.	GT	1/2)VCF");
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
     // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
-    ASSERT_FALSE(graph.HasPath(fmt::format("Sample#{}#{}#1", i, region.contig())));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#{}#{}#0", i, region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#1", i, region.contig())));
   }
+
+  ASSERT_EQ(graph.PathSequence("Sample#0#chr1#0"), "CCCAGCATCCCGGGCATCTATGATGCTGATTGATGTCCCCAGCATCCCGGGCATCTATGATGCTGATTGATGTCCCCAGCATCCCGGGCATCTAT");
+  ASSERT_EQ(graph.PathSequence("Sample#1#chr1#0"), "CCCAGCATCCCGGGCATCTAT");
 };
 
 TEST_F(GraphConstructionTest, ImplicitOverlap) {
@@ -195,13 +201,13 @@ chr1	8978664	.	A	C	.	PASS	.	GT	0|0)VCF");
   auto region = Range("chr1", 8978650, 8978685);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
   for (int i=0; i < 2 /* ploidy */; i++) {
-    // Each haplotype should only have a single patch because we can implicitly phase the '*' allele
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#{}#{}#0", i, region.contig())));
-    ASSERT_FALSE(graph.HasPath(fmt::format("Sample#{}#{}#1", i, region.contig())));
+    // Each haplotype should only have a single path because we can implicitly phase the '*' allele
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#{}#{}#0", i, region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#1", i, region.contig())));
   }
 };
 
-TEST_F(GraphConstructionTest, InconsistentHaplotypes) {
+TEST_F(GraphConstructionTest, InconsistentHaplotypes1) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
@@ -216,14 +222,19 @@ chr1	6012378	.	T	C	.	.	.	GT	0|1)VCF");
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
   // Haplotype 0 should have 1 path, haplotype 1 should be broken at the inconsistent 2nd variant
-  ASSERT_TRUE(graph.HasPath(fmt::format("Sample#0#{}#0", region.contig())));
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample#0#{}#1", region.contig())));
+  ASSERT_TRUE(graph.has_path(fmt::format("Sample#0#{}#0", region.contig())));
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#0#{}#1", region.contig())));
 
   for (int i=0; i < 2 /* segments*/; i++) {
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#1#{}#{}", region.contig(), i)));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), i)));
   }
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample#1#{}#{}", region.contig(), 2)));
-    
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), 2)));
+  
+  ASSERT_EQ(graph.PathSequence("Sample#0#chr1#0"), "ATGGAGGTAGTGGTGGAGGTG");
+  ASSERT_EQ(graph.PathSequence("Sample#1#chr1#0"), "ATGGAGGTAGT");
+  // When breaking on inconsistent genotypes, we don't re-add all references nodes that might
+  // have been previously deleted, just those needed to restart the haplotype.
+  ASSERT_EQ(graph.PathSequence("Sample#1#chr1#1"), "CAGTGGTGGAGGTGATGAAGGCGGAGGTGGAGGTG");
 };
 
 TEST_F(GraphConstructionTest, InconsistentHaplotypes2) {
@@ -241,12 +252,77 @@ TEST_F(GraphConstructionTest, InconsistentHaplotypes2) {
   Graph graph(B37FastaPath_, vcf.file_path_, region);
 
   // Haplotype 0 should be broken at the inconsistent 2nd variant, haplotype 1 should have 1 path
-  ASSERT_TRUE(graph.HasPath(fmt::format("Sample#1#{}#0", region.contig())));
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample10#{}#1", region.contig())));
+  ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#0", region.contig())));
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample10#{}#1", region.contig())));
 
   for (int i=0; i < 2 /* segments*/; i++) {
-    ASSERT_TRUE(graph.HasPath(fmt::format("Sample#0#{}#{}", region.contig(), i)));
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#0#{}#{}", region.contig(), i)));
   }
-  ASSERT_FALSE(graph.HasPath(fmt::format("Sample#0#{}#{}", region.contig(), 2)));
-    
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#0#{}#{}", region.contig(), 2))); 
+  
+  ASSERT_EQ(graph.PathSequence("Sample#0#2#0"), "CTCTCTCTCTCG");
+  ASSERT_EQ(graph.PathSequence("Sample#0#2#1"), "CTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCGCTTTCTCGCT");
+  ASSERT_EQ(graph.PathSequence("Sample#1#2#0"), "CTCTCTCTCGCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCGCTTTCTCGCT");
+};
+
+TEST_F(GraphConstructionTest, AdjacentInsertions) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##contig=<ID=chr4,length=190214555>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr4	99589035	.	A	ACATATATATGTTCATATATATATTCATATATATATGTTCATGTATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATT	30	.	SVTYPE=INS;SVLEN=564	GT	0|1
+chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0)VCF");
+
+  auto region = Range("chr4", 99589024, 99589046);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  // The second insertion has a nominal right padding of 1. With that, the two insertions collapse. To prevent that
+  // collapse we only remove right padding when both (ref, alt) alleles have length > 1.
+
+  for (int i=0; i < 2 /* ploidy */; i++) {
+    // Each haplotype should only have a single path
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#{}#{}#0", i, region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#1", i, region.contig())));
+  }
+
+  ASSERT_EQ(graph.PathSequence("Sample#0#chr4#0"), "ATATATACACATATATATATGTTCATATATATATTCATATATATGT");
+  ASSERT_EQ(graph.PathSequence("Sample#1#chr4#0"), "ATATATACACACATATATATGTTCATATATATATTCATATATATATGTTCATGTATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATATGTTCATATATATATTCATATATATGT");
+};
+
+TEST_F(GraphConstructionTest, MixedAlleles) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=1,length=249250621>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+1	1000000	.	T	A	100	PASS	.	GT	0/1
+1	1000001	.	G	C	100	PASS	.	GT:PS	0|1:1000000
+1	1000002	.	G	T	100	PASS	.	GT:PS	1|1:1000000
+1	1000003	.	G	A	100	PASS	.	GT:PS	1|0:1000003
+1	1000004	.	C	T	100	PASS	.	GT	0/0
+1	1000005	.	A	G	100	PASS	.	GT	1/1
+1	1000006	.	C	G	100	PASS	.	GT	0|1)VCF");
+
+  auto region = Range("1", 999990, 1000016);
+  Graph graph(B37FastaPath_, vcf.file_path_, region);
+
+  ASSERT_EQ(graph.PathSequence("Sample#0#1#0"), "CCAGGGCCGT");
+  ASSERT_EQ(graph.PathSequence("Sample#0#1#1"), "GT");
+  ASSERT_EQ(graph.PathSequence("Sample#0#1#2"), "ACG");
+  ASSERT_EQ(graph.PathSequence("Sample#0#1#3"), "CAGCCTCACCC");
+
+  ASSERT_EQ(graph.PathSequence("Sample#1#1#0"), "CCAGGGCCGA");
+  ASSERT_EQ(graph.PathSequence("Sample#1#1#1"), "CT");
+  ASSERT_EQ(graph.PathSequence("Sample#1#1#2"), "GCG");
+  ASSERT_EQ(graph.PathSequence("Sample#1#1#3"), "GAGCCTCACCC");
+
+   for (int i=0; i < 2 /* ploidy */; i++) {
+    // Each haplotype should only have 4 path segments
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#4", i, region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#4", i, region.contig())));
+  }
+ 
 };

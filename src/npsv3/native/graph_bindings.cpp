@@ -21,8 +21,8 @@ NB_MODULE(_native_graph, m) {
 
   nb::class_<npsv3::Graph>(m, "Graph")
     .def(nb::init<const std::string&, const std::string&, const npsv3::Range&>())
-    .def("node_count", &npsv3::Graph::NodeCount)
-    .def("has_path", &npsv3::Graph::HasPath)
+    .def("node_count", &npsv3::Graph::get_node_count)
+    .def("has_path", &npsv3::Graph::has_path)
     .def("path_nodes", nb::overload_cast<const std::string&>(&npsv3::Graph::PathNodes, nb::const_))
     .def("samples_including", &npsv3::Graph::SamplesIncluding);
   

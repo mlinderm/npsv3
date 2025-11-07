@@ -3,9 +3,10 @@ ARG BASE_IMAGE=ubuntu:24.04
 FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS build
 
 RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
-  build-essential \
   ca-certificates \
+  build-essential \
   cmake \
+  gdb \
   curl \
   gawk \
   git \
