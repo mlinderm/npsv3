@@ -10,7 +10,7 @@ FastaReader::FastaReader(const std::string& fasta_path) {
   file_ = FaidxPtr(fai);
 }
 
-std::string FastaReader::FetchSequence(const Range& region) {
+FastaSequence FastaReader::FetchSequence(const Range& region) {
   int64_t seq_len = 0;
   // faidx_fetch_seq* uses an inclusive end coordinate
   char* seq = faidx_fetch_seq64(file_.get(), region.contig().c_str(), region.start(), region.end()-1, &seq_len);
@@ -20,8 +20,6 @@ std::string FastaReader::FetchSequence(const Range& region) {
                              std::to_string(region.start()) + "-" +
                              std::to_string(region.end()));
   }
-  std::string result(seq, seq_len);
-  free(seq);
-  return result;
+  return FastaSequence(seq, seq_len);
 }
 } // namespace npsv3

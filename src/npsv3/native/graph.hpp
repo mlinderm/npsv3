@@ -31,6 +31,7 @@ class Graph {
   handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const { return graph_.path_back(path); }
   void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }
   
+  HandleSeq PathHandles(const handlegraph::path_handle_t& path_handle) const;
   HandleSeq PathHandles(const std::string& path_name) const;
   NodeIdSeq PathNodes(const handlegraph::path_handle_t& path_handle) const;
   NodeIdSeq PathNodes(const std::string& path_name) const;
@@ -60,28 +61,6 @@ class NonRefAlleleOverlappingError : public std::runtime_error {
  public:
   NonRefAlleleOverlappingError()
       : std::runtime_error("Non-reference allele overlaps reference allele without explicit '*' allele") {}
-};
-
-class Polytype {
- public:
-  template <typename... Args>
-  Polytype(int ploidy, Args&&... haplotype_args) : current_phase_(Phase::kImplicit) {
-    for (int i = 0; i < ploidy; ++i) {
-      haplotypes_.emplace_back(i, std::forward<Args>(haplotype_args)...);
-    }
-  }
-
-  void AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
-                   const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
-                   int star_allele_index);
-  std::tuple<Phase, bool> NextPhase(const Phase& current_phase) const;
-  void FinalizePaths();
-
-  friend Haplotype;
-
- private:
-  std::vector<Haplotype> haplotypes_;
-  Phase current_phase_;
 };
 
 // Record actions taken on the haplotype to enable undo
@@ -126,6 +105,28 @@ class Haplotype {
   std::string PathName() const;
   void AddReferenceNodes(size_t end_index);
   void AddSegment();
+};
+
+class Polytype {
+ public:
+  template <typename... Args>
+  Polytype(int ploidy, Args&&... haplotype_args) : current_phase_(Phase::kImplicit) {
+    for (int i = 0; i < ploidy; ++i) {
+      haplotypes_.emplace_back(i, std::forward<Args>(haplotype_args)...);
+    }
+  }
+
+  void AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
+                   const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
+                   int star_allele_index);
+  std::tuple<Phase, Haplotype::BreakKind> NextPhase(const Phase& current_phase) const;
+  void FinalizePaths();
+
+  friend Haplotype;
+
+ private:
+  std::vector<Haplotype> haplotypes_;
+  Phase current_phase_;
 };
 
 class HaplotypeAddSteps : public HaplotypeAction {

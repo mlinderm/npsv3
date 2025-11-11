@@ -24,7 +24,6 @@ class ReferenceNodes {
   ReferenceNodes(odgi::graph_t& graph, const std::string& reference_fasta_path, const Range& region)
       : graph_(graph), region_(region) {
     FastaReader fasta_reader(reference_fasta_path);
-    // TODO: Return a unique_ptr char* from FetchSequence to avoid the extra copy into a string?
     ref_seq_ = fasta_reader.FetchSequence(region_);
   }
 
@@ -110,7 +109,7 @@ class ReferenceNodes {
 
   odgi::graph_t& graph_;
   const Range region_;
-  std::string ref_seq_;
+  FastaSequence ref_seq_;
 
   std::vector<Range> regions_;
   HandleSeq handles_;
@@ -222,8 +221,8 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     }
   }
   
-  // 3. Perform topological sort and compaction of the graph to prepare for subsequent steps. Since the VCF
-  // is by definition a DAG we can use odgi's `lazier_topological_order` algorithm.
+  // 3. Perform topological sort and compaction of the graph to ensure integer node ids on all paths are in
+  // ascending sorted order. Since the VCF is by definition acyclic we can use odgi's `lazier_topological_order` algorithm.
   graph_.apply_ordering(odgi::algorithms::lazier_topological_order(&graph_), true /* compact IDs */);
 
   // 4. Add genotype paths
@@ -315,13 +314,16 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
   }
 }
 
-std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_name) const {
+std::vector<handlegraph::handle_t> Graph::PathHandles(const handlegraph::path_handle_t& path_handle) const {
   std::vector<handlegraph::handle_t> handles;
-  auto path_handle = graph_.get_path_handle(path_name);
   graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
     handles.emplace_back(graph_.get_handle_of_step(step));
   });
   return handles;
+}
+
+std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_name) const {
+  return PathHandles(graph_.get_path_handle(path_name));
 }
 
 std::vector<odgi::nid_t> Graph::PathNodes(const handlegraph::path_handle_t& path_handle) const {
@@ -388,7 +390,7 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
     permute_alleles = true;
   }
 
-  auto [next_phase, break_before] = NextPhase(variant_phase);
+  auto [next_phase, break_kind] = NextPhase(variant_phase);
   
   Variant::Genotype::AlleleIndices indices(genotype.allele_indices());
   bool added_genotype = false;
@@ -399,8 +401,7 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
         if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
           continue; // Skip missing alleles or '*' alleles
         }
-        haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]],
-                                         break_before ? Haplotype::kBreakBefore : Haplotype::kBreakNone);
+        haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]], break_kind);
       }
       added_genotype = true;
       break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
@@ -427,32 +428,32 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
   current_phase_ = next_phase;
 }
 
-std::tuple<Phase,bool> Polytype::NextPhase(const Phase& var_phase) const {
-  #define NEXT_CASE(curr, var, next, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(Phase(Phase::next), break_before); }
-  #define NEXT_CASE_VAR(curr, var, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(var_phase, break_before); }
-  #define NEXT_CASE_CURR(curr, var, break_before) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(current_phase_, break_before); }
+std::tuple<Phase,Haplotype::BreakKind> Polytype::NextPhase(const Phase& var_phase) const {
+  #define NEXT_CASE(curr, var, next, break_kind) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(Phase(Phase::next), break_kind); }
+  #define NEXT_CASE_VAR(curr, var, break_kind) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(var_phase, break_kind); }
+  #define NEXT_CASE_CURR(curr, var, break_kind) if (current_phase_ == Phase::curr && var_phase == Phase::var) { return std::make_tuple(current_phase_, break_kind); }
 
-  NEXT_CASE(kUnphased, kUnphased, kUnphased, true)
-  NEXT_CASE(kUnphased, kGlobal, kGlobal, true)
-  NEXT_CASE_VAR(kUnphased, kLocal, true)
-  NEXT_CASE(kUnphased, kImplicit, kUnphased, false)
+  NEXT_CASE(kUnphased, kUnphased, kUnphased, Haplotype::kBreakBefore)
+  NEXT_CASE(kUnphased, kGlobal, kGlobal, Haplotype::kBreakBefore)
+  NEXT_CASE_VAR(kUnphased, kLocal, Haplotype::kBreakBefore)
+  NEXT_CASE(kUnphased, kImplicit, kUnphased, Haplotype::kBreakNone)
   
-  NEXT_CASE(kGlobal, kUnphased, kUnphased, true)
-  NEXT_CASE(kGlobal, kGlobal, kGlobal, false)
-  NEXT_CASE_VAR(kGlobal, kLocal, true)
-  NEXT_CASE(kGlobal, kImplicit, kGlobal, false)
+  NEXT_CASE(kGlobal, kUnphased, kUnphased, Haplotype::kBreakBefore)
+  NEXT_CASE(kGlobal, kGlobal, kGlobal, Haplotype::kBreakNone)
+  NEXT_CASE_VAR(kGlobal, kLocal, Haplotype::kBreakBefore)
+  NEXT_CASE(kGlobal, kImplicit, kGlobal, Haplotype::kBreakNone)
 
-  NEXT_CASE(kLocal, kUnphased, kUnphased, true)
-  NEXT_CASE(kLocal, kGlobal, kGlobal, true)
+  NEXT_CASE(kLocal, kUnphased, kUnphased, Haplotype::kBreakBefore)
+  NEXT_CASE(kLocal, kGlobal, kGlobal, Haplotype::kBreakBefore)
   if (current_phase_ == Phase::kLocal && var_phase == Phase::kLocal) {
-    return std::make_tuple(var_phase, current_phase_ != var_phase);
+    return std::make_tuple(var_phase, current_phase_ != var_phase ? Haplotype::kBreakBefore : Haplotype::kBreakNone);
   }
-  NEXT_CASE_CURR(kLocal, kImplicit, false)
+  NEXT_CASE_CURR(kLocal, kImplicit, Haplotype::kBreakNone)
 
-  NEXT_CASE(kImplicit, kUnphased, kUnphased, false)
-  NEXT_CASE(kImplicit, kGlobal, kGlobal, false)
-  NEXT_CASE_VAR(kImplicit, kLocal, false)
-  NEXT_CASE(kImplicit, kImplicit, kImplicit, false)
+  NEXT_CASE(kImplicit, kUnphased, kUnphased, Haplotype::kBreakNone)
+  NEXT_CASE(kImplicit, kGlobal, kGlobal, Haplotype::kBreakNone)
+  NEXT_CASE_VAR(kImplicit, kLocal, Haplotype::kBreakNone)
+  NEXT_CASE(kImplicit, kImplicit, kImplicit, Haplotype::kBreakNone)
   else {
     throw std::runtime_error("Phasing transition not yet implemented");
   }
