@@ -113,6 +113,11 @@ class Phase {
   bool is_phased() const { return value_; }
   Value phasing() const { return (value_ & static_cast<uint32_t>(kLocal)) ? kLocal : static_cast<Value>(value_); }
 
+  friend std::ostream& operator<<(std::ostream& os, const Phase& phase) {
+    os << phase.value_;
+    return os;
+  }
+
  private:
   // Use MSB to encode local phase. If locally phased, store phase set in the lower 31 bits.
   uint32_t value_;
@@ -159,8 +164,8 @@ class PackedGenotype {
       // phase_set of -1 indicates no PS, i.e., global phasing
       phase_ = (phase_set < 0) ? Phase::kGlobal : Phase(phase_set) /* Sets kLocal phasing */;
     } else if (num_alleles_ > 0 &&
-               std::all_of(std::begin(allele_indices_), std::begin(allele_indices_) + num_alleles_,
-                           [this](AlleleIndex index) { return index >= 0 && index == allele_indices_[0]; })) {
+               std::all_of(std::begin(allele_indices_) + 1, std::begin(allele_indices_) + num_alleles_,
+                           [this](AlleleIndex index) { return index == allele_indices_[0]; })) {
       phase_ = Phase::kImplicit;
     }
   }
@@ -229,7 +234,7 @@ class Variant {
 
   virtual Range ReferenceRegion() const;
   virtual std::optional<Range> AlleleReferenceRegion(int allele_idx) const = 0;
-
+  virtual std::optional<int> AlleleLengthChange(int allele_idx) const = 0;
   virtual std::optional<std::string_view> AlleleSequence(int allele_idx) const = 0;
 
   std::vector<Genotype> Genotypes() const;
@@ -255,7 +260,7 @@ class SequenceResolvedVariant : public Variant {
   SequenceResolvedVariant(const HeaderPtr& hdr, RecordPtr record);
 
   std::optional<Range> AlleleReferenceRegion(int allele_idx) const override;
-
+  std::optional<int> AlleleLengthChange(int allele_idx) const override;
   std::optional<std::string_view> AlleleSequence(int allele_idx) const override;
 
  private:

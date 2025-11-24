@@ -3,6 +3,7 @@
 #include <odgi.hpp>
 #include <vector>
 #include <iosfwd>
+#include <boost/dynamic_bitset.hpp>
 
 #include "range.hpp"
 #include "variant.hpp"
@@ -13,50 +14,150 @@ class Polytype;
 class Haplotype;
 }  // namespace detail
 
+class AllPathGraphOverlay;
+
 class Graph {
  public:
   typedef std::vector<handlegraph::handle_t> HandleSeq;
   typedef std::vector<odgi::nid_t> NodeIdSeq;
   typedef std::pair<size_t, size_t> NodeIdRange;
   typedef std::vector<handlegraph::path_handle_t> PathHandleSeq;
+  typedef boost::dynamic_bitset<> NodeIdSet;
+  typedef boost::dynamic_bitset<> PathIdSet;
 
-  Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region);
+  /**
+   * @brief Construct a new pangenome Graph from a VCF in a specific region
+   * 
+   * Graph nodes are guaranteed to be in topological order.
+   * 
+   * @param reference_fasta_path Path to the reference FASTA file
+   * @param vcf_path Path to the VCF file
+   * @param region Construct graph in this region
+   * @param enforce_multiallelic If true, do not create edges between alternate alleles of the same variant
+   */
+  Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic = true);
 
-  // handlegraph interface
+  /** \name handlegraph interface */
+  // @{
   handlegraph::handle_t get_handle(odgi::nid_t node_id) const { return graph_.get_handle(node_id); }
   odgi::nid_t get_id(handlegraph::handle_t handle) const { return graph_.get_id(handle); }
+
   size_t get_node_count() const { return graph_.get_node_count(); }
+  odgi::nid_t min_node_id() const { return graph_.min_node_id(); }
+  odgi::nid_t max_node_id() const { return graph_.max_node_id(); }
+
+  bool has_edge(const handlegraph::handle_t& left, const handlegraph::handle_t& right) const { return graph_.has_edge(left, right); }
 
   bool has_path(const std::string& path_name) const { return graph_.has_path(path_name); }
+  handlegraph::path_handle_t get_path_handle(const std::string& path_name) const { return graph_.get_path_handle(path_name); }
   handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const { return graph_.path_back(path); }
   void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }
-  
+  // @}
+
   HandleSeq PathHandles(const handlegraph::path_handle_t& path_handle) const;
   HandleSeq PathHandles(const std::string& path_name) const;
   NodeIdSeq PathNodes(const handlegraph::path_handle_t& path_handle) const;
   NodeIdSeq PathNodes(const std::string& path_name) const;
+  
   std::string PathSequence(const handlegraph::path_handle_t& path_handle) const;
   std::string PathSequence(const std::string& path_name) const;
+  template<typename Iterator>
+  std::string PathSequence(Iterator begin, Iterator end) const;
 
   std::vector<std::string> SamplesIncluding(const NodeIdSeq& nodes) const;
 
-  void FromSource(odgi::nid_t start_id, odgi::nid_t end_id) const;
+  /**
+   * @brief Construct an overlay for enumerating all paths traversing variants in the inference VCF
+   * 
+   * @param inference_vcf Path to the VCF file defining the variants for path enumeration
+   * @param backbone_prefix Link inference variants with paths with this prefix, e.g., "chr1" or "sample1#0"
+   * @param region Restrict inference variants to this region
+   * @param min_size Minimum size of allele length change to consider for path enumeration
+   * @return AllPathGraphOverlay 
+   */
+  AllPathGraphOverlay AllPaths(const std::string& inference_vcf, const std::string& backbone_prefix, const Range& region, int min_size=50) const;
 
+  std::string AltPathName(const Variant::VariantId& variant_id, int allele, const std::string& path_prefix = "alt") const; 
 
   void ToGFA(std::ostream&);
 
+  friend AllPathGraphOverlay;
   friend detail::Polytype;
   friend detail::Haplotype;
 
  private:
   odgi::graph_t graph_;
+  std::vector<PathIdSet> node_variant_paths_;
+  std::vector<size_t> variant_path_starts_;
 };
 
-namespace test {
-void TestCreateGraph(const std::string& reference_fasta_path, const std::string& vcf_path);
+template<typename Iterator>
+std::string Graph::PathSequence(Iterator begin, Iterator end) const {
+  std::string seq;
+  for (auto it = begin; it != end; ++it) {
+    auto handle_seq = graph_.get_sequence(*it);
+    if (handle_seq != "*")
+      seq.append(handle_seq);
+  }
+  return seq;
 }
 
 namespace detail {
+  struct AllPathState{
+    typedef boost::dynamic_bitset<> PredecessorEdges;
+
+    PredecessorEdges pred_edges;
+
+    void InitEdges(size_t num_edges) { pred_edges.resize(num_edges); }
+    void SetEdge(size_t edge_idx) { pred_edges.set(edge_idx); }
+  };
+} // namespace detail
+
+/**
+ * @brief Overlay for enumerating all paths traversing specific nodes in the graph
+ * 
+ */
+class AllPathGraphOverlay {
+ public:
+  typedef std::vector<handlegraph::handle_t> CallbackSeq;
+  typedef CallbackSeq::const_reverse_iterator CallbackIter;
+  typedef function<void(const CallbackIter&, const CallbackIter&, const Graph::PathIdSet&)> CallbackFunction;
+
+  /**
+   * @brief Construct a new AllPathGraphOverlay object for a graph
+   * 
+   * @param graph 
+   * @param node_mask, path_mask Only report paths according to path mask and in nodes specified in node mask
+   */
+  AllPathGraphOverlay(const Graph& graph, const Graph::NodeIdSet& node_mask, const Graph::PathIdSet& path_mask)
+      : graph_(graph), node_mask_(node_mask), path_mask_(path_mask), node_states_(graph.max_node_id() + 1) {}
+
+  size_t total_paths() const { return total_paths_; }
+
+  /// Invoke callback for each path in the overlay
+  void ForEachPath(const CallbackFunction& callback) const;
+
+  friend Graph;
+
+ private:
+  const Graph& graph_;
+  Graph::NodeIdSet node_mask_;
+  Graph::PathIdSet path_mask_;
+  std::vector<detail::AllPathState> node_states_;
+  size_t total_paths_ = 0;
+  
+  void ForEachPath(CallbackSeq& current_path, const CallbackFunction& callback) const;
+};
+
+
+namespace detail {
+template <typename Sequence1, typename Sequence2>
+auto TrimSequence(const Sequence1& seq1, const Sequence2& seq2) {
+  auto [prefix1, prefix2] = std::mismatch(std::begin(seq1), std::end(seq1), std::begin(seq2), std::end(seq2));
+  auto [suffix1, suffix2] = std::mismatch(std::rbegin(seq1), std::rend(seq1), std::rbegin(seq2), std::rend(seq2));
+  return std::make_tuple(prefix1, suffix1.base(), prefix2, suffix2.base());
+}
+
 class NonRefAlleleOverlappingError : public std::runtime_error {
  public:
   NonRefAlleleOverlappingError()

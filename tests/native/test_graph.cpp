@@ -48,16 +48,29 @@ TEST_F(GraphConstructionTest, OverlappingVariants) {
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
-chr1	3693767	.	C	CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	0|1	./.	./.
-chr1	3693767	.	C	CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	./.	0|1
-chr1	3693767	.	C	G	30	.	.	GT	./.	./.	./.	./.
-chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	1|2	./.)VCF");
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4	Sample5	Sample6
+chr1	3693767	.	C	CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	0|1	./.	./.	0|1	1|0
+chr1	3693767	.	C	CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	./.	0|1	1|0	1|0
+chr1	3693767	.	C	G	30	.	.	GT	./.	./.	./.	./.	./.	./.
+chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	1|2	./.	./.	./.)VCF");
 
   auto region = Range("chr1", 3693757, 3693777);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
+ 
+  //graph.ToGFA(std::cout);
+  // TODO: Should co-located insertions stack, such there could be paths traversing both insertions? At present, we split paths (e.g., Sample6 above).
+  // An alternative could be to generate all combinations of co-located insertions as distinct alternate alleles, tagged with the relevant original
+  // variant IDs. These would not be part of the allele paths, could be used when generating possible haplotypes.
+
   // Although there 4 variants there are only 2 unique REF and 3 unique ALT alleles. With padding nodes, we expect:
   ASSERT_EQ(graph.get_node_count(), 7);
+
+  // Nodes 2 & 3, the SNV, should link to the insertion REF and ALT alleles (4, 5, 6)
+  for (int l=2; l<=3; l++) {
+    for (int r=4; r<=6; r++) {
+      ASSERT_TRUE(graph.has_edge(graph.get_handle(l), graph.get_handle(r)));
+    }
+  }
 
   // Variants 1(1) and 4(2), and 3(1) and 4(1) should share alternate allele nodes
   auto handles1_1 = graph.PathHandles("_alt_f4a6f765120d8399c009da996db3017b8aa7d488_1");
@@ -66,8 +79,8 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
   auto handles4_1 = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_1");
   auto handles4_2 = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_2");
 
-  ASSERT_EQ(handles4_1.size(), 2) << "Variant 4 ALT allele should have 2 nodes";
-  ASSERT_EQ(handles4_2.size(), 2) << "Variant 4 ALT allele should have 2 nodes";
+  ASSERT_EQ(handles4_1.size(), 2) << "Variant 4 ALT allele 1 should have 2 nodes";
+  ASSERT_EQ(handles4_2.size(), 2) << "Variant 4 ALT allele 2 should have 2 nodes";
 
   std::sort(handles1_1.begin(), handles1_1.end());
   std::sort(handles2_1.begin(), handles2_1.end());
@@ -78,22 +91,104 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
   ASSERT_TRUE(std::includes(handles4_2.begin(), handles4_2.end(), handles1_1.begin(), handles1_1.end()));
 
   // Genotype paths
-  auto ref_handles = graph.PathHandles(region.contig());
-  for (int i = 0; i < 2 /* ploidy */; i++) {
-    ASSERT_EQ(graph.PathHandles(fmt::format("Sample1#{}#{}#0", i, region.contig())), ref_handles);
+  for (int s=1; s <= 5 /* samples */; s++) {
+    for (int p=0; p < 2 /* ploidy */; p++) {
+      // Each haplotype should only have a single path
+      ASSERT_TRUE(graph.has_path(fmt::format("Sample{}#{}#{}#0", s, p, region.contig())));
+      ASSERT_FALSE(graph.has_path(fmt::format("Sample{}#{}#{}#1", s, p, region.contig())));
+    }
+  } 
+
+  // Identify samples traversing the relevant alternate nodes
+  std::set<odgi::nid_t> alt_nodes;
+  for (auto path_name : std::vector<std::string>{"_alt_f4a6f765120d8399c009da996db3017b8aa7d488_1",
+                                                 "_alt_aabc116f14970388d60d7746c32fbf7dcde9b4fc_1",
+                                                 "_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_2"}) {
+    auto path_nodes = graph.PathNodes(path_name);
+    auto ref_nodes = graph.PathNodes(path_name.substr(0, path_name.size() - 1) + "0");
+    auto [path_begin, path_end, _ref_begin, _ref_end] = detail::TrimSequence(path_nodes, ref_nodes);
+    alt_nodes.insert(path_begin, path_end);
   }
-  ASSERT_EQ(graph.PathHandles(fmt::format("Sample2#{}#{}#0", 0, region.contig())), ref_handles);
-  ASSERT_NE(graph.PathHandles(fmt::format("Sample2#{}#{}#0", 1, region.contig())), ref_handles);
 
-  // Identify samples traversing the two relevant alternate nodes
-  auto nodes1_1 = graph.PathNodes("_alt_f4a6f765120d8399c009da996db3017b8aa7d488_1");
-  auto nodes2_1 = graph.PathNodes("_alt_aabc116f14970388d60d7746c32fbf7dcde9b4fc_1");
-  std::vector<odgi::nid_t> alt_nodes;
-  std::set_union(nodes1_1.begin(), nodes1_1.end(), nodes2_1.begin(), nodes2_1.end(), std::back_inserter(alt_nodes));
-
-  auto samples_with_alt_nodes = graph.SamplesIncluding(alt_nodes);
+  auto samples_with_alt_nodes = graph.SamplesIncluding(std::vector<odgi::nid_t>(alt_nodes.begin(), alt_nodes.end()));
   std::sort(samples_with_alt_nodes.begin(), samples_with_alt_nodes.end());
-  ASSERT_EQ(samples_with_alt_nodes, decltype(samples_with_alt_nodes)({"Sample2", "Sample3", "Sample4"}));
+  ASSERT_EQ(samples_with_alt_nodes, decltype(samples_with_alt_nodes)({"Sample2", "Sample3", "Sample4", "Sample5", "Sample6"}));
+
+  auto paths = graph.AllPaths(vcf.file_path_, region.contig(), region);
+  ASSERT_EQ(paths.total_paths(), 3);  // 1 REF + 2 unique ALT alleles (without "stacking" co-located insertions)
+
+  std::vector<std::pair<Graph::PathIdSet, std::string>> path_sequences;
+  paths.ForEachPath([&](const AllPathGraphOverlay::CallbackIter& begin, const AllPathGraphOverlay::CallbackIter& end, const Graph::PathIdSet& inference_paths) {
+    path_sequences.emplace_back(inference_paths, graph.PathSequence(begin, end));
+  });
+  ASSERT_EQ(path_sequences.size(), paths.total_paths());
+  std::sort(std::begin(path_sequences), std::end(path_sequences));
+  ASSERT_EQ(path_sequences[0],
+            std::make_pair(Graph::PathIdSet(std::string("00101010100")), std::string("ACAATCCCACCCATGCAGCC")));
+  ASSERT_EQ(path_sequences[1],
+            std::make_pair(Graph::PathIdSet(std::string("00101100100")), std::string("ACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCC")));
+  ASSERT_EQ(path_sequences[2],
+            std::make_pair(Graph::PathIdSet(std::string("10001011000")), std::string("ACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCC")));
+}
+
+TEST_F(GraphConstructionTest, NoLinksBetweenAltAllelesInSameVariant) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	1|2	./.)VCF");
+
+  auto region = Range("chr1", 3693757, 3693777);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
+
+  // There are 2 unique REF and 2 unique ALT alleles. With padding nodes, we expect:
+  ASSERT_EQ(graph.get_node_count(), 6);
+
+  // The 'G' should not link to the insertion as that is excluded by the multi-allelic variant representation. Note 
+  // we may want to change this in the future to allow paths between ALT alleles within a variant.
+  auto ref_nodes = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_0");
+  auto alt1_nodes = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_1");
+  auto alt2_nodes = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_2");
+  ASSERT_TRUE(graph.has_edge(ref_nodes.front(), alt1_nodes.back()));
+  ASSERT_TRUE(graph.has_edge(ref_nodes.front(), alt2_nodes.back()));
+  ASSERT_TRUE(graph.has_edge(alt1_nodes.front(), alt1_nodes.back()));
+  ASSERT_FALSE(graph.has_edge(alt1_nodes.front(), alt2_nodes.back()));
+  
+  auto paths = graph.AllPaths(vcf.file_path_, region.contig(), region);
+  ASSERT_EQ(paths.total_paths(), 2);
+  
+  std::vector<std::pair<Graph::PathIdSet, std::string>> path_sequences;
+  paths.ForEachPath([&](const AllPathGraphOverlay::CallbackIter& begin, const AllPathGraphOverlay::CallbackIter& end, const Graph::PathIdSet& inference_paths) {
+    path_sequences.emplace_back(inference_paths, graph.PathSequence(begin, end));
+  });
+  ASSERT_EQ(path_sequences.size(), paths.total_paths());
+
+  // Since inference paths are "one-hot" with reference allele first, sorting should ensure the reference path is always first
+  std::sort(std::begin(path_sequences), std::end(path_sequences));
+  ASSERT_EQ(path_sequences[0],
+            std::make_pair(Graph::PathIdSet(std::string("00100")), std::string("ACAATCCCACCCATGCAGCC")));
+  ASSERT_EQ(path_sequences[1],
+            std::make_pair(Graph::PathIdSet(std::string("10000")),
+                           std::string("ACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCC")));
+}
+
+TEST_F(GraphConstructionTest, LinksBetweenAltAllelesInSameVariant) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	.	.	GT	./.	./.	1|2	./.)VCF");
+
+  auto region = Range("chr1", 3693757, 3693777);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region, false /* enforce_multiallelic */);
+  //graph.ToGFA(std::cout);
+
+  auto alt1_nodes = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_1");
+  auto alt2_nodes = graph.PathHandles("_alt_34d6d0a9fdf8d0c44b8e9ba6c250cb86149ed9b9_2");
+  ASSERT_TRUE(graph.has_edge(alt1_nodes.front(), alt2_nodes.back()));
 }
 
 class VariantTransitionsGraphConstructionTest
@@ -324,5 +419,42 @@ TEST_F(GraphConstructionTest, MixedAlleles) {
     ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#4", i, region.contig())));
     ASSERT_FALSE(graph.has_path(fmt::format("Sample#{}#{}#4", i, region.contig())));
   }
- 
+};
+
+TEST_F(GraphConstructionTest, VariantsOverlappingGraphRegion) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVLEN,Number=.,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA12877	NA12878	NA12879	NA12881	NA12882	NA12885	NA12886
+chr1	1978993	HIFI_sawfish:1:193:0:0	GAGGCTGCACAGAACACGTGTGTCGTGCTGAGCTGGGCGTGGGAAGGCGTCATGTGACGAGGCTGCACAGAACATGCGTGTGGTACTGAGCTGGGCGTGGGAAGGTGTCACGTGACAAGGCTGCACAGAACATGTGTGTGGTACTGAGCTGGGCGTGGGAAGGCATCATGTGACA	G	999	PASS	SVTYPE=DEL;SVLEN=-174	GT:PS	0|1:1978993	1|0:1978993	0|1:1978993	1|0:1978993	1|1:.	0|1:1978993	1|0:1978993
+chr1	1979575	HIFI_sawfish:1:193:0:1	GGCTGCGCAGAACATGCGTGTGGTACTGAGCTGGGTGTGGGAAGGCATCACGTGACGAGGCTGCGCAGAACACGTGTGTCGTGCTGAGCTGGGCGTGGGAAGGTGTCGCGTGACGAGGCTGCGCAGAACACGCATGTCATGCTGAGCTGGGTGTGGGAAGGCGTCACGTGACGAGGCTGTGCAGAACACGCGTGTGGTACTGACCTGGGTGTGGGAAGGCGTCACATGACGAAGCTGCGCAGAACACGCGTGTGGTACTGACCTGGGTGTGGGAAGGCGTCACATGACGAA	G	999	PASS	SVTYPE=DEL;SVLEN=-290	GT:PS	0|1:1978993	1|0:1978993	0|1:1978993	1|0:1978993	1|1:.	0|1:1978993	1|0:1978993
+chr1	1980058	HIFI_sawfish:1:193:0:2	ACCCTCTTACCGCGTGGGGAGGACGGGTGAACGAGAGTGTATCTAAGCCACCGGCACAGATCGCAGTGGGCGCCCTCTTACCGCGTGGGGAGGACGGGTGAACGAGAGACTGTATCTAAGCCACCGGCACAGATCGCAGTGGGCGCCCTCTTACCGCGTGGGGAGGACGGGTGAACGAGAGACTGTATCTAAGCCACCGGCACAGATCGCAGTGGGCG	A	999	PASS	SVTYPE=DEL;SVLEN=-217	GT:PS	0|1:1978993	1|0:1978993	0|1:1978993	1|0:1978993	1|1:.	0|1:1978993	1|0:1978993)VCF");
+
+  auto region = Range("chr1", 1979058, 1981275);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  // The first variant only partially overlaps the region, so it should be ignored during graph construction
+  ASSERT_FALSE(graph.has_path("_alt_8eeff63608a6ce2fa6141be1409abe9bf4a08eef_0")); 
+};
+
+TEST_F(GraphConstructionTest, VariantsAtGraphRegionBoundary) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVLEN,Number=.,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA12877	NA12878	NA12879	NA12881	NA12882	NA12885	NA12886
+chr1	52277191	0	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0|1	0|0	0|0	0|0	0|0	0|0	0|0
+chr1	52278191	HIFI_sawfish:0:1743:0:0	T	TGGAAAATTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTGAGACGGAGTCTCGCTCTGTCGCCCAGGCTGGAGTGCAGTGGCGGGATCTCGGCTCACTGCAAGCTCCGCCTCCCGGGTTCACGCCATTCTCCTGCCTCAGCCTCCCAAGTAGCTGGGACTACAGGCGCCCGCCACTACGCCCGGCTAATTTTTTTGTATTTTTAGTAGAGACGGGGTTTCACCGTTTTAGCCGGGATGGTCTCGATCTCCTGACCTCGTGATCCGCCCGCCTCGGC	999	PASS	SVTYPE=INS;SVLEN=279	GT	0|1	0|0	0|0	0|0	0|0	0|0	0|0)VCF");
+  auto region = Range("chr1", 52277191, 52279191);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  // The first variant only partially overlaps the region, so it should be ignored during graph construction
+  ASSERT_FALSE(graph.has_path("_alt_70e6adb077463a6f66e692cdb11f2ca4540ff066_0"));
 };

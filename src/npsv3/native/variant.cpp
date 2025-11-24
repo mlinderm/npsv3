@@ -229,13 +229,27 @@ std::optional<Range> SequenceResolvedVariant::AlleleReferenceRegion(int allele_i
   if (allele_idx == 0) {
     return std::make_optional<Range>(ReferenceRegion());
   }
-  auto alt_allele = std::string_view(record_->d.allele[allele_idx]);
-  if (alt_allele == "*") {
-    return std::nullopt;  // Spanning deletion, no reference region
+  if (record_->d.allele[allele_idx][0] == '*' && record_->d.allele[allele_idx][1] == '\0') {
+    return std::nullopt;  // Spanning deletion, no length change
   }
   auto pos = record_->pos;  // 0-based position
   return std::make_optional<Range>(contig(), pos + allele_left_padding_[allele_idx - 1],
                                    pos + record_->rlen - allele_right_padding_[allele_idx - 1]);
+}
+
+std::optional<int> SequenceResolvedVariant::AlleleLengthChange(int allele_idx) const {
+  if (allele_idx < 0 || allele_idx >= record_->n_allele) {
+    throw std::out_of_range("Allele index out of range");
+  }
+  if (allele_idx == 0) {
+    return std::nullopt;  // Reference allele has no length change
+  }
+  if (record_->d.allele[allele_idx][0] == '*' && record_->d.allele[allele_idx][1] == '\0') {
+    return std::nullopt;  // Spanning deletion, no length change
+  }
+  auto ref_allele = std::string_view(record_->d.allele[0]);
+  auto alt_allele = std::string_view(record_->d.allele[allele_idx]);
+  return std::make_optional<int>(alt_allele.size() - ref_allele.size());
 }
 
 std::optional<std::string_view> SequenceResolvedVariant::AlleleSequence(int allele_idx) const {

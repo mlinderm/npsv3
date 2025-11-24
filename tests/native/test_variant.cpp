@@ -148,6 +148,10 @@ chr1	5414226	.	CG	*,C	.	PASS	.
   ASSERT_EQ(var->AlleleReferenceRegion(0), Range("chr1", 5414226, 5414227));
   ASSERT_FALSE(var->AlleleReferenceRegion(1));
   ASSERT_EQ(var->AlleleReferenceRegion(0), Range("chr1", 5414226, 5414227));
+
+  ASSERT_FALSE(var->AlleleLengthChange(0));
+  ASSERT_FALSE(var->AlleleLengthChange(1));
+  ASSERT_EQ(var->AlleleLengthChange(2), -1);
 }
 
 TEST_F(VariantFileReaderTest, ReferenceRegionInsertion) {
@@ -165,6 +169,8 @@ TEST_F(VariantFileReaderTest, ReferenceRegionInsertion) {
   ASSERT_EQ(var->ReferenceRegion(), Range("2", 39714038, 39714038));
   ASSERT_EQ(var->AlleleReferenceRegion(0), Range("2", 39714038, 39714038));
   ASSERT_EQ(var->AlleleReferenceRegion(1), Range("2", 39714038, 39714038));
+
+  ASSERT_EQ(var->AlleleLengthChange(1), 54);
 }
 
 
