@@ -43,6 +43,7 @@ RUN git clone https://github.com/boostorg/boost.git -b boost-1.89.0 /opt/boost -
   && git submodule update --depth 1 -q --init libs/flyweight && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" flyweight \
   && git submodule update --depth 1 -q --init libs/hash2 && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" hash2 \
   && git submodule update --depth 1 -q --init libs/scope && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" scope \
+  && git submodule update --depth 1 -q --init libs/dynamic_bitset && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" dynamic_bitset \
   && ./bootstrap.sh --prefix=/usr/local \
   && ./b2 \
   && ./b2 install

@@ -56,44 +56,19 @@ docker run --rm --entrypoint /bin/bash \
     npsv3
 ```
 
-During development we are manually building a fork of ODGI and manually installing the `npsv3` package. When launching the container, mount the directory containing odgi into the container, e.g.,
-
-```
-docker run --rm --entrypoint /bin/bash \
-    --shm-size=8g \
-    -v ~/Research/data:/data \
-    -v `pwd`/../odgi:/opt/odgi \
-    -v `pwd`:/opt/npsv3 \
-    -w /opt/npsv3 \
-    -it \
-    npsv3
-```
-
-And then from within the container, build odgi (optionally with the `--fresh` option for `cmake` to force reconfiguration):
-```
-cmake -S /opt/odgi -B /opt/odgi/build --fresh \
-    && cmake --build /opt/odgi/build -- -j 2
-```
-and finally the npsv3 package (which may require the `--break-system-packages` to `pip` depending on the underlying distribution):
-```
-python3 -m pip install -e .
-```
-
-You can run the unit tests with `hatch test`.
-
 ## Development
 
 ### Building and testing the native extension
 
-The C++ extension build is implemented with scikit-build-score. For easily rebuilding when making changes to the C++ extension
+The C++ extension build is implemented with scikit-build-score. Run the following to rebuild when making changes to the C++ extension. The name of the hatch environment and corresponding build directory are determined by the Python version in use: 
 ```
-hatch -e hatch-test.py3.12 shell
+hatch -e hatch-test.py3.11 shell
 pip install nanobind scikit-build-core[pyproject]
 pip install --no-build-isolation -ve .
 ```
+at which point you can run the tests with `pytest <pytest args...>`, e.g., `pytest tests` to run all tests.
 
-at which point you can run the tests with `pytest <pytest args...>`, e.g., `pytest tests` to run all tests. There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.11. If not use the correct build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
-
+There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.11, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
 ```
 cmake --build build/cp311-cp311-linux_x86_64 -t graph_test
 ctest --test-dir build/cp311-cp311-linux_x86_64
@@ -108,18 +83,30 @@ To use valgrind, similarly build with debug symbols, then run python3 under valg
 ```
 valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt python3 -m pytest -p no:warnings tests
 ```
+To run the native tests with GDB, run the tests with `-V` to report the specific test command that failed, e.g., `build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"`, then run that command under GDB, e.g.,
+```
+gdb -args build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"
+```
 
 To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE_ARGS="--fresh"`.
 
-### arm64
+### Developing on arm64 with Docker
 
-
+Build the container using the provided Docker file:
 ```
 docker build -f Dockerfile.arm64 --target build -t npsv3-build .
 ```
 
-    -v `pwd`/../odgi:/opt/odgi \
-
+The following launches a restartable container in the background (for use with the VScode devcontainer extension). We set the shared memory to support loading the BWA indices into shared memory and mount a local directory at `/data` containing the reference genomes, etc.
+```
+docker run --entrypoint /bin/bash \
+    --shm-size=8g \
+    -v ~/Research/data:/data \
+    -v `pwd`:/opt/npsv3 \
+    -w /opt/npsv3 \
+    -dt npsv3-build
+```
+Alternately you can launch directly into an interactive shell:
 ```
 docker run --rm --entrypoint /bin/bash \
     --shm-size=8g \
@@ -129,14 +116,19 @@ docker run --rm --entrypoint /bin/bash \
     -it npsv3-build
 ```
 
-For easily rebuilding when making changes to the C++ extension
+As described above, for easily rebuilding when making changes to the C++ extension run the following. The name of the hatch environment and corresponding build directory are determined by the Python version in the container:
 ```
 hatch -e hatch-test.py3.12 shell
 pip install nanobind scikit-build-core[pyproject]
 pip install --no-build-isolation -ve .
 pytest tests
 ```
-ctest --test-dir build/cp312-abi3-linux_aarch64 -R AdjacentInsertion -V -N
+Having done the above at least once, you can just build and run the native test suite with:
+```
+cmake --build build/cp312-abi3-linux_aarch64 -t graph_test
+ctest --test-dir build/cp312-abi3-linux_aarch64
+```
+
 
 ## License
 
