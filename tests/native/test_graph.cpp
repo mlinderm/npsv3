@@ -450,11 +450,27 @@ TEST_F(GraphConstructionTest, VariantsAtGraphRegionBoundary) {
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA12877	NA12878	NA12879	NA12881	NA12882	NA12885	NA12886
-chr1	52277191	0	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0|1	0|0	0|0	0|0	0|0	0|0	0|0
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0|1	0|0	0|0	0|0	0|0	0|0	0|0
 chr1	52278191	HIFI_sawfish:0:1743:0:0	T	TGGAAAATTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTGAGACGGAGTCTCGCTCTGTCGCCCAGGCTGGAGTGCAGTGGCGGGATCTCGGCTCACTGCAAGCTCCGCCTCCCGGGTTCACGCCATTCTCCTGCCTCAGCCTCCCAAGTAGCTGGGACTACAGGCGCCCGCCACTACGCCCGGCTAATTTTTTTGTATTTTTAGTAGAGACGGGGTTTCACCGTTTTAGCCGGGATGGTCTCGATCTCCTGACCTCGTGATCCGCCCGCCTCGGC	999	PASS	SVTYPE=INS;SVLEN=279	GT	0|1	0|0	0|0	0|0	0|0	0|0	0|0)VCF");
   auto region = Range("chr1", 52277191, 52279191);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
   // The first variant only partially overlaps the region, so it should be ignored during graph construction
   ASSERT_FALSE(graph.has_path("_alt_70e6adb077463a6f66e692cdb11f2ca4540ff066_0"));
+};
+
+TEST_F(GraphConstructionTest, IgnoreMissingGenotypes) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVLEN,Number=.,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA12877	NA12878
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0|1	.)VCF");
+  auto region = Range("chr1", 52277181, 52277220);
+  ASSERT_NO_THROW({
+    Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  });
 };

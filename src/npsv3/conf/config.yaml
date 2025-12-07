@@ -42,6 +42,9 @@ reads: ???
 # Output file for this command
 output: ???
 
+# Output format
+output_format: null
+
 # Name of the sample
 sample: null
 

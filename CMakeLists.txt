@@ -190,6 +190,7 @@ enable_testing()
 add_executable(graph_test
   "${TEST_DIR}/native/test_variant.cpp"
   "${TEST_DIR}/native/test_graph.cpp"
+  "${TEST_DIR}/native/test_range.cpp"
 )
 target_link_libraries(graph_test
   GTest::gtest_main

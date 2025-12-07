@@ -67,7 +67,9 @@ struct BCFEncodingValues<int32_t> {
 
 }  // namespace detail
 
-class VariantFileHeader {
+class VariantFileWriter;
+
+class VariantFileHeader : public std::enable_shared_from_this<VariantFileHeader> {
  public:
   typedef std::unique_ptr<bcf_hdr_t, detail::bcf_hdr_deleter> HeaderPtr;
 
@@ -81,10 +83,17 @@ class VariantFileHeader {
   bool HasPS() const { return ps_id_ >= 0; }
   int PSId() const { return ps_id_; }
 
+  bool HasFT() const { return ft_id_ >= 0; }
+  int FTId() const { return ft_id_; }
+
+  // PASS is always be defined as first string in dictionary 
+  // (per https://github.com/samtools/htslib/blob/fe1721d876b1021ceb417cb2a0b246fa401b8c7f/vcf.c#L1425)
+  constexpr int PASSId() const { return 0; }
  private:
   HeaderPtr hdr_;
   int gt_id_ = -1;
   int ps_id_ = -1;
+  int ft_id_ = -1;
 };
 
 class Phase {
@@ -99,12 +108,7 @@ class Phase {
   };
 
   Phase() : value_(kUnphased) {}
-  Phase(int phase_set) : Phase(kLocal, phase_set) {}
-  Phase(Value v, int phase_set = -1) : value_(v == kLocal ? static_cast<uint32_t>(kLocal) | static_cast<uint32_t>(phase_set) : static_cast<uint32_t>(v)) {;
-    if (v == kLocal && (phase_set < 0 || phase_set > kMaxPhaseSet)) {
-      throw std::out_of_range("Local phase set must be in [0, " + std::to_string(kMaxPhaseSet) + "]");
-    }
-  }
+  Phase(Value v, int phase_set = -1);
 
   bool operator==(const Phase& other) const { return value_ == other.value_; }
   bool operator!=(const Phase& other) const { return value_ != other.value_; }
@@ -148,7 +152,9 @@ class PackedGenotype {
         phased = false;
       } else if (bcf_gt_is_missing(allele)) {
         allele_indices_[num_alleles_++] = kMissingAllele;
-        phased = phased && bcf_gt_is_phased(allele);
+        if (i > 0) {  // Phase only applies if more than one allele
+          phased = phased && bcf_gt_is_phased(allele);
+        }
       } else {
         auto idx = static_cast<AlleleIndex>(bcf_gt_allele(allele));
         if (idx < 0 || idx >= kMaxAlleles) {
@@ -162,10 +168,11 @@ class PackedGenotype {
     }
     if (phased) {
       // phase_set of -1 indicates no PS, i.e., global phasing
-      phase_ = (phase_set < 0) ? Phase::kGlobal : Phase(phase_set) /* Sets kLocal phasing */;
+      phase_ = (phase_set < 0) ? Phase::kGlobal : Phase(Phase::kLocal, phase_set);
     } else if (num_alleles_ > 0 &&
                std::all_of(std::begin(allele_indices_) + 1, std::begin(allele_indices_) + num_alleles_,
                            [this](AlleleIndex index) { return index == allele_indices_[0]; })) {
+      // All alleles are the same, treat as implicitly phased
       phase_ = Phase::kImplicit;
     }
   }
@@ -238,9 +245,13 @@ class Variant {
   virtual std::optional<std::string_view> AlleleSequence(int allele_idx) const = 0;
 
   std::vector<Genotype> Genotypes() const;
+  bool HasPassingGenotype() const;
+
+  bool IsFiltered() const;
+  void SetFilterToPass();
 
   friend std::ostream& operator<<(std::ostream&, const Variant&);
-
+  friend class VariantFileWriter;
  protected:
   typedef std::unique_ptr<bcf1_t, detail::bcf1_deleter> RecordPtr;
 
@@ -253,6 +264,7 @@ class Variant {
   Variant(const HeaderPtr& hdr, RecordPtr record);
 
   std::vector<Genotype> Genotypes(int gt_id, int ps_id) const;
+  bool HasPassingGenotype(int gt_id, int ft_id) const;
 };
 
 class SequenceResolvedVariant : public Variant {
@@ -271,9 +283,13 @@ class SequenceResolvedVariant : public Variant {
 class VariantFileReader {
  public:
   typedef std::unique_ptr<VariantFileReader> VariantFileReaderPtr;
+  typedef std::shared_ptr<VariantFileHeader> HeaderPtr;
   typedef std::unique_ptr<Variant> VariantPtr;
 
   static VariantFileReaderPtr Open(const std::string& filename);
+
+  htsExactFormat format() const;
+  htsCompression compression() const;
 
   // Iterate over the entire file
   virtual void SetRegion() = 0;
@@ -283,14 +299,16 @@ class VariantFileReader {
 
   std::vector<std::string> Samples() const;
 
+  const HeaderPtr& header() const { return hdr_; }
+
  protected:
   typedef std::unique_ptr<htsFile, detail::htsFile_deleter> FilePtr;
-  typedef std::shared_ptr<VariantFileHeader> HeaderPtr;
 
   VariantFileReader(FilePtr&& file);
 
   FilePtr file_;
   HeaderPtr hdr_;
+  off_t variant_offset_;
 };
 
 class VCFVariantFileReader : public VariantFileReader {
@@ -317,4 +335,25 @@ class BCFVariantFileReader : public VariantFileReader {
  protected:
   std::unique_ptr<hts_idx_t, detail::hts_idx_deleter> idx_;
 };
+
+class VariantFileWriter {
+ public:
+  typedef std::unique_ptr<VariantFileWriter> VariantFileWriterPtr;
+  typedef std::shared_ptr<VariantFileHeader> HeaderPtr;
+
+  virtual ~VariantFileWriter() = default;
+
+  static VariantFileWriterPtr Open(const std::string& filename, const HeaderPtr& header, const char* format = nullptr);
+
+  virtual void Write(const Variant& variant);
+
+ protected:
+  typedef std::unique_ptr<htsFile, detail::htsFile_deleter> FilePtr;
+
+  VariantFileWriter(FilePtr&& file, const HeaderPtr& header) : file_(std::move(file)), hdr_(header) {}
+
+  FilePtr file_;
+  HeaderPtr hdr_;
+};
+
 }  // namespace npsv3

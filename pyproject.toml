@@ -81,6 +81,8 @@ extra-dependencies = [
   "pytest-timeout",
   "debugpy>=1.8.0", # Needed by Ray
 ]
+[tool.hatch.envs.hatch-test.env-vars]
+RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO= "0"
 
 [tool.hatch.envs.hatch-static-analysis]
 dependencies = ["ruff==0.11.2"]

@@ -14,12 +14,28 @@ namespace test {
 
 namespace fs = std::filesystem;
 
+class TempDir {
+public:
+  fs::path path_;
+
+  TempDir() {
+    std::string temp_template = (fs::temp_directory_path() / "test.XXXXXX").string();
+    path_ = fs::path(::mkdtemp(temp_template.data()));
+  }
+  ~TempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  fs::path operator/(const fs::path& rhs) {
+    return path_ / rhs;
+  }
+};
+
 class TestVCFFile {
 public:
   explicit TestVCFFile(const std::string& contents) {
-    std::string temp_template = (fs::temp_directory_path() / "test.XXXXXX").string();
-    temp_dir_ = fs::path(::mkdtemp(temp_template.data()));
-    file_path_ = temp_dir_ / "variant.vcf.gz";
+    file_path_ = dir_ / "variant.vcf.gz";
     
     { // Write BGZF-compressed VCF (closing when done or on error)
       std::unique_ptr<BGZF, npsv3::detail::bgzf_deleter> fp(bgzf_open(file_path_.c_str(), "w"));
@@ -39,12 +55,7 @@ public:
     }
   }
 
-  ~TestVCFFile() {
-    std::error_code ec;
-    std::filesystem::remove_all(temp_dir_, ec);
-  }
-
-  fs::path temp_dir_;
+  TempDir dir_;
   fs::path file_path_;
 };
 

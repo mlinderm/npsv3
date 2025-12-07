@@ -25,16 +25,16 @@ class Range {
 
   Pos length() const { return end_ - start_; }
 
+  Range Expand(Pos left_flank, Pos right_flank) const;
+  Range Expand(Pos flank) const {
+    return Expand(flank, flank);
+  }
+  Range Union(const Range& other) const;
+  void UnionWith(const Range& other);
+
   bool Overlaps(const Range& other) const {
     return contig_ == other.contig_ && start_ < other.end_ && other.start_ < end_;
   }
-  void UnionWith(const Range& other) {
-    if (contig_ != other.contig_)
-      throw std::runtime_error("Cannot union ranges on different contigs");
-    if (other.start_ < start_) start_ = other.start_;
-    if (other.end_ > end_) end_ = other.end_;
-  }
-
   bool operator==(const Range& other) const {
     return contig_ == other.contig_ && start_ == other.start_ && end_ == other.end_;
   }

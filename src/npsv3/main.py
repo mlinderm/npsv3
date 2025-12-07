@@ -171,6 +171,22 @@ def main(cfg: DictConfig) -> None:
             hydra.utils.to_absolute_path(cfg.input),
             output,
         )
+    elif cfg.command == "update_filter":
+        from npsv3.images.population import update_filter
+
+        # If no output file is specified, write to stdout (defaulting to vcf)
+        if OmegaConf.is_missing(cfg, "output"):
+            output = "-" # HTSLib interprets "-" as stdout
+            if OmegaConf.select(cfg, "output_format") is None:
+                OmegaConf.update(cfg, "output_format", "vcf")
+        else:
+            output = hydra.utils.to_absolute_path(cfg.output)
+
+        update_filter(
+            cfg,
+            hydra.utils.to_absolute_path(cfg.input),
+            output,
+        )
     else:
         msg = f"Command {cfg.command} not implemented"
         raise NotImplementedError(msg)

@@ -9,8 +9,11 @@
 #include "variant.hpp"
 
 /*
+Construct a pangenome graph from a VCF in a specific region, with paths for each haplotype.
 
-
+The resulting graph contains dedicated nodes with '*' sequence for zero-length alleles, e.g.,
+the alternate alleles for a DEL variant and the reference allele for an INS variant. These nodes facilitate
+all paths that traverse a set of variant alleles.
 */
 
 
@@ -682,7 +685,9 @@ namespace detail {
 void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
                            const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
                            int star_allele_index) {
-  assert(genotype.num_alleles() > 0);
+  if (genotype.num_alleles() == 0 || genotype.AllAlleles(Variant::Genotype::kMissingAllele)) {
+    return; // No alleles to add
+  }
   if (genotype.num_alleles() != haplotypes_.size()) {
     throw std::runtime_error("Different ploidy for genotypes not currently supported");
   }

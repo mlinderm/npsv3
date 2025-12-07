@@ -1,4 +1,6 @@
 #include <iostream>
+#include <cstdio>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
@@ -10,7 +12,7 @@
 namespace fs = std::filesystem;
 using namespace npsv3;
 
-class VariantFileReaderTest : public ::testing::Test {
+class LoggingTest : public ::testing::Test {
 protected:
   void SetUp() override {
     // https://stackoverflow.com/a/66490155
@@ -27,7 +29,9 @@ protected:
   std::ostringstream oss_;
 };
 
-TEST_F(VariantFileReaderTest, CreatesFileAndIndex) {
+class VariantFileIOTest : public LoggingTest {};
+
+TEST_F(VariantFileIOTest, CreatesFileAndIndex) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
@@ -48,7 +52,7 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
   ASSERT_TRUE(idx);
 }
 
-TEST_F(VariantFileReaderTest, OpensAndIteratesVCF) {
+TEST_F(VariantFileIOTest, OpensAndIteratesVCF) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 ##contig=<ID=chr2,length=1000>
@@ -68,7 +72,7 @@ chr2	201	.	G	T	.	.	.
   EXPECT_EQ(count, 2);
 }
 
-TEST_F(VariantFileReaderTest, SetRegionLimitsToContig) {
+TEST_F(VariantFileIOTest, SetRegionLimitsToContig) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 ##contig=<ID=chr2,length=1000>
@@ -90,11 +94,11 @@ chr2	201	.	G	T	.	.	.
   EXPECT_FALSE(reader->NextVariant());
 }
 
-TEST_F(VariantFileReaderTest, OpenMissingFileThrows) {
+TEST_F(VariantFileIOTest, OpenMissingFileThrows) {
   EXPECT_THROW(VariantFileReader::Open("/junk.vcf.gz"), std::runtime_error);
 }
 
-TEST_F(VariantFileReaderTest, SetRegionInvalidContigThrows) {
+TEST_F(VariantFileIOTest, SetRegionInvalidContigThrows) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
@@ -109,7 +113,7 @@ chr1	101	.	A	C	.	.	.
   EXPECT_THROW(reader->SetRegion(bad_region), std::runtime_error);
 }
 
-TEST_F(VariantFileReaderTest, MalformedRecordThrowsOnNextVariant) {
+TEST_F(VariantFileIOTest, MalformedRecordThrowsOnNextVariant) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
@@ -121,7 +125,7 @@ chr1	101	.	A	C
   EXPECT_THROW(reader->NextVariant(), std::runtime_error);
 }
 
-TEST_F(VariantFileReaderTest, InvalidPSTypeTriggersWarning) {
+TEST_F(VariantFileIOTest, InvalidPSTypeTriggersWarning) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -133,7 +137,7 @@ chr1	101	.	A	C	.	.	.
   ASSERT_NE(oss_.str().find("PS format field is not of expected integer type; ignoring PS."), std::string::npos);
 }
 
-TEST_F(VariantFileReaderTest, ReferenceRegionWithStarAllele) {
+TEST_F(VariantFileIOTest, ReferenceRegionWithStarAllele) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=248956422>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -154,7 +158,7 @@ chr1	5414226	.	CG	*,C	.	PASS	.
   ASSERT_EQ(var->AlleleLengthChange(2), -1);
 }
 
-TEST_F(VariantFileReaderTest, ReferenceRegionInsertion) {
+TEST_F(VariantFileIOTest, ReferenceRegionInsertion) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=2,length=243199373>
@@ -162,7 +166,8 @@ TEST_F(VariantFileReaderTest, ReferenceRegionInsertion) {
 ##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
-2	39714038	.	T	TCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCG	20	PASS	SVTYPE=INS;SVLEN=54	GT	1/1)VCF");
+2	39714038	.	T	TCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCG	20	PASS	SVTYPE=INS;SVLEN=54	GT	1/1
+)VCF");
   auto reader = VariantFileReader::Open(vcf.file_path_);
   auto var = reader->NextVariant();
   // HTSLib 1.22 has an error in the rlen calculation https://github.com/samtools/htslib/issues/1940
@@ -173,13 +178,88 @@ TEST_F(VariantFileReaderTest, ReferenceRegionInsertion) {
   ASSERT_EQ(var->AlleleLengthChange(1), 54);
 }
 
+class VariantFileIOStreamTest : public VariantFileIOTest,
+                                public ::testing::WithParamInterface<std::tuple<std::string, htsExactFormat, htsCompression>> {
+ protected:
+  void SetUp() override {
+    // Redirect stdout to a temporary file
+    original_stdout_ = stdout;
+    file_path_ = dir_ / "output.vcf";
+    freopen(file_path_.c_str(), "w", stdout);
+  }
 
-TEST(GenotypeTest, ExpectedGenotypeSizes) {
+  void TearDown() override {
+    // Restore original stdout
+    fclose(stdout);
+    stdout = original_stdout_;
+  }
+
+  FILE* original_stdout_ = nullptr;
+  test::TempDir dir_;
+  fs::path file_path_;
+};
+
+TEST_P(VariantFileIOStreamTest, ReadsVCFFromStdInAndWritesToStdOut) {
+  auto [format, hts_format, hts_compression] = GetParam();
+  std::string vcf_content = R"VCF(##fileformat=VCFv4.2
+##contig=<ID=chr1,length=1000>
+##contig=<ID=chr2,length=1000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	101	.	A	C	.	.	.
+chr2	201	.	G	T	.	.	.
+)VCF";
+
+  int pipefd[2];
+  ASSERT_NE(pipe(pipefd), -1) << "Failed to create pipe";
+  int original_stdin = dup(STDIN_FILENO); // Save original stdin
+  ASSERT_NE(original_stdin, -1) << "Failed to duplicate stdin";
+  ASSERT_NE(dup2(pipefd[0], STDIN_FILENO), -1) << "Failed to redirect stdin";
+  close(pipefd[0]); // Close the original read end
+
+  // Write input to the write end of the pipe
+  write(pipefd[1], vcf_content.c_str(), vcf_content.length());
+  close(pipefd[1]); // Close the write end
+
+  auto reader = VariantFileReader::Open("-");
+  ASSERT_TRUE(reader);
+
+  {
+    // Ensure writer is destroyed so any variants are flushed
+    auto writer = VariantFileWriter::Open("-", reader->header(), format.c_str());
+    ASSERT_TRUE(writer);
+    // Default behavior is to iterate through the entire file
+    int count = 0;
+    while (auto variant = reader->NextVariant()) {
+      writer->Write(*variant);
+      ++count;
+    }
+    EXPECT_EQ(count, 2);
+  }
+  
+  auto result_reader = VariantFileReader::Open(file_path_);
+  ASSERT_TRUE(result_reader);
+  ASSERT_EQ(result_reader->format(), hts_format);
+  ASSERT_EQ(result_reader->compression(), hts_compression);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  VariantFileIOStreamTests,
+  VariantFileIOStreamTest,
+  testing::Values(
+    std::make_tuple("vcf", htsExactFormat::vcf, htsCompression::no_compression),
+    std::make_tuple("vcf.gz", htsExactFormat::vcf, htsCompression::bgzf)
+    //std::make_tuple("bcf", htsExactFormat::bcf, htsCompression::bgzf)
+  )
+);
+
+class GenotypeTest : public LoggingTest {};
+
+TEST_F(GenotypeTest, ExpectedGenotypeSizes) {
   auto genotype = Variant::Genotype();
   EXPECT_EQ(sizeof(genotype), 8);
 }
 
-TEST(GenotypeTest, ParsesGenotypeAndPhasing) {
+TEST_F(GenotypeTest, ParsesGenotypeAndPhasing) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=1000>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
@@ -229,3 +309,64 @@ chr1	102	.	A	C	.	.	.	GT:PS	0/1:102	0|1:102	0/0:.	1/1:.	0|1
     }
   }
 }
+
+class VariantFilteringTest : public LoggingTest {};
+
+TEST_F(VariantFilteringTest, HasPassingGenotype) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype"> 
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter."> 
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G	30	GAP1	.	GT:FT	./1:GAP1	.:.	0|1:.	.:.
+chr1	3693768	.	C	G	30	GAP1	.	GT:FT	./1:GAP1	.:.	0|1:GAP1	.:.
+chr1	3693769	.	C	G	30	.	.	GT:FT	./1:GAP1	.:.	0|1:PASS	.:.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  for (auto has : std::vector<bool>({ true, false, true })) {
+    auto variant = reader->NextVariant();
+    ASSERT_EQ(variant->HasPassingGenotype(), has);
+  }
+}
+
+TEST_F(VariantFilteringTest, SetFilterToPass) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype"> 
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter."> 
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G	30	GAP1	.	GT:FT	./1:GAP1	.:.	0|1:.	.:.
+chr1	3693768	.	C	G	30	GAP1	.	GT:FT	./1:GAP1	.:.	0|1:GAP1	.:.
+chr1	3693769	.	C	G	30	.	.	GT:FT	./1:GAP1	.:.	0|1:PASS	.:.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  fs::path result_file = vcf.dir_ / "output.vcf.gz";
+  {
+    auto writer = VariantFileWriter::Open(result_file, reader->header());
+    ASSERT_TRUE(writer);
+    while (auto variant = reader->NextVariant()) {
+      if (variant->HasPassingGenotype())
+        variant->SetFilterToPass();
+      writer->Write(*variant);
+    }
+  }
+
+  auto result_reader = VariantFileReader::Open(result_file);
+  ASSERT_TRUE(result_reader);
+  for (auto has : std::vector<bool>({ true, false, true })) {
+    auto variant = result_reader->NextVariant();
+    ASSERT_EQ(variant->IsFiltered(), !has);
+  }
+  ASSERT_FALSE(result_reader->NextVariant());
+}
+

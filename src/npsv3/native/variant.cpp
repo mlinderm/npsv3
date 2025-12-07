@@ -4,6 +4,7 @@
 
 #include <htslib/kseq.h>
 #include <htslib/kstring.h>
+#include <htslib/hfile.h>
 #include <boost/hash2/sha1.hpp>
 #include <boost/scope/scope_exit.hpp>
 #include <fmt/format.h>
@@ -18,6 +19,7 @@ VariantFileHeader::VariantFileHeader(bcf_hdr_t* hdr) : hdr_(hdr) {
   if (gt_id_ >= 0 && !bcf_hdr_idinfo_exists(hdr_.get(), BCF_HL_FMT, gt_id_)) {
     gt_id_ = -1;
   }
+  
   ps_id_ = bcf_hdr_id2int(hdr_.get(), BCF_DT_ID, "PS");
   if (ps_id_ >= 0 && !bcf_hdr_idinfo_exists(hdr_.get(), BCF_HL_FMT, ps_id_)) {
     ps_id_ = -1;
@@ -25,6 +27,29 @@ VariantFileHeader::VariantFileHeader(bcf_hdr_t* hdr) : hdr_(hdr) {
   if (ps_id_ >= 0 && bcf_hdr_id2type(hdr_.get(), BCF_HL_FMT, ps_id_) != BCF_HT_INT) {
     spdlog::warn("PS format field is not of expected integer type; ignoring PS.");
     ps_id_ = -1;
+  }
+
+  ft_id_= bcf_hdr_id2int(hdr_.get(), BCF_DT_ID, "FT");
+  if (ft_id_ >= 0 && !bcf_hdr_idinfo_exists(hdr_.get(), BCF_HL_FMT, ft_id_)) {
+    ft_id_ = -1;
+  }
+  if (ft_id_ >= 0 && bcf_hdr_id2type(hdr_.get(), BCF_HL_FMT, ft_id_) != BCF_HT_STR) {
+    spdlog::warn("FT format field is not of expected string type; ignoring FT.");
+    ft_id_ = -1;
+  }
+
+  // PASS should always be defined (per https://github.com/samtools/htslib/blob/fe1721d876b1021ceb417cb2a0b246fa401b8c7f/vcf.c#L1425)
+  assert(bcf_hdr_id2int(hdr_.get(), BCF_DT_ID, "PASS") == 0);
+}
+
+Phase::Phase(Value v, int phase_set) {
+  if (v == kLocal) {
+    if (phase_set < 0 || phase_set > kMaxPhaseSet) {
+      throw std::out_of_range("Local phase set must be in [0, " + std::to_string(kMaxPhaseSet) + "]");
+    }
+    value_ = static_cast<uint32_t>(kLocal) | static_cast<uint32_t>(phase_set);
+  } else {
+    value_ = static_cast<uint32_t>(v);
   }
 }
 
@@ -168,6 +193,90 @@ std::vector<Variant::Genotype> Variant::Genotypes() const {
   return Genotypes(hdr_->GTId(), hdr_->PSId());
 }
 
+bool Variant::HasPassingGenotype(int gt_id, int ft_id) const {
+  if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
+    throw std::runtime_error("Failed to unpack variant record for genotype FT checking");
+
+  int gt_fmt_idx = record_->n_fmt, ft_fmt_idx = record_->n_fmt;
+  for (int i = 0; i < record_->n_fmt; i++) {
+    int id = record_->d.fmt[i].id;
+    if (id == gt_id) { gt_fmt_idx = i; if (ft_id < 0) break; }
+    // Since "The first sub-field must always be the genotype (GT) if it is present.", FT must be past it
+    // and so we can break early once we find FT.
+    else if (id == ft_id) { ft_fmt_idx = i; break; }
+  }
+  if (gt_fmt_idx == record_->n_fmt) {
+    throw std::runtime_error("GT format field not present in variant record");
+  }
+  if (ft_fmt_idx == record_->n_fmt) {
+    return true;  // No FT field defined, all genotypes are passing
+  }
+  
+  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
+  bcf_fmt_t *ft_fmt = &record_->d.fmt[ft_fmt_idx], *gt_fmt = &record_->d.fmt[gt_fmt_idx];
+
+  for (int i = 0; i < num_samples; i++) {
+    const char* ft = reinterpret_cast<const char*>(ft_fmt->p) + i * ft_fmt->n;
+    if (ft_fmt->n >= 4 && std::string_view(ft, 4) == "PASS") {
+      return true;  // Found an explicitly passing genotype
+    }
+    if (ft_fmt->n >= 1 && ft[0] != '.') {
+      continue;  // Found an explicitly failing genotype
+    }
+    assert(ft_fmt->n >= 1 && ft[0] == '.');
+    // If FT is '.', check to see if there is a valid genotype (i.e. non-missing). If so, we have found a passing genotype
+    // and return true.
+    #define BRANCH_CASE(TYPE) { \
+      for (int g=0; g < gt_fmt->n; g++) { \
+        auto allele = reinterpret_cast<TYPE*>(gt_fmt->p + i * gt_fmt->size)[g]; \
+        if (allele == detail::BCFEncodingValues<TYPE>::kVectorEnd) { break; } \
+        else if (allele== detail::BCFEncodingValues<TYPE>::kMissing) { continue; } \
+        else if (bcf_gt_is_missing(allele)) { continue; } \
+        else { return true; } \
+      } \
+    }
+    switch (gt_fmt->type) {
+      case BCF_BT_INT8: BRANCH_CASE(int8_t); break;
+      case BCF_BT_INT16: BRANCH_CASE(int16_t); break;
+      case BCF_BT_INT32: BRANCH_CASE(int32_t); break;
+      default:
+        throw std::runtime_error("Unsupported GT format field type");
+    }
+    #undef BRANCH_CASE
+  }
+
+  return false;  // No passing genotypes found
+}
+
+bool Variant::HasPassingGenotype() const {
+  if (!hdr_->HasGT()) {
+    throw std::runtime_error("GT format field not defined in variant file");
+  }
+  if (!hdr_->HasFT()) {
+    return true;  // No FT field defined, all genotypes are passing
+  }
+  return HasPassingGenotype(hdr_->GTId(), hdr_->FTId());
+}
+
+bool Variant::IsFiltered() const {
+  if (!(record_->unpacked & BCF_UN_FLT)) {
+    bcf_unpack(record_.get(), BCF_UN_FLT);
+  }
+  for (int i = 0; i < record_->d.n_flt; i++) {
+    if (record_->d.flt[i] != hdr_->PASSId()) {
+      return true;  // Has non-PASSing filter
+    }
+  }
+  return false;
+}
+
+void Variant::SetFilterToPass() {
+  static const int pass_id = hdr_->PASSId();
+  if (bcf_update_filter(hdr_->bcf_hdr(), record_.get(), const_cast<int*>(&pass_id), 1) < 0) {
+    throw std::runtime_error("Failed to set FILTER");
+  }
+}
+
 std::ostream& operator<<(std::ostream& os, const Variant& variant) {
   kstring_t line = {0, 0, nullptr};
   if (vcf_format(variant.hdr_->bcf_hdr(), variant.record_.get(), &line) < 0) {
@@ -268,21 +377,34 @@ std::optional<std::string_view> SequenceResolvedVariant::AlleleSequence(int alle
 std::unique_ptr<VariantFileReader> VariantFileReader::Open(const std::string& filename) {
   FilePtr file_ptr(hts_open(filename.c_str(), "r"));
   if (!file_ptr) {
-    throw std::runtime_error("Failed to open VCF/BCF file: " + filename);
+    throw std::runtime_error("Failed to open VCF/BCF file for reading: " + filename);
   }
 
   const htsFormat* format = hts_get_format(file_ptr.get());
-  if (format->format == htsExactFormat::vcf && format->compression == htsCompression::bgzf) {
+  if (format->format == htsExactFormat::vcf) {
     return std::make_unique<VCFVariantFileReader>(std::move(file_ptr));
   } else if (format->format == htsExactFormat::bcf) {
     return std::make_unique<BCFVariantFileReader>(std::move(file_ptr));
   } else {
-    throw std::runtime_error("Unsupported file format for file: " + filename);
+    throw std::runtime_error("Unknown file format for reading VCF/BCF file: " + filename);
   }
 }
 
 VariantFileReader::VariantFileReader(FilePtr&& file) : file_(std::move(file)) {
   hdr_ = std::make_shared<VariantFileHeader>(bcf_hdr_read(file_.get()));
+  variant_offset_ = file_->is_bgzf ? bgzf_utell(file_->fp.bgzf) : htell(file_->fp.hfile);
+}
+
+htsExactFormat VariantFileReader::format() const {
+  auto * hts_fmt = hts_get_format(file_.get());
+  assert(hts_fmt);
+  return hts_fmt->format;
+}
+
+htsCompression VariantFileReader::compression() const {
+  auto * hts_fmt = hts_get_format(file_.get());
+  assert(hts_fmt);
+  return hts_fmt->compression;
 }
 
 std::unique_ptr<Variant> VariantFileReader::NextVariant(int max_unpack) {
@@ -313,23 +435,24 @@ std::vector<std::string> VariantFileReader::Samples() const {
 }
 
 VCFVariantFileReader::VCFVariantFileReader(FilePtr&& file) : VariantFileReader(std::move(file)) {
-  idx_.reset(tbx_index_load(file_->fn));
-  if (!idx_) {
-    throw std::runtime_error("Failed to load VCF index (.tbi or .csi) for VCF file");
-  }
+  idx_.reset(tbx_index_load3(file_->fn, NULL, HTS_IDX_SAVE_REMOTE|HTS_IDX_SILENT_FAIL));
   SetRegion();  // Default to reading the entire file
 }
 
 void VCFVariantFileReader::SetRegion() {
-  iter_.reset(tbx_itr_queryi(idx_.get(), HTS_IDX_START, 0, 0));
-  if (!iter_) {
-    throw std::runtime_error("Failed to set region for VCF/BCF file");
+  if (idx_) {
+    iter_.reset(tbx_itr_queryi(idx_.get(), HTS_IDX_START, 0, 0));
+    if (!iter_) {
+      throw std::runtime_error("Failed to set region for VCF/BCF file");
+    }
   }
 }
 
 void VCFVariantFileReader::SetRegion(const Range& region) {
-  iter_.reset(
-      tbx_itr_queryi(idx_.get(), tbx_name2id(idx_.get(), region.contig().c_str()), region.start(), region.end()));
+  if (!idx_) {
+    throw std::runtime_error("Cannot set region on VCF/BCF file without index");
+  }
+  iter_.reset(tbx_itr_queryi(idx_.get(), tbx_name2id(idx_.get(), region.contig().c_str()), region.start(), region.end()));
   if (!iter_) {
     throw std::runtime_error("Failed to set region for VCF/BCF file");
   }
@@ -341,7 +464,7 @@ VariantFileReader::VariantPtr VCFVariantFileReader::NextVariant(int max_unpack) 
     ks_free(&str);
   });
 
-  int iter_ret = tbx_itr_next(file_.get(), idx_.get(), iter_.get(), &str);
+  int iter_ret = iter_ ? tbx_itr_next(file_.get(), idx_.get(), iter_.get(), &str) : hts_getline(file_.get(), KS_SEP_LINE, &str);
   if (iter_ret == -1) {
     return nullptr;  // End of iteration
   } else if (iter_ret < 0) {
@@ -369,4 +492,26 @@ void BCFVariantFileReader::SetRegion() { throw std::runtime_error("Not yet imple
 
 void BCFVariantFileReader::SetRegion(const Range& region) { throw std::runtime_error("Not yet implemented"); }
 
+VariantFileWriter::VariantFileWriterPtr VariantFileWriter::Open(const std::string& filename, const HeaderPtr& header, const char* format) {
+  const char* filename_c_str = filename.c_str();
+  char mode[] = {'w', '\0', '\0'};
+  if (vcf_open_mode(mode + 1, filename_c_str, format) < 0) {
+    throw std::runtime_error("Unknown file format for writing VCF/BCF file: " + filename);
+  }
+
+  FilePtr file_ptr(hts_open(filename_c_str, mode));
+  if (!file_ptr) {
+    throw std::runtime_error("Failed to open VCF/BCF file for writing: " + filename);
+  }
+  if (bcf_hdr_write(file_ptr.get(), header->bcf_hdr()) < 0) {
+    throw std::runtime_error("Failed to write VCF/BCF header to file: " + filename);
+  }
+  return std::unique_ptr<VariantFileWriter>(new VariantFileWriter(std::move(file_ptr), header));
+}
+
+void VariantFileWriter::Write(const Variant& variant) {
+  if (bcf_write(file_.get(), hdr_->bcf_hdr(), variant.record_.get()) < 0) {
+    throw std::runtime_error("Failed to write variant record to VCF/BCF file");
+  }
+}
 }  // namespace npsv3

@@ -100,19 +100,3 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
         assert ref_samples == {"Sample1"}
 
 
-        # # Identify paths to exclude (ALT SV alleles)
-        # with pysam.VariantFile(vcf_path) as src_vcf_file:
-        #     exclude_nodes = set()
-        #     for record in src_vcf_file:
-        #         variant = Variant.from_pysam(record)
-        #         exclude_alleles = {
-        #             i
-        #             for i, length in enumerate(variant.length_change(), start=1)
-        #             if length is not None and abs(length) >= 50
-        #         }
-        #         exclude_nodes.update(*(graph.path_nodes(f"_alt_{variant.vg_variant_id}_{a}") for a in exclude_alleles))
-        #     exclude_nodes -= set(graph.path_nodes(region.contig))
-
-        #     assert len(exclude_nodes) == 2
-        #     ref_samples = set(src_vcf_file.header.samples) - set(graph.samples_including(list(exclude_nodes)))
-        #     assert ref_samples == {"Sample1"}
