@@ -56,8 +56,9 @@ NB_MODULE(_native_graph, m) {
     .def("reference_region", &npsv3::Variant::ReferenceRegion)
     .def("allele_reference_region", &npsv3::Variant::AlleleReferenceRegion)
     .def("allele_length_change", &npsv3::Variant::AlleleLengthChange)
-    .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))
+    .def("is_filtered", &npsv3::Variant::IsFiltered)
     .def("set_filter_pass", &npsv3::Variant::SetFilterToPass)
+    .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))
     .def("__str__", [](const npsv3::Variant& v) {
       std::ostringstream oss;
       oss << v;

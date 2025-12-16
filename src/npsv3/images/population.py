@@ -57,6 +57,17 @@ def split_and_filter_vcf(
     possible_samples = set(reader.samples())
     for _region_count, (region, variants) in enumerate(overlapping_variants(reader, flank=cfg.pileup.variant_padding), start=1):
         print(f"Region {region} has {len(variants)} records")
+        passing_variants = [v for v in variants if not v.is_filtered()]
+        if len(passing_variants) == 0:
+            continue  # Skip regions with no unfiltered variants
+        
+        # We want the positive examples to (only) have unfiltered variants in this region and negative samples to not contain any SV
+        # alleles, regardless of FILTER status.
+
+        # Create an array of variants x samples to use to choose positive and negative samples
+
+        
+        print(passing_variants)
         graph = Graph(cfg.reference, inference_vcf, region)
         exclude_nodes = set()
         for variant in variants:

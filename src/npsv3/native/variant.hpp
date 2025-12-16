@@ -244,11 +244,11 @@ class Variant {
   virtual std::optional<int> AlleleLengthChange(int allele_idx) const = 0;
   virtual std::optional<std::string_view> AlleleSequence(int allele_idx) const = 0;
 
-  std::vector<Genotype> Genotypes() const;
-  bool HasPassingGenotype() const;
-
   bool IsFiltered() const;
   void SetFilterToPass();
+
+  std::vector<Genotype> Genotypes() const;
+  bool HasPassingGenotype() const;
 
   friend std::ostream& operator<<(std::ostream&, const Variant&);
   friend class VariantFileWriter;

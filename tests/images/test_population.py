@@ -3,6 +3,7 @@ import os
 import pysam
 import pytest
 
+from omegaconf import OmegaConf
 from npsv3.images.population import split_and_filter_vcf
 from npsv3.util.vcf import index_variant_file
 
@@ -36,10 +37,14 @@ chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
         output_path = os.path.join(tmp_path, "output.vcf.gz")
         update_filter(cfg, vcf_path, output_path)
 
-    def test_identify_reference_samples(self, cfg):
-        population_training_vcf = os.path.join(EXPERIMENTS_DIR, "resources", "hgsvc3-hprc-2024-02-23.dipcall.training.sv.hg38.vcf.gz")
+    def test_identify_training_regions(self, tmp_path, cfg):
+        local_conf = OmegaConf.from_dotlist([
+            f"input={os.path.join(EXPERIMENTS_DIR, 'resources', 'hgsvc3-hprc-2024-02-23.dipcall.training.sv.hg38.vcf.gz')}",
+        ])
+        cfg = OmegaConf.merge(cfg, local_conf)
+
         split_and_filter_vcf(
             cfg,
-            inference_vcf=population_training_vcf,
-            output_dir="tests/data/images/population/output",
+            inference_vcf=cfg.input,
+            output_dir=tmp_path,
         )
