@@ -1,6 +1,8 @@
 #pragma once
 
 #include <odgi.hpp>
+#include <handlegraph/handle_graph.hpp>
+#include <algorithms/kmer.hpp>
 #include <vector>
 #include <iosfwd>
 #include <boost/dynamic_bitset.hpp>
@@ -16,7 +18,7 @@ class Haplotype;
 
 class AllPathGraphOverlay;
 
-class Graph {
+class Graph : public handlegraph::HandleGraph {
  public:
   typedef std::vector<handlegraph::handle_t> HandleSeq;
   typedef std::vector<odgi::nid_t> NodeIdSeq;
@@ -39,8 +41,14 @@ class Graph {
 
   /** \name handlegraph interface */
   // @{
-  handlegraph::handle_t get_handle(odgi::nid_t node_id) const { return graph_.get_handle(node_id); }
-  odgi::nid_t get_id(handlegraph::handle_t handle) const { return graph_.get_id(handle); }
+ public:
+  handlegraph::handle_t get_handle(const odgi::nid_t& node_id, bool is_reverse = false) const { return graph_.get_handle(node_id, is_reverse); }
+  odgi::nid_t get_id(const handlegraph::handle_t& handle) const { return graph_.get_id(handle); }
+  size_t get_length(const handlegraph::handle_t& handle) const;
+  std::string get_sequence(const handlegraph::handle_t& handle) const;
+  bool has_node(handlegraph::nid_t node_id) const { return graph_.has_node(node_id); }
+  bool get_is_reverse(const handlegraph::handle_t& handle) const { return graph_.get_is_reverse(handle); }
+  handlegraph::handle_t flip(const handlegraph::handle_t& handle) const { return graph_.flip(handle); }
 
   size_t get_node_count() const { return graph_.get_node_count(); }
   odgi::nid_t min_node_id() const { return graph_.min_node_id(); }
@@ -52,17 +60,34 @@ class Graph {
   handlegraph::path_handle_t get_path_handle(const std::string& path_name) const { return graph_.get_path_handle(path_name); }
   handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const { return graph_.path_back(path); }
   void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }
+
+ protected:
+  bool follow_edges_impl(const handlegraph::handle_t& handle, bool go_left, const std::function<bool(const handlegraph::handle_t&)>& iteratee) const override {
+    return graph_.follow_edges(handle, go_left, iteratee);
+  }
+
+  bool for_each_handle_impl(const std::function<bool(const handlegraph::handle_t&)>& iteratee, bool parallel = false) const override {
+    return graph_.for_each_handle(iteratee, parallel);
+  }
   // @}
+
+ public:
+
+  /// Return standardized name for an alternate allele path
+  std::string AltPathName(const Variant::VariantId& variant_id, int allele, const std::string& path_prefix = "alt") const; 
 
   HandleSeq PathHandles(const handlegraph::path_handle_t& path_handle) const;
   HandleSeq PathHandles(const std::string& path_name) const;
   NodeIdSeq PathNodes(const handlegraph::path_handle_t& path_handle) const;
   NodeIdSeq PathNodes(const std::string& path_name) const;
   
+  /** Return the sequence of a path from path name, handle or node ID iterator */
+  // @{
   std::string PathSequence(const handlegraph::path_handle_t& path_handle) const;
   std::string PathSequence(const std::string& path_name) const;
   template<typename Iterator>
   std::string PathSequence(Iterator begin, Iterator end) const;
+  // @}
 
   std::vector<std::string> SamplesIncluding(const NodeIdSeq& nodes) const;
 
@@ -77,7 +102,8 @@ class Graph {
    */
   AllPathGraphOverlay AllPaths(const std::string& inference_vcf, const std::string& backbone_prefix, const Range& region, int min_size=50) const;
 
-  std::string AltPathName(const Variant::VariantId& variant_id, int allele, const std::string& path_prefix = "alt") const; 
+  void Kmers(size_t k, size_t max_edge, const std::function<void(const odgi::kmer_t&)>& callback) const;
+  
 
   void ToGFA(std::ostream&);
 

@@ -14,34 +14,7 @@
 
 namespace fs = std::filesystem;
 using namespace npsv3;
-
-static const std::vector<fs::path> kB37FastaPaths = { fs::path("/data/human_g1k_v37.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta") };
-static const std::vector<fs::path> kHG38FastaPaths = { fs::path("/data/Homo_sapiens_assembly38.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta") };
-
-class GraphConstructionTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    {
-      auto it = std::find_if(kB37FastaPaths.begin(), kB37FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
-      if (it == kB37FastaPaths.end())
-        GTEST_SKIP() << "B37 Reference FASTA is not available";
-      else
-        B37FastaPath_ = *it;
-    }
-
-    {
-      auto it = std::find_if(kHG38FastaPaths.begin(), kHG38FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
-      if (it == kHG38FastaPaths.end())
-        GTEST_SKIP() << "HG38 Reference FASTA is not available";
-      else
-        HG38FastaPath_ = *it;
-    }
-  }
-
-  fs::path B37FastaPath_;
-  fs::path HG38FastaPath_;
-};
-
+using npsv3::test::GraphConstructionTest;
 
 TEST_F(GraphConstructionTest, OverlappingVariants) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
@@ -192,7 +165,7 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
 }
 
 class VariantTransitionsGraphConstructionTest
-    : public GraphConstructionTest,
+  : public GraphConstructionTest,
       public testing::WithParamInterface<std::tuple<std::string_view, std::string_view, int, int>> {};
 
 TEST_P(VariantTransitionsGraphConstructionTest, TestVariantTransitions) {

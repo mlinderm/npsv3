@@ -85,9 +85,9 @@ ENV CMAKE_GENERATOR="Unix Makefiles" \
   LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
   PYTHONPATH="/usr/local/lib:${PYTHON_PATH}"
 
-# Install hatch for development
+# Install hatch for development (seems to be a regression in 1.16.3)
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
-  hatch
+  hatch==1.16.2
 
 ADD . /opt/npsv3
 

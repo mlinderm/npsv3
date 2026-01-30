@@ -185,7 +185,7 @@ class VariantFileIOStreamTest : public VariantFileIOTest,
     // Redirect stdout to a temporary file
     original_stdout_ = stdout;
     file_path_ = dir_ / "output.vcf";
-    freopen(file_path_.c_str(), "w", stdout);
+    ASSERT_TRUE(freopen(file_path_.c_str(), "w", stdout)) << "Failed to redirect stdout to temporary file";
   }
 
   void TearDown() override {
@@ -217,7 +217,8 @@ chr2	201	.	G	T	.	.	.
   close(pipefd[0]); // Close the original read end
 
   // Write input to the write end of the pipe
-  write(pipefd[1], vcf_content.c_str(), vcf_content.length());
+  ssize_t write_ret = write(pipefd[1], vcf_content.c_str(), vcf_content.length());
+  ASSERT_EQ(write_ret, static_cast<ssize_t>(vcf_content.length())) << "Failed to write vcf content to pipe";
   close(pipefd[1]); // Close the write end
 
   auto reader = VariantFileReader::Open("-");
@@ -248,7 +249,6 @@ INSTANTIATE_TEST_SUITE_P(
   testing::Values(
     std::make_tuple("vcf", htsExactFormat::vcf, htsCompression::no_compression),
     std::make_tuple("vcf.gz", htsExactFormat::vcf, htsCompression::bgzf)
-    //std::make_tuple("bcf", htsExactFormat::bcf, htsCompression::bgzf)
   )
 );
 

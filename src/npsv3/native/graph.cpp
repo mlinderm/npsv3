@@ -1,6 +1,7 @@
 #include "graph.hpp"
 
 #include <algorithms/topological_sort.hpp>
+#include <algorithms/kmer.hpp>
 #include <fmt/format.h>
 #include <boost/core/span.hpp>
 #include <boost/dynamic_bitset.hpp>
@@ -443,6 +444,18 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
   }
 }
 
+// HandleGraph interface
+
+size_t Graph::get_length(const handlegraph::handle_t& handle) const {
+  auto handle_seq = graph_.get_sequence(handle);
+  return (handle_seq != "*") ? handle_seq.size() : 0;
+}
+
+std::string Graph::get_sequence(const handlegraph::handle_t& handle) const {
+  auto handle_seq = graph_.get_sequence(handle);
+  return (handle_seq != "*") ? handle_seq : "";
+}
+
 std::vector<handlegraph::handle_t> Graph::PathHandles(const handlegraph::path_handle_t& path_handle) const {
   std::vector<handlegraph::handle_t> handles;
   graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
@@ -635,6 +648,10 @@ std::string Graph::AltPathName(const Variant::VariantId& variant_id, int allele,
 
 void Graph::ToGFA(std::ostream& ostream) {
   graph_.to_gfa(ostream);
+}
+
+void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const odgi::kmer_t&)>& callback) const {
+  odgi::algorithms::for_each_kmer(*this, k, edge_max, callback);
 }
 
 void AllPathGraphOverlay::ForEachPath(const function<void(const CallbackIter&, const CallbackIter&, const Graph::PathIdSet&)>& callback) const { 

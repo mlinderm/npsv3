@@ -3,9 +3,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <algorithm>
 
 #include <htslib/bgzf.h>
 #include <htslib/tbx.h>
+
+#include <gtest/gtest.h>
 
 #include "variant.hpp"
 
@@ -57,6 +60,35 @@ public:
 
   TempDir dir_;
   fs::path file_path_;
+};
+
+
+// Shared FASTA path constants for native tests.
+extern const std::vector<fs::path> kB37FastaPaths; // = { fs::path("/data/human_g1k_v37.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta") };
+extern const std::vector<fs::path> kHG38FastaPaths; // = { fs::path("/data/Homo_sapiens_assembly38.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta") };
+
+class GraphConstructionTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    {
+      auto it = std::find_if(kB37FastaPaths.begin(), kB37FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
+      if (it == kB37FastaPaths.end())
+        GTEST_SKIP() << "B37 Reference FASTA is not available";
+      else
+        B37FastaPath_ = *it;
+    }
+
+    {
+      auto it = std::find_if(kHG38FastaPaths.begin(), kHG38FastaPaths.end(), [](const fs::path& path) { return fs::exists(path); });
+      if (it == kHG38FastaPaths.end())
+        GTEST_SKIP() << "HG38 Reference FASTA is not available";
+      else
+        HG38FastaPath_ = *it;
+    }
+  }
+
+  fs::path B37FastaPath_;
+  fs::path HG38FastaPath_;
 };
 
 }  // namespace test
