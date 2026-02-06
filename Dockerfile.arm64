@@ -1,6 +1,13 @@
-ARG BASE_IMAGE=ubuntu:24.04
+# syntax=docker/dockerfile-upstream:master
+
+# Enable syntax for advanced substitutions (https://docs.docker.com/reference/dockerfile/#environment-replacement)
+
+ARG BASE_IMAGE=ubuntu:24.04 PYTHON_VERSION=3.12
 
 FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS build
+
+# After FROM ARGs need to be re-declared
+ARG PYTHON_VERSION
 
 RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   ca-certificates \
@@ -83,11 +90,14 @@ ENV CMAKE_GENERATOR="Unix Makefiles" \
   CMAKE_INCLUDE_PATH="/opt/odgi/src:${CMAKE_INCLUDE_PATH}" \
   CMAKE_LIBRARY_PATH="/opt/odgi/fork/build/handlegraph-prefix/lib:/opt/odgi/lib:${CMAKE_LIBRARY_PATH}" \
   LD_PRELOAD="/lib/aarch64-linux-gnu/libjemalloc.so:${LD_PRELOAD}" \
-  PYTHONPATH="/usr/local/lib:${PYTHON_PATH}"
+  PYTHONPATH="/usr/local/lib:${PYTHON_PATH}" \
+  PATH="/root/.local/bin:$PATH" \
+  HATCH_TEST_ENV=hatch-test.py${PYTHON_VERSION} \
+  EXT_BUILD_DIR=build/cp${PYTHON_VERSION//./}-abi3-linux_aarch64
 
 # Install hatch for development (seems to be a regression in 1.16.3)
-RUN python3 -m pip install --break-system-packages --no-cache-dir \
-  hatch==1.16.2
+RUN --mount=type=cache,target=/root/.cache/pip \
+  python3 -m pip install --break-system-packages hatch==1.16.2
 
 ADD . /opt/npsv3
 
@@ -95,13 +105,16 @@ WORKDIR /opt/npsv3
 
 # Install the package as a user (to prepare for multistage build), preferentially installing PyTorch
 # from the CPU-only wheel since we are targeting aarch64
-ENV PATH=/root/.local/bin:$PATH
-RUN python3 -m pip install --user --break-system-packages --no-cache-dir \
-  --index-url https://download.pytorch.org/whl/cpu \
-  --extra-index-url https://pypi.org/simple/ \
-  .
+RUN --mount=type=cache,target=/root/.cache/pip \
+  python3 -m pip install --user --break-system-packages \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple/ \
+    .
 
-
+# Create hatch testing environment
+RUN --mount=type=cache,target=/root/.cache/pip \
+  hatch -e ${HATCH_TEST_ENV} run pip install nanobind scikit-build-core[pyproject] \
+  && hatch -e ${HATCH_TEST_ENV} run pip install --no-build-isolation -ve .
 
 # TODO: Multistage build to reduce image size and avoid installing build dependencies in the final image
 # Adapted from: https://pythonspeed.com/articles/multi-stage-docker-python/

@@ -1,0 +1,34 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run hatch tests",
+            "type": "shell",
+            "command": "hatch test ${input:pytestArgs}",
+            "group": "test"
+        },
+        {
+            "label": "Build native tests",
+            "type": "shell",
+            "command": "hatch -e ${env:HATCH_TEST_ENV} run cmake --build ${env:EXT_BUILD_DIR} -t graph_test",
+            "group": "build"
+        },
+        {
+            "label": "Run native tests with ctest",
+            "type": "shell",
+            "command": "hatch -e ${env:HATCH_TEST_ENV} run ctest --test-dir ${env:EXT_BUILD_DIR} --output-on-failure",
+            "group": "test",
+            "dependsOn": "Build native tests"
+        }
+    ],
+    "inputs": [
+        {
+            "type": "promptString",
+            "id": "pytestArgs",
+            "description": "Additional arguments to pass to pytest",
+            "default": ""
+        }
+    ]
+}
