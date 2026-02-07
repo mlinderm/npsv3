@@ -102,9 +102,15 @@ class Graph : public handlegraph::HandleGraph {
    */
   AllPathGraphOverlay AllPaths(const std::string& inference_vcf, const std::string& backbone_prefix, const Range& region, int min_size=50) const;
 
-  void Kmers(size_t k, size_t max_edge, const std::function<void(const odgi::kmer_t&)>& callback) const;
+  /**
+   * @brief Generate kmers from the graph, invoking callback for each kmer with its path and offset information
+   *
+   * @param k Length of kmers to generate
+   * @param max_edge Maximum number of edges to traverse when generating kmers
+   * @param callback Callback function for each kmer
+   */
+  void Kmers(size_t k, size_t max_edge, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const;
   
-
   void ToGFA(std::ostream&);
 
   friend AllPathGraphOverlay;

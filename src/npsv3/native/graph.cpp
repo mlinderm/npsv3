@@ -650,8 +650,67 @@ void Graph::ToGFA(std::ostream& ostream) {
   graph_.to_gfa(ostream);
 }
 
-void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const odgi::kmer_t&)>& callback) const {
-  odgi::algorithms::for_each_kmer(*this, k, edge_max, callback);
+namespace {
+
+struct KmerDFSState {
+  std::vector<handlegraph::handle_t> handles_;
+  uint64_t starting_handle_offset_ = 0;
+  std::string buffer_;
+};
+
+void KmersDFS(const handlegraph::HandleGraph& graph, size_t k, size_t edge_max,
+              const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, KmerDFSState& state, size_t buffer_offset = 0) {
+  auto init_buffer_size = state.buffer_.size();
+  
+  // We should only call this function using a buffer that is not yet long enough to generate a full k-mer, i.e.
+  // that contains the last k-1 bases of the current path. Any full k-mers should already have been generated.
+  assert(buffer_offset < k && init_buffer_size < (buffer_offset + k));
+  
+  graph.follow_edges(state.handles_.back(), false /* traverse forward */, [&](const handlegraph::handle_t& next_handle) {
+    state.buffer_.append(graph.get_sequence(next_handle), 0 /* start pos */, k-1);
+    state.handles_.push_back(next_handle);
+
+    // Generate all the k-mers that can be formed by extending the current buffer with the sequence of this node.
+    size_t offset = buffer_offset;
+    for (; (offset  +  k) <= state.buffer_.size(); ++offset) {
+      callback(state.buffer_.substr(offset, k), state.handles_, state.starting_handle_offset_ + offset);
+    }
+    
+    // If this node was not long enough to exhaut all possible prefixes, recurse into the next node to try to generate any remaining
+    // k-mers that started in the original node.
+    if ((state.buffer_.size() - init_buffer_size) < (k - 1)) {
+      KmersDFS(graph, k, edge_max, callback, state, offset);
+    }
+
+    // Reset handles and buffer after completing this node and its children
+    state.handles_.pop_back();
+    state.buffer_.resize(init_buffer_size);
+  });
+}
+
+} // namespace
+
+void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
+  KmerDFSState state;
+
+  graph_.for_each_handle([&](const handlegraph::handle_t &handle) {
+    auto seq = get_sequence(handle);
+    if (seq.empty()) {
+      return true; // Skip null nodes (i.e., deletions), continuing iteration
+    }
+    size_t handle_offset = 0;
+    for (; (handle_offset + k) <= seq.size(); ++handle_offset) {
+      callback(seq.substr(handle_offset, k), std::vector<handlegraph::handle_t>{handle}, handle_offset);
+    }
+
+    // Recursively extend k-mers from this handle along outgoing edges, up to the specified edge limit.
+    state.handles_ = {handle};
+    state.starting_handle_offset_ = handle_offset;
+    state.buffer_ = seq.substr(handle_offset, k - 1);
+    KmersDFS(*this, k, edge_max, callback, state);
+
+    return true; // continue for_each_handle
+  }, false /* parallel */);
 }
 
 void AllPathGraphOverlay::ForEachPath(const function<void(const CallbackIter&, const CallbackIter&, const Graph::PathIdSet&)>& callback) const { 

@@ -1,6 +1,7 @@
 # Project/platform specific
 tests/results
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .DS_Store
 outputs/
 tmp*
