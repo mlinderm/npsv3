@@ -658,14 +658,21 @@ struct KmerDFSState {
   std::string buffer_;
 };
 
-void KmersDFS(const handlegraph::HandleGraph& graph, size_t k, size_t edge_max,
-              const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, KmerDFSState& state, size_t buffer_offset = 0) {
+void KmersDFS(
+    const handlegraph::HandleGraph& graph, size_t k, size_t edge_max,
+    const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback,
+    KmerDFSState& state, size_t buffer_offset = 0) {
   auto init_buffer_size = state.buffer_.size();
-  
+
   // We should only call this function using a buffer that is not yet long enough to generate a full k-mer, i.e.
   // that contains the last k-1 bases of the current path. Any full k-mers should already have been generated.
   assert(buffer_offset < k && init_buffer_size < (buffer_offset + k));
-  
+
+  // Stop if we've reached the maximum edge traversal depth (`n` handles is `n-1` edges)
+  if (state.handles_.size() > edge_max) {
+    return;
+  }
+
   graph.follow_edges(state.handles_.back(), false /* traverse forward */, [&](const handlegraph::handle_t& next_handle) {
     state.buffer_.append(graph.get_sequence(next_handle), 0 /* start pos */, k-1);
     state.handles_.push_back(next_handle);
@@ -675,7 +682,7 @@ void KmersDFS(const handlegraph::HandleGraph& graph, size_t k, size_t edge_max,
     for (; (offset  +  k) <= state.buffer_.size(); ++offset) {
       callback(state.buffer_.substr(offset, k), state.handles_, state.starting_handle_offset_ + offset);
     }
-    
+
     // If this node was not long enough to exhaut all possible prefixes, recurse into the next node to try to generate any remaining
     // k-mers that started in the original node.
     if ((state.buffer_.size() - init_buffer_size) < (k - 1)) {

@@ -57,6 +57,38 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   ASSERT_EQ(kmer_counts["GATTCTA"], 2) << "Expected k-mer GATTCTA count of 2, got " << kmer_counts["GATTCTA"];
 }
 
+TEST_F(GraphConstructionTest, KmersRespectsMaxEdges) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  // Test with max_edges = 2: should not traverse more than 2 edges from any starting handle
+  size_t max_edges = 2;
+  std::vector<size_t> handle_counts;
+
+  graph.Kmers(7, max_edges, [&](const std::string& kmer, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+    handle_counts.push_back(handles.size());
+    // The number of handles represents: 1 starting handle + number of edges traversed
+    // So handles.size() - 1 = number of edges traversed
+    ASSERT_LE(handles.size() - 1, max_edges) << "K-mer spans " << (handles.size() - 1) << " edges, exceeds max_edges=" << max_edges;
+  });
+
+  // Verify we got some k-mers
+  ASSERT_GT(handle_counts.size(), 0) << "Should have generated at least one k-mer";
+
+  // Test with max_edges = 0: should only generate k-mers within single handles
+  graph.Kmers(7, 0, [&](const std::string& kmer, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+    ASSERT_EQ(handles.size(), 1) << "With max_edges=0, all k-mers should be within single handles";
+  });
+}
+
 // TEST_F(GraphConstructionTest, KmersFromSimpleDeletionSV) {
 //   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 // ##FILTER=<ID=PASS,Description="All filters passed">
