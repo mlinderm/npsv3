@@ -59,13 +59,15 @@ NB_MODULE(_native_graph, m) {
     .def("is_filtered", &npsv3::Variant::IsFiltered)
     .def("set_filter_pass", &npsv3::Variant::SetFilterToPass)
     .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))
+    .def("subset_samples", &npsv3::Variant::SubsetSamples)
     .def("__str__", [](const npsv3::Variant& v) {
       std::ostringstream oss;
       oss << v;
       return oss.str();
     });
 
-  nb::class_<npsv3::VariantFileHeader>(m, "VariantFileHeader");
+  nb::class_<npsv3::VariantFileHeader>(m, "VariantFileHeader")
+    .def("subset", &npsv3::VariantFileHeader::Subset);
 
   nb::class_<VariantFileReaderIterator>(m, "VariantFileReaderIterator")
     .def("__iter__", [](nb::handle h) { return h; })
@@ -82,7 +84,8 @@ NB_MODULE(_native_graph, m) {
       return VariantFileReaderIterator(reader);
     }, nb::keep_alive<0, 1>()) // Keep reader alive while variant is alive
     .def("samples", &npsv3::VariantFileReader::Samples)
-    .def("header", &npsv3::VariantFileReader::header);
+    .def("header", &npsv3::VariantFileReader::header)
+    .def("close", &npsv3::VariantFileReader::Close);
 
   nb::class_<npsv3::VariantFileWriter>(m, "VariantFileWriter")
     // We seem to need this lambda to handle the optional string argument properly
@@ -90,7 +93,8 @@ NB_MODULE(_native_graph, m) {
       const char* format_cstr = format ? format->c_str() : nullptr;
       return npsv3::VariantFileWriter::Open(filename, header, format_cstr);
     }, "filename"_a, "header"_a, "format"_a = nb::none())
-    .def("write", &npsv3::VariantFileWriter::Write);
+    .def("write", &npsv3::VariantFileWriter::Write)
+    .def("close", &npsv3::VariantFileWriter::Close);
 
   nb::class_<npsv3::Graph>(m, "Graph")
     .def(nb::init<const std::string&, const std::string&, const npsv3::Range&>())

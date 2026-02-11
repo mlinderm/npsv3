@@ -86,9 +86,12 @@ class VariantFileHeader : public std::enable_shared_from_this<VariantFileHeader>
   bool HasFT() const { return ft_id_ >= 0; }
   int FTId() const { return ft_id_; }
 
-  // PASS is always be defined as first string in dictionary 
+  // PASS is always be defined as first string in dictionary
   // (per https://github.com/samtools/htslib/blob/fe1721d876b1021ceb417cb2a0b246fa401b8c7f/vcf.c#L1425)
   constexpr int PASSId() const { return 0; }
+
+  // Create a subset header with only the specified samples
+  std::shared_ptr<VariantFileHeader> Subset(const std::vector<std::string>& samples) const;
  private:
   HeaderPtr hdr_;
   int gt_id_ = -1;
@@ -247,6 +250,8 @@ class Variant {
   bool IsFiltered() const;
   void SetFilterToPass();
 
+  virtual std::unique_ptr<Variant> SubsetSamples(const std::vector<int>& original_idxs) const = 0;
+  
   std::vector<Genotype> Genotypes() const;
   bool HasPassingGenotype() const;
 
@@ -265,6 +270,7 @@ class Variant {
 
   std::vector<Genotype> Genotypes(int gt_id, int ps_id) const;
   bool HasPassingGenotype(int gt_id, int ft_id) const;
+  RecordPtr SubsetSamplesRecord(const std::vector<int>& original_idxs) const;
 };
 
 class SequenceResolvedVariant : public Variant {
@@ -274,6 +280,10 @@ class SequenceResolvedVariant : public Variant {
   std::optional<Range> AlleleReferenceRegion(int allele_idx) const override;
   std::optional<int> AlleleLengthChange(int allele_idx) const override;
   std::optional<std::string_view> AlleleSequence(int allele_idx) const override;
+
+  std::unique_ptr<Variant> SubsetSamples(const std::vector<int>& original_idxs) const override {
+    return std::make_unique<SequenceResolvedVariant>(hdr_, SubsetSamplesRecord(original_idxs));
+  }
 
  private:
   std::vector<Pos> allele_left_padding_;
@@ -287,6 +297,7 @@ class VariantFileReader {
   typedef std::unique_ptr<Variant> VariantPtr;
 
   static VariantFileReaderPtr Open(const std::string& filename);
+  void Close();
 
   htsExactFormat format() const;
   htsCompression compression() const;
@@ -344,6 +355,7 @@ class VariantFileWriter {
   virtual ~VariantFileWriter() = default;
 
   static VariantFileWriterPtr Open(const std::string& filename, const HeaderPtr& header, const char* format = nullptr);
+  void Close();
 
   virtual void Write(const Variant& variant);
 
@@ -351,7 +363,7 @@ class VariantFileWriter {
   typedef std::unique_ptr<htsFile, detail::htsFile_deleter> FilePtr;
 
   VariantFileWriter(FilePtr&& file, const HeaderPtr& header) : file_(std::move(file)), hdr_(header) {}
-
+  
   FilePtr file_;
   HeaderPtr hdr_;
 };

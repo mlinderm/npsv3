@@ -42,6 +42,24 @@ VariantFileHeader::VariantFileHeader(bcf_hdr_t* hdr) : hdr_(hdr) {
   assert(bcf_hdr_id2int(hdr_.get(), BCF_DT_ID, "PASS") == 0);
 }
 
+std::shared_ptr<VariantFileHeader> VariantFileHeader::Subset(const std::vector<std::string>& samples) const {
+  // Convert sample names to char* array for htslib
+  std::vector<char*> sample_ptrs;
+  sample_ptrs.reserve(samples.size());
+  for (const auto& sample : samples) {
+    sample_ptrs.push_back(const_cast<char*>(sample.c_str()));
+  }
+
+  // Create subset header using htslib
+  std::vector<int> imap; imap.reserve(samples.size());
+  bcf_hdr_t* subset_hdr = bcf_hdr_subset(hdr_.get(), samples.size(), sample_ptrs.data(), imap.data());
+  if (!subset_hdr) {
+    throw std::runtime_error("Failed to create subset header");
+  }
+
+  return std::make_shared<VariantFileHeader>(subset_hdr);
+}
+
 Phase::Phase(Value v, int phase_set) {
   if (v == kLocal) {
     if (phase_set < 0 || phase_set > kMaxPhaseSet) {
@@ -73,7 +91,10 @@ std::unique_ptr<Variant> Variant::Create(const HeaderPtr& hdr, bcf1_t* record) {
   }
 }
 
-Variant::Variant(const HeaderPtr& hdr, RecordPtr record) : hdr_(hdr), record_(std::move(record)) {}
+Variant::Variant(const HeaderPtr& hdr, RecordPtr record) : hdr_(hdr), record_(std::move(record)) {
+  if (bcf_unpack(record_.get(), BCF_UN_STR) < 0)  // Decode up to the ALTs (if not already done)
+    throw std::runtime_error("Failed to unpack variant record");
+}
 
 ContigName Variant::contig() const {
   // TODO: Pre-create contig names for each rid in the header to avoid repeated construction
@@ -114,6 +135,19 @@ int Variant::AlleleIndex(const std::string& allele_sequence) const {
 Range Variant::ReferenceRegion() const {
   auto pos = record_->pos;  // 0-based position
   return Range(contig(), pos + left_padding_, pos + record_->rlen - right_padding_);
+}
+
+Variant::RecordPtr Variant::SubsetSamplesRecord(const std::vector<int>& original_idxs) const {
+  RecordPtr subset_record_ptr(bcf_dup(record_.get()));
+  if (!subset_record_ptr) {
+    throw std::runtime_error("Failed to duplicate variant record for subsetting");
+  }
+
+  if (bcf_subset(hdr_->bcf_hdr(), subset_record_ptr.get(), original_idxs.size(), const_cast<int*>(original_idxs.data())) < 0) {
+    throw std::runtime_error("Failed to subset variant record");
+  }
+
+  return subset_record_ptr;
 }
 
 std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id) const {
@@ -434,6 +468,10 @@ std::vector<std::string> VariantFileReader::Samples() const {
   return samples;
 }
 
+void VariantFileReader::Close() {
+  file_.reset();
+}
+
 VCFVariantFileReader::VCFVariantFileReader(FilePtr&& file) : VariantFileReader(std::move(file)) {
   idx_.reset(tbx_index_load3(file_->fn, NULL, HTS_IDX_SAVE_REMOTE|HTS_IDX_SILENT_FAIL));
   SetRegion();  // Default to reading the entire file
@@ -509,9 +547,15 @@ VariantFileWriter::VariantFileWriterPtr VariantFileWriter::Open(const std::strin
   return std::unique_ptr<VariantFileWriter>(new VariantFileWriter(std::move(file_ptr), header));
 }
 
+void VariantFileWriter::Close() {
+  file_.reset();
+}
+
 void VariantFileWriter::Write(const Variant& variant) {
   if (bcf_write(file_.get(), hdr_->bcf_hdr(), variant.record_.get()) < 0) {
     throw std::runtime_error("Failed to write variant record to VCF/BCF file");
   }
 }
+
+
 }  // namespace npsv3

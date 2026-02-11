@@ -1,4 +1,5 @@
 import glob
+import pathlib
 import os
 
 import pysam
@@ -11,8 +12,6 @@ from npsv3.util.vcf import index_variant_file
 
 from .. import EXPERIMENTS_DIR, HG38_REF_FASTA, _first_existing
 
-# A ~210bp insertion allele used across tests (SV since >=50bp)
-_SV_INS_ALLELE = "CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCTCCTCCTCCCACAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCACAATCCCACCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCCTGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG"
 
 def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
     vcf_path = os.path.join(tmp_path, name)
@@ -21,18 +20,9 @@ def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
     index_variant_file(vcf_path)
     return vcf_path
 
-def _sample_vcf_paths(output_dir: str) -> dict[str, str]:
-    """Return dict of sample name -> output VCF path for files created by split_and_filter_vcf."""
-    paths = {}
-    for path in glob.glob(os.path.join(output_dir, "*.vcf.gz")):
-        sample = os.path.basename(path).removesuffix(".vcf.gz")
-        paths[sample] = path
-    return paths
-
-def _count_variants(vcf_path: str) -> int:
-    reader = VariantFileReader.open(vcf_path)
-    return sum(1 for _ in reader.fetch())
-
+def _sample_vcf_paths(output_dir: str|pathlib.Path) -> dict[str, str]:
+    sample_to_vcf = {file.name.removesuffix(".vcf.gz"): str(file) for file in pathlib.Path(output_dir).glob("*.vcf.gz")}
+    return sample_to_vcf
 
 @pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference fasta not found")
 @pytest.mark.cfg_overrides(
@@ -77,110 +67,76 @@ chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
         vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3
-chr1	3693767	.	C	C{_SV_INS_ALLELE}	30	PASS	.	GT	0|1	./.	./.
+chr1	3999762	.	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	A	.	.	SVTYPE=DEL;SVLEN=-118	GT	0/1	0/0	0/0
 """.encode())  # fmt: skip
 
-        output_dir = os.path.join(tmp_path, "output")
-        os.makedirs(output_dir)
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
         split_and_filter_vcf(cfg, vcf_path, output_dir)
 
-        sample_vcfs = _sample_vcf_paths(output_dir)
-        # Sample1 is positive (has passing SV), Sample2 and Sample3 are negative (no SV alleles)
-        assert "Sample1" in sample_vcfs
-        assert "Sample2" in sample_vcfs
-        assert "Sample3" in sample_vcfs
-        # Each sample VCF should contain the one passing variant
-        for sample in sample_vcfs:
-            assert _count_variants(sample_vcfs[sample]) == 1
+        sample_to_vcf = _sample_vcf_paths(output_dir)
+        assert len(sample_to_vcf) == 3, "Expected 3 sample VCFs, got {len(sample_to_vcf)}"
+        assert all(sample in sample_to_vcf for sample in ["Sample1", "Sample2", "Sample3"]), f"Expected VCFs for Sample1, Sample2, Sample3, got {list(sample_to_vcf.keys())}"
+        
+        for sample, vcf_path in sample_to_vcf.items():
+            reader = VariantFileReader.open(vcf_path)
+            samples = reader.samples()
+            assert samples == [sample], f"Expected only {sample} in VCF samples, got {samples}"
+            variants = list(reader.fetch())
+            assert len(variants) == 1, f"Expected exactly 1 variant in {sample}'s VCF, got {len(variants)}"
+
+    def test_split_no_passing_variants_skips_region(self, tmp_path, cfg):
+        """Passing SV: carrier is positive, non-carriers are negative, all get output VCFs."""
+        vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3
+chr1	3999762	.	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	A	.	GAP1	SVTYPE=DEL;SVLEN=-118	GT	0/1	0/0	0/0
+""".encode())  # fmt: skip
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        split_and_filter_vcf(cfg, vcf_path, output_dir)
+
+        sample_to_vcf = _sample_vcf_paths(output_dir)
+        assert len(sample_to_vcf) == 0
+
 
     def test_split_filtered_sv_excluded_from_positive(self, tmp_path, cfg):
         """Sample with only a filtered SV should not be positive or negative."""
         vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
-##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3
-chr1	3693767	.	C	C{_SV_INS_ALLELE}	30	PASS	.	GT	0|1	./.	./.
-chr1	3693767	.	C	C{_SV_INS_ALLELE}CCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	GAP1	.	GT	./.	0|1	./.
+chr1	3999762	.	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	A	.	.	SVTYPE=DEL;SVLEN=-118	GT	0/1	0/0	0/0
+chr1	3999763	.	TGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAGTTGCAGGACGTGTCACAGAGAGAGGAAGGGGCCACACTGCTGACGGGGCGGGCC	T	.	GAP1	SVTYPE=DEL;SVLEN=-117	GT	0/0	0/1	0/0
 """.encode())  # fmt: skip
 
-        output_dir = os.path.join(tmp_path, "output")
-        os.makedirs(output_dir)
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
         split_and_filter_vcf(cfg, vcf_path, output_dir)
 
-        sample_vcfs = _sample_vcf_paths(output_dir)
-        # Sample1 is positive (passing SV only)
-        assert "Sample1" in sample_vcfs
-        # Sample2 has a filtered SV, so it is neither positive nor negative
-        assert "Sample2" not in sample_vcfs
-        # Sample3 has no SVs at all, so it is negative
-        assert "Sample3" in sample_vcfs
+        sample_to_vcf = _sample_vcf_paths(output_dir)
+       
+        assert "Sample1" in sample_to_vcf  # Sample1 is positive (passing SV only)
+        assert "Sample2" not in sample_to_vcf # Sample2 has a filtered SV, so it is neither positive nor negative
+        assert "Sample3" in sample_to_vcf  # Sample3 has no SVs at all, so it is negative
 
-    def test_split_no_passing_variants_skips_region(self, tmp_path, cfg):
-        """Region with only filtered variants should be skipped entirely."""
-        vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
-##FILTER=<ID=PASS,Description="All filters passed">
-##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
-##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
-chr1	3693767	.	C	C{_SV_INS_ALLELE}	30	GAP1	.	GT	0|1	./.
-""".encode())  # fmt: skip
-
-        output_dir = os.path.join(tmp_path, "output")
-        os.makedirs(output_dir)
-        split_and_filter_vcf(cfg, vcf_path, output_dir)
-
-        sample_vcfs = _sample_vcf_paths(output_dir)
-        # No output files since the only variant is filtered
-        assert len(sample_vcfs) == 0
-
-    def test_split_negative_excludes_filtered_sv_carriers(self, tmp_path, cfg):
-        """Samples carrying any SV allele (even filtered) should not be negative."""
-        vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
-##FILTER=<ID=PASS,Description="All filters passed">
-##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
-##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3
-chr1	3693767	.	C	C{_SV_INS_ALLELE}	30	PASS	.	GT	0|1	./.	./.
-chr1	3693767	.	C	C{_SV_INS_ALLELE}CCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAG	30	GAP1	.	GT	./.	./.	0|1
-""".encode())  # fmt: skip
-
-        output_dir = os.path.join(tmp_path, "output")
-        os.makedirs(output_dir)
-        split_and_filter_vcf(cfg, vcf_path, output_dir)
-
-        sample_vcfs = _sample_vcf_paths(output_dir)
-        # Sample1 is positive (passing SV)
-        assert "Sample1" in sample_vcfs
-        # Sample2 has no SVs at all -> negative
-        assert "Sample2" in sample_vcfs
-        # Sample3 has a filtered SV -> excluded from both positive and negative
-        assert "Sample3" not in sample_vcfs
-
-    def test_split_only_writes_passing_variants(self, tmp_path, cfg):
-        """Output VCFs should only contain the passing variants, not filtered ones."""
-        vcf_path = _create_vcf(tmp_path, f"""##fileformat=VCFv4.2
-##FILTER=<ID=PASS,Description="All filters passed">
-##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
-##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
-chr1	3693767	.	C	C{_SV_INS_ALLELE}	30	PASS	.	GT	0|1	./.
-chr1	3693768	.	C	G	30	GAP1	.	GT	./.	./.
-""".encode())  # fmt: skip
-
-        output_dir = os.path.join(tmp_path, "output")
-        os.makedirs(output_dir)
-        split_and_filter_vcf(cfg, vcf_path, output_dir)
-
-        sample_vcfs = _sample_vcf_paths(output_dir)
-        # Both samples should get output (Sample1 positive, Sample2 negative)
-        assert len(sample_vcfs) == 2
-        # Only the passing SV variant should be written, not the filtered SNV
-        for sample in sample_vcfs:
-            assert _count_variants(sample_vcfs[sample]) == 1
+        for sample, vcf_path in sample_to_vcf.items():
+            reader = VariantFileReader.open(vcf_path)
+            samples = reader.samples()
+            assert samples == [sample], f"Expected only {sample} in VCF samples, got {samples}"
+            variants = list(reader.fetch())
+            assert len(variants) == 1, f"Expected exactly 1 variant in {sample}'s VCF, got {len(variants)}"
