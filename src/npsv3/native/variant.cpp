@@ -51,7 +51,7 @@ std::shared_ptr<VariantFileHeader> VariantFileHeader::Subset(const std::vector<s
   }
 
   // Create subset header using htslib
-  std::vector<int> imap; imap.reserve(samples.size());
+  std::vector<int> imap; imap.resize(samples.size());
   bcf_hdr_t* subset_hdr = bcf_hdr_subset(hdr_.get(), samples.size(), sample_ptrs.data(), imap.data());
   if (!subset_hdr) {
     throw std::runtime_error("Failed to create subset header");

@@ -79,10 +79,21 @@ To use GDB with pytest, build with debug symbols, then run `python3` under GDB. 
 pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"`
 gdb -args python3 -m pytest --dist no tests
 ```
+
 To use valgrind, similarly build with debug symbols, then run python3 under valgrind. `-p no:warnings` prevents warnings related to NumPy from blocking the tests from running.
 ```
 valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt python3 -m pytest -p no:warnings tests
 ```
+
+To use Address Sanitizer (ASan), set the CMAKE ENABLE_ASAN option to ON during build
+```
+pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug" --config-settings=cmake.define.ENABLE_ASAN:BOOL=ON
+```
+then run the tests ensuring libasan is preloaded before execution:
+```
+LD_PRELOAD="$(gcc -print-file-name=libasan.so):$LD_PRELOAD" python3 -m pytest --dist no tests
+```
+
 To run the native tests with GDB, run the tests with `-V` to report the specific test command that failed, e.g., `build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"`, then run that command under GDB, e.g.,
 ```
 gdb -args build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"

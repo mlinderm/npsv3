@@ -88,7 +88,8 @@ def split_and_filter_vcf(
             def __missing__(self, key):
                 sample_path = os.path.join(output_dir, file_template.format(sample=key))
                 sample_header = header.subset([key])  # Create a subset header with only this sample
-                return VariantFileWriter.open(sample_path, sample_header)
+                writer = self[key] = VariantFileWriter.open(sample_path, sample_header)
+                return writer
         writers = WriterDict()
 
         for _region_count, (region, variants) in enumerate(overlapping_variants(reader, flank=cfg.pileup.variant_padding), start=1):

@@ -199,6 +199,7 @@ class NonRefAlleleOverlappingError : public std::runtime_error {
 // Record actions taken on the haplotype to enable undo
 class HaplotypeAction {
  public:
+  virtual ~HaplotypeAction() = default;
   virtual void Undo(Haplotype& haplotype) const = 0;
 };
 class HaplotypeAddSteps;

@@ -226,6 +226,9 @@ class Variant {
   typedef boost::hash2::digest<20> VariantId;
   typedef PackedGenotype<> Genotype;
 
+  // Make sure all base classes have virtual destructors to ensure proper cleanup of derived classes
+  virtual ~Variant() = default;
+
   static std::unique_ptr<Variant> Create(const HeaderPtr& hdr, bcf1_t* record);
 
   ContigName contig() const;
@@ -251,7 +254,7 @@ class Variant {
   void SetFilterToPass();
 
   virtual std::unique_ptr<Variant> SubsetSamples(const std::vector<int>& original_idxs) const = 0;
-  
+
   std::vector<Genotype> Genotypes() const;
   bool HasPassingGenotype() const;
 
@@ -296,6 +299,7 @@ class VariantFileReader {
   typedef std::shared_ptr<VariantFileHeader> HeaderPtr;
   typedef std::unique_ptr<Variant> VariantPtr;
 
+  virtual ~VariantFileReader() = default;
   static VariantFileReaderPtr Open(const std::string& filename);
   void Close();
 

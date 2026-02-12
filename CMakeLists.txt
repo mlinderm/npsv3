@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15...3.27)
 project(npsv3 CXX)
-#set(CMAKE_FIND_DEBUG_MODE 1)
+
 # Nanobind configuration adapted from: https://nanobind.readthedocs.io/en/latest/packaging.html
 if (NOT SKBUILD)
   message(WARNING "\
@@ -47,6 +47,13 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 # Set global properties
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Optional AddressSanitizer support for Debug builds
+option(ENABLE_ASAN "Enable AddressSanitizer in Debug builds" OFF)
+if(ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address)
+endif()
 
 # Get external dependencies
 find_package(SeqLib REQUIRED) # This will also patch SeqLib as needed
@@ -202,4 +209,7 @@ target_link_libraries(graph_test
 )
 
 include(GoogleTest)
-gtest_discover_tests(graph_test)
+if(NOT ENABLE_ASAN)
+  # Only perform test discovery when not trying to use ASan
+  gtest_discover_tests(graph_test)
+endif()
