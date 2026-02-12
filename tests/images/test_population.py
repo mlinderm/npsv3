@@ -45,6 +45,7 @@ chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
         output_path = os.path.join(tmp_path, "output.vcf.gz")
         update_filter(cfg, vcf_path, output_path)
 
+    #@pytest.mark.skip(reason="Lengthy integration test that we run manually as needed")
     def test_identify_training_regions(self, tmp_path, cfg):
         input_vcf = _first_existing(
             "/data/hgsvc3-hprc-2024-02-23.dipcall.training.sv.hg38.vcf.gz",

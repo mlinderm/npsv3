@@ -142,15 +142,18 @@ class ReferenceNodes {
   }
 
   handlegraph::handle_t GetOrCreateAltHandle(const std::string_view& alt_sequence, const HandleRange& ref_handles) {
+    auto node_sequence = alt_sequence.size() == 0 ? std::string_view("*") : alt_sequence;
+
     // Have we already created this ALT allele node before?
     auto [begin, end] = alt_handles_.equal_range(ref_handles);
     for (auto it = begin; it != end; ++it) {
       auto & handle = it->second;
-      if (graph_.get_sequence(handle) == alt_sequence) {
+      if (graph_.get_sequence(handle) == node_sequence) {
         return handle;
       }
     }
-    auto handle = graph_.create_handle(alt_sequence.size() == 0 ? "*" : std::string(alt_sequence));  // TODO: Do we have to create a string here?
+    
+    auto handle = graph_.create_handle(std::string(node_sequence));  // TODO: Do we have to create a string here?
     // Link to the reference nodes before and after
     if (ref_handles.first != std::begin(ref_handles_)) {
       graph_.create_edge(*std::prev(ref_handles.first), handle);
