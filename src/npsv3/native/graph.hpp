@@ -271,7 +271,7 @@ class HaplotypeAddSteps : public HaplotypeAction {
 
  private:
   size_t curr_next_ref_index_;
-  const handlegraph::step_handle_t& curr_step_;
+  handlegraph::step_handle_t curr_step_;
 };
 
 class HaplotypeAddSegment : public HaplotypeAction {

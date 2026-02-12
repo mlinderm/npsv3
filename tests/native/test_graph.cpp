@@ -333,6 +333,44 @@ TEST_F(GraphConstructionTest, InconsistentHaplotypes2) {
   ASSERT_EQ(graph.PathSequence("Sample#1#2#0"), "CTCTCTCTCGCTTTCTCTCTTTCTCTCTTTCTCTCTCTCTCTCTCTTTCTCTCTCTCTCTCTCGCTTTCTCGCT");
 };
 
+TEST_F(GraphConstructionTest, InconsistentHaplotypes3) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	904479	.	GCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGTGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCGCCTCCTCCGAACGCGGCCTCCT	T	30	PASS	.	GT	0|1
+chr1	904493	.	CGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGT	C	30	PASS	.	GT	.
+chr1	904493	.	CGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGT	C,TGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGT	30	PASS	.	GT	2|1)VCF");
+
+  auto region = Range("chr1", 904469, 904671);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
+
+  // Haplotype 1 should be broken at the inconsistent 3rd variant, haplotype 0 should have 1 path
+  ASSERT_TRUE(graph.has_path(fmt::format("Sample#0#{}#0", region.contig())));
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#0#{}#1", region.contig())));
+  for (int i=0; i < 2 /* segments*/; i++) {
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), i)));
+  }
+  ASSERT_FALSE(graph.has_path(fmt::format("Sample#1#{}#{}", region.contig(), 2)));
+
+  // TODO, getting duplicate deletion nodes for variants 2 and 3, i.e.,
+  // _alt_31734a3cce2a0fe500860950a5b96e012efee56e_1 and _alt_8a8eec2f139003c73f9bbc38c62fd85e6ded0f7d_1
+  // should share nodes.
+
+  auto handles2_1 = graph.PathHandles("_alt_31734a3cce2a0fe500860950a5b96e012efee56e_1");
+  auto handles3_1 = graph.PathHandles("_alt_8a8eec2f139003c73f9bbc38c62fd85e6ded0f7d_1");
+
+  std::sort(handles2_1.begin(), handles2_1.end());
+  std::sort(handles3_1.begin(), handles3_1.end());
+  
+  // The simple deletion should be a subpath of the complex deletion
+  ASSERT_TRUE(std::includes(handles3_1.begin(), handles3_1.end(), handles2_1.begin(), handles2_1.end()));
+}
+
 TEST_F(GraphConstructionTest, AdjacentInsertions) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr4,length=190214555>

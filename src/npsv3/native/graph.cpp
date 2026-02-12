@@ -223,6 +223,9 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
         if (ref_region.start() <= region.start() || ref_region.end() >= region.end()) {
           continue; // Skip variants that only partially overlap the graph region
         }
+        if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
+          continue; // Skip variants with only '*' ALTS
+        }
 
         num_variant_paths++;
         for (int i = 1; i < variant->num_alleles(); i++) {
@@ -949,10 +952,12 @@ HaplotypeAddSteps::HaplotypeAddSteps(const Haplotype& haplotype)
 void HaplotypeAddSteps::Undo(Haplotype& haplotype) const {
   // Remove any steps that were added after the save point and reset the ref index
   auto end = haplotype.graph_t().path_front_end(haplotype.current_segment_handle_);
-  for (auto step = haplotype.graph_.path_back(haplotype.current_segment_handle_); step != end;
-       step = haplotype.graph_t().get_previous_step(step)) {
+  auto step = haplotype.graph_.path_back(haplotype.current_segment_handle_);
+  while (step != end) {
     if (step == curr_step_) break;
+    auto prev = haplotype.graph_t().get_previous_step(step);
     haplotype.graph_t().destroy_step(step);
+    step = prev;
   }
   haplotype.next_ref_index_ = curr_next_ref_index_;
 }
