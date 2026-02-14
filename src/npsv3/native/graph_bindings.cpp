@@ -79,10 +79,14 @@ NB_MODULE(_native_graph, m) {
       reader.SetRegion();
       return VariantFileReaderIterator(reader);
     }, nb::keep_alive<0, 1>()) // Keep reader alive while variant is alive
-    .def("fetch", [](npsv3::VariantFileReader& reader, const npsv3::Range& region) {
-      reader.SetRegion(region);
+    .def("fetch", [](npsv3::VariantFileReader& reader, const std::optional<npsv3::Range>& region) {
+      if (region) {
+        reader.SetRegion(*region);
+      } else {
+        reader.SetRegion();
+      }
       return VariantFileReaderIterator(reader);
-    }, nb::keep_alive<0, 1>()) // Keep reader alive while variant is alive
+    }, nb::keep_alive<0, 1>(), "region"_a = nb::none()) // Keep reader alive while variant is alive
     .def("samples", &npsv3::VariantFileReader::Samples)
     .def("header", &npsv3::VariantFileReader::header)
     .def("close", &npsv3::VariantFileReader::Close);

@@ -5,6 +5,7 @@
 #include <fmt/format.h>
 #include <boost/core/span.hpp>
 #include <boost/dynamic_bitset.hpp>
+#include <spdlog/spdlog.h>
 
 #include "fasta.hpp"
 #include "variant.hpp"
@@ -210,6 +211,7 @@ class ReferenceNodes {
 }  // namespace
 
 Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic) {
+  spdlog::info("Constructing graph for region {}:{}-{}", region.contig(), region.start(), region.end());
   auto vcf_file = VariantFileReader::Open(vcf_path);
 
   // For phases 1 & 2 don't load genotypes, just the variant alleles, to reduce memory usage when storing all variants in the region.
@@ -806,6 +808,7 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
       added_genotype = true;
       break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
     } catch (const NonRefAlleleOverlappingError&) {
+      spdlog::info("Performing undo");
       // Inconsistent haplotypes, undo any actions taken so far
       for (int i=0; i <= h; i++) {
         haplotypes_[i].UndoActions();
@@ -918,6 +921,7 @@ void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRan
 }
 
 void Haplotype::UndoActions() {
+  spdlog::info("Undoing {} actions for {}", actions_.size(), PathName());
   std::for_each(actions_.rbegin(), actions_.rend(), [this](const std::unique_ptr<HaplotypeAction>& action) { action->Undo(*this); });
   actions_.clear();
 }
@@ -936,6 +940,7 @@ std::string Haplotype::PathName() const {
 }
 
 void Haplotype::AddReferenceNodes(size_t end_index) {
+  if (next_ref_index_ >= end_index) return;  // Nothing to add
   actions_.push_back(std::move(std::make_unique<HaplotypeAddSteps>(*this)));
   for (; next_ref_index_ < end_index; ++next_ref_index_) {
     graph_t().append_step(current_segment_handle_, graph_t().get_handle(ref_nodes_[next_ref_index_]));
@@ -948,11 +953,17 @@ void Haplotype::AddSegment() {
   current_segment_handle_ = graph_t().create_path_handle(PathName());
 }
 
-HaplotypeAddSteps::HaplotypeAddSteps(const Haplotype& haplotype)
-    : curr_next_ref_index_(haplotype.next_ref_index_),
-      curr_step_(haplotype.graph_.path_back(haplotype.current_segment_handle_)) {}
+HaplotypeAddSteps::HaplotypeAddSteps(const Haplotype& haplotype) : curr_next_ref_index_(haplotype.next_ref_index_) {
+  // Check if path is emtpy to avoid recording invalid step handle
+  if (haplotype.graph_.is_empty(haplotype.current_segment_handle_)) {
+    curr_step_ = haplotype.graph_.path_front_end(haplotype.current_segment_handle_);
+  } else {
+    curr_step_ = haplotype.graph_.path_back(haplotype.current_segment_handle_);
+  }
+}
 
 void HaplotypeAddSteps::Undo(Haplotype& haplotype) const {
+  spdlog::info("Undoing addition of steps to {}", haplotype.graph_.get_path_name(haplotype.current_segment_handle_));
   // Remove any steps that were added after the save point and reset the ref index
   auto end = haplotype.graph_t().path_front_end(haplotype.current_segment_handle_);
   auto step = haplotype.graph_.path_back(haplotype.current_segment_handle_);
@@ -969,6 +980,7 @@ HaplotypeAddSegment::HaplotypeAddSegment(const Haplotype& haplotype)
     : current_segment_handle_(haplotype.current_segment_handle_) {}
 
 void HaplotypeAddSegment::Undo(Haplotype& haplotype) const {
+  spdlog::info("Undoing addition of segment");
   haplotype.graph_.destroy_path(haplotype.current_segment_handle_);
   haplotype.current_segment_handle_ = current_segment_handle_;
 }

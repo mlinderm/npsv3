@@ -1,2 +1,4 @@
 # @package _global_
 command: split_and_filter
+
+file_template: "{sample}.vcf.gz"

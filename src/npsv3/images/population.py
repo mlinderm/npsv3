@@ -1,8 +1,9 @@
 from collections import defaultdict
 import os
 from omegaconf import DictConfig
+from tqdm import tqdm
 
-from npsv3._native_graph import Graph, VariantFileReader, VariantFileWriter
+from npsv3._native_graph import Graph, Range, VariantFileReader, VariantFileWriter
 
 def update_filter(cfg: DictConfig, vcf_path: str, output_path: str):
     """Set variant FILTER to PASS if any defined genotype is not filtered
@@ -28,7 +29,7 @@ def update_filter(cfg: DictConfig, vcf_path: str, output_path: str):
         dst_vcf_file.close()
 
 
-def overlapping_variants(vcf_file: VariantFileReader|str, flank=0):
+def overlapping_variants(vcf_file: VariantFileReader|str, region=Range|None, flank=0):
     """Yield separated (non-overlapping) regions and corresponding variants
 
     Args:
@@ -46,7 +47,7 @@ def overlapping_variants(vcf_file: VariantFileReader|str, flank=0):
         vcf_file = VariantFileReader.open(vcf_file)
     assert isinstance(vcf_file, VariantFileReader)
 
-    for variant in vcf_file.fetch():
+    for variant in vcf_file.fetch(region=region):
         variant_range = variant.reference_region().expand(flank)
         if current_range is None:
             current_range = variant_range
@@ -68,7 +69,9 @@ def split_and_filter_vcf(
     cfg: DictConfig,
     inference_vcf: str,
     output_dir: str,
+    region: Range|None = None,
     file_template="{sample}.vcf.gz",
+    progress_bar: bool = False,
 ):
     """Split multi-sample VCF into individual VCFs to create training images
 
@@ -77,6 +80,7 @@ def split_and_filter_vcf(
         inference_vcf (str): Input multi-sample VCF
         output_dir (str): Directory to create single-sample VCFs
         file_template (str, optional): Template for output VCF filenames, with {sample} placeholder. Defaults to "{sample}.vcf.gz".
+        progress_bar (bool, optional): Whether to show progress bar. Defaults to False.
     """
     try:
         reader = VariantFileReader.open(inference_vcf)
@@ -92,7 +96,7 @@ def split_and_filter_vcf(
                 return writer
         writers = WriterDict()
 
-        for _region_count, (region, variants) in enumerate(overlapping_variants(reader, flank=cfg.pileup.variant_padding), start=1):
+        for _region_count, (region, variants) in tqdm(enumerate(overlapping_variants(reader, region=region, flank=cfg.pileup.variant_padding), start=1), disable=not progress_bar):
             passing_variants = [v for v in variants if not v.is_filtered()]
             if len(passing_variants) == 0:
                 continue  # Skip regions with no unfiltered variants

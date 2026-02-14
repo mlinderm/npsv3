@@ -78,7 +78,7 @@ RUN case ${TARGETPLATFORM} in \
     -o /usr/local/bin/goleft && \
   chmod +x /usr/local/bin/goleft
 
-# Install odgi (and libraries) During development we are mounting our local fork of odgi into the container
+# Install odgi (and libraries)
 RUN git clone --depth 1 --recursive --branch node_del https://github.com/mlinderm/odgi.git /opt/odgi \
   && cmake -S /opt/odgi -B /opt/odgi/build -DBUILD_STATIC=1 \
   && cmake --build /opt/odgi/build -- -j $(nproc) \

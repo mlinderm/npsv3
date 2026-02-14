@@ -76,7 +76,7 @@ ctest --test-dir build/cp311-cp311-linux_x86_64
 
 To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--dist no` disables the distributed test plugin.
 ```
-pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"`
+pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"
 gdb -args python3 -m pytest --dist no tests
 ```
 

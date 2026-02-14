@@ -6,7 +6,7 @@ import pysam
 import pytest
 
 from omegaconf import OmegaConf
-from npsv3._native_graph import VariantFileReader
+from npsv3._native_graph import Range, VariantFileReader
 from npsv3.images.population import split_and_filter_vcf
 from npsv3.util.vcf import index_variant_file
 
@@ -61,6 +61,7 @@ chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
             cfg,
             inference_vcf=cfg.input,
             output_dir=tmp_path,
+            region=Range("chr1", 1138974, 1140751),
         )
 
     def test_split_passing_sv_creates_sample_vcfs(self, tmp_path, cfg):
