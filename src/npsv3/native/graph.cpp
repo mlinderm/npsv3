@@ -211,7 +211,6 @@ class ReferenceNodes {
 }  // namespace
 
 Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic) {
-  spdlog::info("Constructing graph for region {}:{}-{}", region.contig(), region.start(), region.end());
   auto vcf_file = VariantFileReader::Open(vcf_path);
 
   // For phases 1 & 2 don't load genotypes, just the variant alleles, to reduce memory usage when storing all variants in the region.
@@ -808,7 +807,6 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
       added_genotype = true;
       break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
     } catch (const NonRefAlleleOverlappingError&) {
-      spdlog::info("Performing undo");
       // Inconsistent haplotypes, undo any actions taken so far
       for (int i=0; i <= h; i++) {
         haplotypes_[i].UndoActions();
@@ -921,7 +919,6 @@ void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRan
 }
 
 void Haplotype::UndoActions() {
-  spdlog::info("Undoing {} actions for {}", actions_.size(), PathName());
   std::for_each(actions_.rbegin(), actions_.rend(), [this](const std::unique_ptr<HaplotypeAction>& action) { action->Undo(*this); });
   actions_.clear();
 }
@@ -963,16 +960,24 @@ HaplotypeAddSteps::HaplotypeAddSteps(const Haplotype& haplotype) : curr_next_ref
 }
 
 void HaplotypeAddSteps::Undo(Haplotype& haplotype) const {
-  spdlog::info("Undoing addition of steps to {}", haplotype.graph_.get_path_name(haplotype.current_segment_handle_));
   // Remove any steps that were added after the save point and reset the ref index
-  auto end = haplotype.graph_t().path_front_end(haplotype.current_segment_handle_);
+  auto end = haplotype.graph_.path_front_end(haplotype.current_segment_handle_);
   auto step = haplotype.graph_.path_back(haplotype.current_segment_handle_);
   while (step != end) {
     if (step == curr_step_) break;
-    auto prev = haplotype.graph_t().get_previous_step(step);
-    haplotype.graph_t().destroy_step(step);
+    auto prev = haplotype.graph_.get_previous_step(step);
+    haplotype.graph_.destroy_step(step);
     step = prev;
   }
+
+  // odgi's destroy_step doesn't seem to update path_meta.last when destroying steps. Manually
+  // set it to curr_step_ if the path is non-empty.
+  if (!haplotype.graph_.is_empty(haplotype.current_segment_handle_)) {
+    // Access the path metadata directly and update the last pointer
+    auto& path_meta = haplotype.graph_.get_path_metadata(haplotype.current_segment_handle_);
+    path_meta.last.store(curr_step_);
+  }
+
   haplotype.next_ref_index_ = curr_next_ref_index_;
 }
 
@@ -980,7 +985,6 @@ HaplotypeAddSegment::HaplotypeAddSegment(const Haplotype& haplotype)
     : current_segment_handle_(haplotype.current_segment_handle_) {}
 
 void HaplotypeAddSegment::Undo(Haplotype& haplotype) const {
-  spdlog::info("Undoing addition of segment");
   haplotype.graph_.destroy_path(haplotype.current_segment_handle_);
   haplotype.current_segment_handle_ = current_segment_handle_;
 }

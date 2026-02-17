@@ -161,7 +161,7 @@ def main(cfg: DictConfig) -> None:
         encode(cfg, output_dir=output)
 
     elif cfg.command == "split_and_filter":
-        from npsv3.images.example import split_and_filter_vcf
+        from npsv3.images.population import split_and_filter_vcf
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
@@ -170,6 +170,7 @@ def main(cfg: DictConfig) -> None:
             cfg,
             hydra.utils.to_absolute_path(cfg.input),
             output,
+            progress_bar=True,
         )
     elif cfg.command == "update_filter":
         from npsv3.images.population import update_filter

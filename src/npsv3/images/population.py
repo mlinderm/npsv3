@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 import os
 from omegaconf import DictConfig
 from tqdm import tqdm
@@ -42,7 +43,7 @@ def overlapping_variants(vcf_file: VariantFileReader|str, region=Range|None, fla
     # We assume VCF is in sorted order
     current_range = None
     current_variants = []
-    
+
     if isinstance(vcf_file, str):
         vcf_file = VariantFileReader.open(vcf_file)
     assert isinstance(vcf_file, VariantFileReader)
@@ -69,6 +70,7 @@ def split_and_filter_vcf(
     cfg: DictConfig,
     inference_vcf: str,
     output_dir: str,
+    *,
     region: Range|None = None,
     file_template="{sample}.vcf.gz",
     progress_bar: bool = False,
@@ -96,7 +98,11 @@ def split_and_filter_vcf(
                 return writer
         writers = WriterDict()
 
-        for _region_count, (region, variants) in tqdm(enumerate(overlapping_variants(reader, region=region, flank=cfg.pileup.variant_padding), start=1), disable=not progress_bar):
+        positive_regions = 0
+        negative_regions = 0
+        total_variants = 0
+
+        for _regions_count, (variants_region, variants) in tqdm(enumerate(overlapping_variants(reader, region=region, flank=cfg.pileup.variant_padding), start=1), disable=not progress_bar):
             passing_variants = [v for v in variants if not v.is_filtered()]
             if len(passing_variants) == 0:
                 continue  # Skip regions with no unfiltered variants
@@ -105,7 +111,7 @@ def split_and_filter_vcf(
             # alleles, regardless of FILTER status.
 
             # Build the graph for this region and classify SV alt-allele nodes by filter status
-            graph = Graph(cfg.reference, inference_vcf, region)
+            graph = Graph(cfg.reference, inference_vcf, variants_region)
             all_alt_nodes = set()
             filtered_alt_nodes = set()
 
@@ -128,20 +134,30 @@ def split_and_filter_vcf(
                     if variant.is_filtered():
                         filtered_alt_nodes.update(alt_nodes)
 
+            # TODO: Drop samples with inconsistent haplotypes?
+
             # Negative samples: No SV alleles at all (filtered or unfiltered)
             samples_with_any_sv = set(graph.samples_including(list(all_alt_nodes)))
             negative_samples = possible_samples.keys() - samples_with_any_sv
+            negative_regions += len(negative_samples)
 
             # Positive samples: Have passing SVs but no filtered SVs
             samples_with_filtered_sv = set(graph.samples_including(list(filtered_alt_nodes)))
             positive_samples = samples_with_any_sv - samples_with_filtered_sv
+            positive_regions += len(positive_samples)
+
+            # TODO: Instead of writing VCF, write BED files with regions and corresponding selected samples?
 
             # Write passing variants for all qualifying samples
+            total_variants += len(passing_variants)
             for sample in positive_samples | negative_samples:
                 writer = writers[sample]
                 sample_idxs = possible_samples[sample]
                 for variant in passing_variants:
                     writer.write(variant.subset_samples(sample_idxs))
+
+        logging.info("Considered %d regions, identified %d positive and %d negative sample-regions, wrote %d total variants", _regions_count, positive_regions, negative_regions, total_variants)
+
     finally:
         # Close all writers and reader
         reader.close()

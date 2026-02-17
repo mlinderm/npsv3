@@ -64,6 +64,12 @@ class Graph : public handlegraph::HandleGraph {
   bool is_empty(const handlegraph::path_handle_t& path_handle) const { return graph_.is_empty(path_handle); }
   void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }
 
+  handlegraph::step_handle_t get_previous_step(const handlegraph::step_handle_t& step_handle) const { return graph_.get_previous_step(step_handle); }
+
+  odgi::graph_t::path_metadata_t& get_path_metadata(const handlegraph::path_handle_t& path) { return graph_.get_path_metadata(path); }
+
+  void destroy_step(const handlegraph::step_handle_t& step_handle) { return graph_.destroy_step(step_handle); }
+
  protected:
   bool follow_edges_impl(const handlegraph::handle_t& handle, bool go_left, const std::function<bool(const handlegraph::handle_t&)>& iteratee) const override {
     return graph_.follow_edges(handle, go_left, iteratee);
