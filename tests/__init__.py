@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 import os
+from typing import Tuple
 
 from omegaconf import OmegaConf
 
@@ -10,7 +11,7 @@ from npsv3.util.config import setup_resolvers
 RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
 EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
 
-def _first_existing(*paths):
+def _first_existing(*paths: str) -> str|None:
     for path in paths:
         if os.path.exists(path):
             return path

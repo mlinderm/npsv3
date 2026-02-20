@@ -16,7 +16,7 @@ def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
     """Create and return path to bgzip-compressed VCF file at tmp_path/name containing vcf"""
     vcf_path = os.path.join(tmp_path, name)
     assert vcf_path.endswith(".vcf.gz"), "VCF path must end with .vcf.gz"
-    with pysam.BGZFile(vcf_path, "wb") as vcf_file:
+    with pysam.BGZFile(vcf_path, "wb", index=None) as vcf_file:
         vcf_file.write(vcf)
     index_variant_file(vcf_path)
     return vcf_path
@@ -25,7 +25,7 @@ def _sample_vcf_paths(output_dir: str|pathlib.Path, ext: str = ".vcf.gz") -> dic
     """ Return mapping from samples to path for all VCF files in output_dir with extension ext."""
     return {file.name.removesuffix(ext): str(file) for file in pathlib.Path(output_dir).glob(f"*{ext}")}
 
-@pytest.mark.skipif(not os.path.exists(HG38_REF_FASTA), reason="HG38 reference fasta not found")
+@pytest.mark.skipif(HG38_REF_FASTA is None, reason="HG38 reference fasta not found")
 @pytest.mark.cfg_overrides(f"reference={HG38_REF_FASTA}")
 class TestMakeTrainingVCFsFromPopulation:
     def test_update_filter(self, tmp_path, cfg):

@@ -30,7 +30,7 @@ def update_filter(cfg: DictConfig, vcf_path: str, output_path: str):
         dst_vcf_file.close()
 
 
-def overlapping_variants(vcf_file: VariantFileReader|str, region=Range|None, flank=0):
+def overlapping_variants(vcf_file: VariantFileReader|str, region: Range|None = None, flank=0):
     """Yield separated (non-overlapping) regions and corresponding variants
 
     Args:
@@ -101,8 +101,9 @@ def split_and_filter_vcf(
         positive_regions = 0
         negative_regions = 0
         total_variants = 0
+        regions_count = 0
 
-        for _regions_count, (variants_region, variants) in tqdm(enumerate(overlapping_variants(reader, region=region, flank=cfg.pileup.variant_padding), start=1), disable=not progress_bar):
+        for regions_count, (variants_region, variants) in tqdm(enumerate(overlapping_variants(reader, region=region, flank=cfg.pileup.variant_padding), start=1), disable=not progress_bar):
             passing_variants = [v for v in variants if not v.is_filtered()]
             if len(passing_variants) == 0:
                 continue  # Skip regions with no unfiltered variants
@@ -156,7 +157,7 @@ def split_and_filter_vcf(
                 for variant in passing_variants:
                     writer.write(variant.subset_samples(sample_idxs))
 
-        logging.info("Considered %d regions, identified %d positive and %d negative sample-regions, wrote %d total variants", _regions_count, positive_regions, negative_regions, total_variants)
+        logging.info("Considered %d regions, identified %d positive and %d negative sample-regions, wrote %d total variants", regions_count, positive_regions, negative_regions, total_variants)
 
     finally:
         # Close all writers and reader

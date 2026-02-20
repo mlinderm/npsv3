@@ -2,6 +2,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -78,7 +79,7 @@ NB_MODULE(_native_graph, m) {
     .def("fetch", [](npsv3::VariantFileReader& reader) {
       reader.SetRegion();
       return VariantFileReaderIterator(reader);
-    }, nb::keep_alive<0, 1>()) // Keep reader alive while variant is alive
+    }, nb::keep_alive<0, 1>()) // Keep reader alive while iterator is alive
     .def("fetch", [](npsv3::VariantFileReader& reader, const std::optional<npsv3::Range>& region) {
       if (region) {
         reader.SetRegion(*region);
@@ -86,7 +87,7 @@ NB_MODULE(_native_graph, m) {
         reader.SetRegion();
       }
       return VariantFileReaderIterator(reader);
-    }, nb::keep_alive<0, 1>(), "region"_a = nb::none()) // Keep reader alive while variant is alive
+    }, nb::keep_alive<0, 1>(), "region"_a = nb::none()) // Keep reader alive while iterator is alive
     .def("samples", &npsv3::VariantFileReader::Samples)
     .def("header", &npsv3::VariantFileReader::header)
     .def("close", &npsv3::VariantFileReader::Close);
@@ -108,5 +109,30 @@ NB_MODULE(_native_graph, m) {
     .def("samples_including", &npsv3::Graph::SamplesIncluding)
     .def("dump", [](npsv3::Graph& graph) {
       graph.ToGFA(std::cout);
-    });
+    })
+    .def("unique_kmers", [](const npsv3::Graph& graph, size_t k, size_t max_edge) {
+      // Returns list of (sequence, node_ids, offset) tuples for graph-unique k-mers
+      std::vector<std::tuple<std::string, std::vector<odgi::nid_t>, uint64_t>> result;
+      graph.UniqueKmers(k, max_edge, [&](const std::string& seq,
+                                          const std::vector<handlegraph::handle_t>& handles,
+                                          uint64_t offset) {
+        std::vector<odgi::nid_t> node_ids;
+        node_ids.reserve(handles.size());
+        for (const auto& h : handles) {
+          node_ids.push_back(graph.get_id(h));
+        }
+        result.emplace_back(seq, std::move(node_ids), offset);
+      });
+      return result;
+    }, "k"_a, "max_edge"_a)
+    .def("path_sequence", [](const npsv3::Graph& graph, const npsv3::Graph::NodeIdSeq& nodes) {
+      // Returns concatenated sequence of the given node IDs (null '*' nodes are skipped).
+      // Converts node IDs to handles before calling PathSequence.
+      npsv3::Graph::HandleSeq handles;
+      handles.reserve(nodes.size());
+      for (const auto& nid : nodes) {
+        handles.push_back(graph.get_handle(nid));
+      }
+      return graph.PathSequence(handles.begin(), handles.end());
+    }, "nodes"_a);
 }

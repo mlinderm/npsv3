@@ -172,10 +172,19 @@ target_link_libraries(_native_graph
   PRIVATE
   graph
 )
+nanobind_add_stub(
+  _native_graph_stub
+  MODULE _native_graph
+  OUTPUT _native_graph.pyi
+  MARKER_FILE py.typed
+  PYTHON_PATH $<TARGET_FILE_DIR:_native_graph>
+  DEPENDS _native_graph
+)
 
 # Install directive for scikit-build-core, including installing additional scripts 
 # (in place of using setup.py scripts)
 install(TARGETS _native_realign LIBRARY DESTINATION npsv3)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/_native_graph.pyi ${CMAKE_CURRENT_BINARY_DIR}/py.typed DESTINATION npsv3)
 install(TARGETS _native_graph LIBRARY DESTINATION npsv3)
 install(PROGRAMS scripts/synthBAM DESTINATION ${SKBUILD_SCRIPTS_DIR})
 

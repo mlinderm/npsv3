@@ -702,6 +702,52 @@ void KmersDFS(
   });
 }
 
+// Map from node_id to the [start, end) range within that node covered by a k-mer.
+using NodeCoverageMap = std::unordered_map<odgi::nid_t, std::pair<size_t, size_t>>;
+
+// Compute the coverage of a k-mer within each node of its handle path.
+// Returns a map from node_id to the half-open [start, end) range within that node.
+// Null nodes (empty sequence) are skipped and do not appear in the map.
+NodeCoverageMap ComputeKmerCoverage(const handlegraph::HandleGraph& graph,
+                                     const std::vector<handlegraph::handle_t>& handles,
+                                     uint64_t start_offset, size_t k) {
+  NodeCoverageMap coverage;
+  size_t remaining = k;
+  for (size_t i = 0; i < handles.size() && remaining > 0; ++i) {
+    auto seq = graph.get_sequence(handles[i]);
+    if (seq.empty()) continue;  // null node — contributes no sequence
+    size_t L = seq.size();
+    size_t node_start = (i == 0) ? static_cast<size_t>(start_offset) : 0;
+    if (node_start >= L) break;  // safety guard
+    size_t covered = std::min(remaining, L - node_start);
+    if (covered > 0) {
+      coverage[graph.get_id(handles[i])] = {node_start, node_start + covered};
+      remaining -= covered;
+    }
+  }
+  return coverage;
+}
+
+// Intersect `current` with `other` in-place, retaining only nodes whose coverage
+// ranges overlap.  Ranges are updated to their intersection.
+void IntersectCoverage(NodeCoverageMap& current, const NodeCoverageMap& other) {
+  for (auto it = current.begin(); it != current.end(); ) {
+    auto jt = other.find(it->first);
+    if (jt == other.end()) {
+      it = current.erase(it);
+    } else {
+      size_t new_start = std::max(it->second.first, jt->second.first);
+      size_t new_end   = std::min(it->second.second, jt->second.second);
+      if (new_start >= new_end) {
+        it = current.erase(it);
+      } else {
+        it->second = {new_start, new_end};
+        ++it;
+      }
+    }
+  }
+}
+
 } // namespace
 
 void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
@@ -725,6 +771,40 @@ void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std:
 
     return true; // continue for_each_handle
   }, false /* parallel */);
+}
+
+void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
+  // A k-mer is graph-unique if all occurrences of its sequence share a non-empty
+  // coverage intersection of at least one node — i.e., every occurrence traverses
+  // the same portion of some common node, even if occurrences start or end at
+  // different nodes (e.g., when multiple predecessor paths converge into a shared node).
+  struct Entry {
+    std::vector<handlegraph::handle_t> first_handles;
+    uint64_t first_offset;
+    NodeCoverageMap coverage;  // running intersection across all occurrences seen so far
+  };
+  std::unordered_map<std::string, Entry> seen;
+  std::unordered_set<std::string> non_unique;
+
+  Kmers(k, edge_max, [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+    if (non_unique.count(seq)) return;
+
+    auto curr_coverage = ComputeKmerCoverage(*this, handles, offset, k);
+    auto it = seen.find(seq);
+    if (it == seen.end()) {
+      seen.emplace(seq, Entry{handles, offset, std::move(curr_coverage)});
+    } else {
+      IntersectCoverage(it->second.coverage, curr_coverage);
+      if (it->second.coverage.empty()) {
+        non_unique.insert(seq);
+        seen.erase(it);
+      }
+    }
+  });
+
+  for (const auto& [seq, entry] : seen) {
+    callback(seq, entry.first_handles, entry.first_offset);
+  }
 }
 
 void AllPathGraphOverlay::ForEachPath(const function<void(const CallbackIter&, const CallbackIter&, const Graph::PathIdSet&)>& callback) const { 
@@ -982,10 +1062,11 @@ void HaplotypeAddSteps::Undo(Haplotype& haplotype) const {
 }
 
 HaplotypeAddSegment::HaplotypeAddSegment(const Haplotype& haplotype)
-    : current_segment_handle_(haplotype.current_segment_handle_) {}
+    : current_segment_(haplotype.curr_segment_), current_segment_handle_(haplotype.current_segment_handle_) {}
 
 void HaplotypeAddSegment::Undo(Haplotype& haplotype) const {
   haplotype.graph_.destroy_path(haplotype.current_segment_handle_);
+  haplotype.curr_segment_ = current_segment_;
   haplotype.current_segment_handle_ = current_segment_handle_;
 }
 
