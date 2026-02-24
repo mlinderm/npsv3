@@ -703,41 +703,61 @@ void KmersDFS(
 }
 
 // Map from node_id to the [start, end) range within that node covered by a k-mer.
-using NodeCoverageMap = std::unordered_map<odgi::nid_t, std::pair<size_t, size_t>>;
+using NodeCoverageMap = std::unordered_map<handlegraph::handle_t, std::pair<size_t, size_t>>;
 
-// Compute the coverage of a k-mer within each node of its handle path.
-// Returns a map from node_id to the half-open [start, end) range within that node.
-// Null nodes (empty sequence) are skipped and do not appear in the map.
+/**
+ * @brief Compute the coverage of a k-mer within each node of its handle path.
+ *
+ * @param graph The graph to query for node sequences.
+ * @param handles The handle path of the k-mer occurrence, in order.
+ * @param start_offset The offset within the first handle where the k-mer starts.
+ * @param k The length of the k-mer.
+ *
+ * @return A map from handle to the half-open [start, end) range within that node covered by the k-mer. Zero-length
+ * (deletion) nodes are included with the sentinel value {0, 0}.
+ */
 NodeCoverageMap ComputeKmerCoverage(const handlegraph::HandleGraph& graph,
                                      const std::vector<handlegraph::handle_t>& handles,
                                      uint64_t start_offset, size_t k) {
   NodeCoverageMap coverage;
-  size_t remaining = k;
-  for (size_t i = 0; i < handles.size() && remaining > 0; ++i) {
+  for (size_t i = 0, remaining = k; i < handles.size() && remaining > 0; ++i) {
     auto seq = graph.get_sequence(handles[i]);
-    if (seq.empty()) continue;  // null node — contributes no sequence
-    size_t L = seq.size();
+    size_t seq_length = seq.size();
+    if (seq_length == 0) {
+      // Deletion node: Record traversal with sentinel {0,0} so it participates
+      // in the common-intersection check across occurrences.
+      coverage[handles[i]] = {0, 0};
+      continue;
+    }
     size_t node_start = (i == 0) ? static_cast<size_t>(start_offset) : 0;
-    if (node_start >= L) break;  // safety guard
-    size_t covered = std::min(remaining, L - node_start);
+    assert(node_start < seq_length); // node_start should always be within the node sequence
+    size_t covered = std::min(remaining, seq_length - node_start);
     if (covered > 0) {
-      coverage[graph.get_id(handles[i])] = {node_start, node_start + covered};
+      coverage[handles[i]] = {node_start, node_start + covered};
       remaining -= covered;
     }
   }
   return coverage;
 }
 
-// Intersect `current` with `other` in-place, retaining only nodes whose coverage
-// ranges overlap.  Ranges are updated to their intersection.
+
+/**
+ * @brief Intersect k-mer coverage maps in place
+ */
 void IntersectCoverage(NodeCoverageMap& current, const NodeCoverageMap& other) {
-  for (auto it = current.begin(); it != current.end(); ) {
+  for (auto it = current.begin(); it != current.end();) {
     auto jt = other.find(it->first);
     if (jt == other.end()) {
       it = current.erase(it);
+    } else if (it->second == NodeCoverageMap::mapped_type({0, 0}) &&
+               jt->second == NodeCoverageMap::mapped_type({0, 0})) {
+      // Both occurrences traversed the same deletion node
+      ++it;
     } else {
-      size_t new_start = std::max(it->second.first, jt->second.first);
-      size_t new_end   = std::min(it->second.second, jt->second.second);
+      const auto& [start1, end1] = it->second;
+      const auto& [start2, end2] = jt->second;
+      size_t new_start = std::max(start1, start2);
+      size_t new_end = std::min(end1, end2);
       if (new_start >= new_end) {
         it = current.erase(it);
       } else {
@@ -774,14 +794,10 @@ void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std:
 }
 
 void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
-  // A k-mer is graph-unique if all occurrences of its sequence share a non-empty
-  // coverage intersection of at least one node — i.e., every occurrence traverses
-  // the same portion of some common node, even if occurrences start or end at
-  // different nodes (e.g., when multiple predecessor paths converge into a shared node).
   struct Entry {
-    std::vector<handlegraph::handle_t> first_handles;
-    uint64_t first_offset;
-    NodeCoverageMap coverage;  // running intersection across all occurrences seen so far
+    std::vector<handlegraph::handle_t> handles_;
+    uint64_t starting_handle_offset_;
+    NodeCoverageMap coverage_;  // running intersection across all occurrences seen so far
   };
   std::unordered_map<std::string, Entry> seen;
   std::unordered_set<std::string> non_unique;
@@ -794,8 +810,9 @@ void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(cons
     if (it == seen.end()) {
       seen.emplace(seq, Entry{handles, offset, std::move(curr_coverage)});
     } else {
-      IntersectCoverage(it->second.coverage, curr_coverage);
-      if (it->second.coverage.empty()) {
+      auto & [seq, entry] = *it;
+      IntersectCoverage(entry.coverage_, curr_coverage);
+      if (entry.coverage_.empty()) {
         non_unique.insert(seq);
         seen.erase(it);
       }
@@ -803,7 +820,7 @@ void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(cons
   });
 
   for (const auto& [seq, entry] : seen) {
-    callback(seq, entry.first_handles, entry.first_offset);
+    callback(seq, entry.handles_, entry.starting_handle_offset_);
   }
 }
 
