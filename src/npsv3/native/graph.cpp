@@ -793,7 +793,7 @@ void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std:
   }, false /* parallel */);
 }
 
-void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
+void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, bool exclude_universal) const {
   struct Entry {
     std::vector<handlegraph::handle_t> handles_;
     uint64_t starting_handle_offset_;
@@ -820,6 +820,17 @@ void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(cons
   });
 
   for (const auto& [seq, entry] : seen) {
+    if (exclude_universal) {
+      // A k-mer is "universal" if all nodes uniquely covered by this k-mer are not part of any variants and thus must
+      // appear on any traversal of the graph.
+      bool is_universal = std::all_of(entry.coverage_.begin(), entry.coverage_.end(),
+        [&](const auto& kv) {
+          auto node_id = get_id(kv.first);
+          assert(node_id < node_variant_paths_.size());
+          return node_variant_paths_[node_id].none();
+        });
+      if (is_universal) continue;
+    }
     callback(seq, entry.handles_, entry.starting_handle_offset_);
   }
 }

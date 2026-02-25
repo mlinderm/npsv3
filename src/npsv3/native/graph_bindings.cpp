@@ -110,21 +110,6 @@ NB_MODULE(_native_graph, m) {
     .def("dump", [](npsv3::Graph& graph) {
       graph.ToGFA(std::cout);
     })
-    .def("unique_kmers", [](const npsv3::Graph& graph, size_t k, size_t max_edge) {
-      // Returns list of (sequence, node_ids, offset) tuples for graph-unique k-mers
-      std::vector<std::tuple<std::string, std::vector<odgi::nid_t>, uint64_t>> result;
-      graph.UniqueKmers(k, max_edge, [&](const std::string& seq,
-                                          const std::vector<handlegraph::handle_t>& handles,
-                                          uint64_t offset) {
-        std::vector<odgi::nid_t> node_ids;
-        node_ids.reserve(handles.size());
-        for (const auto& h : handles) {
-          node_ids.push_back(graph.get_id(h));
-        }
-        result.emplace_back(seq, std::move(node_ids), offset);
-      });
-      return result;
-    }, "k"_a, "max_edge"_a)
     .def("path_sequence", [](const npsv3::Graph& graph, const npsv3::Graph::NodeIdSeq& nodes) {
       // Returns concatenated sequence of the given node IDs (null '*' nodes are skipped).
       // Converts node IDs to handles before calling PathSequence.

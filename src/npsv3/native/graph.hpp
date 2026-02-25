@@ -124,14 +124,15 @@ class Graph : public handlegraph::HandleGraph {
    * @brief Generate kmers that appear at exactly one position in the graph (graph-unique kmers),
    *        invoking callback for each with its handles and offset information.
    *
-   *        A kmer is graph-unique if its sequence appears at only one (first_node, offset) position,
+   *        A kmer is graph-unique if its sequence appears at only one (handle, offset) position,
    *        even if that position is traversed by multiple haplotype paths.
    *
    * @param k Length of kmers to generate
    * @param max_edge Maximum number of edges to traverse when generating kmers
    * @param callback Callback function for each unique kmer
+   * @param exclude_universal If true, suppress kmers that appear in every haplotype path
    */
-  void UniqueKmers(size_t k, size_t max_edge, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const;
+  void UniqueKmers(size_t k, size_t max_edge, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, bool exclude_universal=false) const;
 
   void ToGFA(std::ostream&);
 

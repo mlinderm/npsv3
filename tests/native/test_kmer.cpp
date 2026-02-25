@@ -167,4 +167,36 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
       << "Expected TAAAATA to be included in UniqueKmers";
 }
 
+TEST_F(GraphConstructionTest, UniqueKmersExcludeUniversal) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
+  const size_t k = 7, max_edge = 5;
+
+  std::unordered_set<std::string> all_unique, non_universal;
+  graph.UniqueKmers(k, max_edge, [&](const std::string& seq, const std::vector<handlegraph::handle_t>&, uint64_t) {
+    all_unique.insert(seq);
+  });
+  graph.UniqueKmers(k, max_edge, [&](const std::string& seq, const std::vector<handlegraph::handle_t>&, uint64_t) {
+    non_universal.insert(seq);
+  }, true /* exclude universal k-mers */);
+
+  // The filtered set must be a strict subset of the unfiltered set.
+  ASSERT_LT(non_universal.size(), all_unique.size()) << "exclude_universal should remove at least one k-mer";
+  for (const auto& seq : non_universal) {
+    EXPECT_GT(all_unique.count(seq), 0u) << "k-mer '" << seq << "' in non_universal but not in all_unique";
+  }
+
+  // "TAAAATA" is exclusively on the REF allele node — it must survive the filter.
+  EXPECT_GT(non_universal.count("TAAAATA"), 0u) << "TAAAATA (REF-allele-only) should be retained";
+
+  // "GATTCTA" appears in both haplotypes and thus is universal in this context
+  EXPECT_EQ(non_universal.count("GATTCTA"), 0u) << "GATTCTA (backbone-only coverage) should be excluded";
+}
