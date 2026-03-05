@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
 
 #include "test_helpers.hpp"
 #include "graph.hpp"
@@ -200,3 +201,79 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   // "GATTCTA" appears in both haplotypes and thus is universal in this context
   EXPECT_EQ(non_universal.count("GATTCTA"), 0u) << "GATTCTA (backbone-only coverage) should be excluded";
 }
+
+// TEST_F(GraphConstructionTest, HaplotypeSamplerSelectsBestAllele) {
+//   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+// ##FILTER=<ID=PASS,Description="All filters passed">
+// ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+// ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+// #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+// chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+// )VCF");
+
+//   auto region = Range("chr1", 52277181, 52277219);
+//   Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+//   const size_t k = 7, max_edge = 5;
+
+//   // "TAAAATA" is exclusively on the REF allele node (verified by UniqueKmersExcludeUniversal).
+//   // Record the anchor node of that k-mer so we can check path membership.
+//   odgi::nid_t ref_anchor = 0;
+//   graph.UniqueKmers(k, max_edge,
+//     [&](const std::string& seq,
+//         const std::vector<handlegraph::handle_t>& handles,
+//         uint64_t) {
+//       if (seq == "TAAAATA") ref_anchor = graph.get_id(handles[0]);
+//     });
+//   ASSERT_NE(ref_anchor, 0u) << "REF-specific k-mer TAAAATA not found";
+
+//   // ── Test 1: HOMOZYGOUS for the REF-specific k-mer → sampler must choose REF ──
+//   {
+//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
+//       [](const std::string& seq) {
+//         if (seq == "TAAAATA") return KmerZygosity::HOMOZYGOUS;
+//         return KmerZygosity::ABSENT;
+//       });
+
+//     auto haplotypes = sampler.SampleHaplotypes(1);
+//     ASSERT_EQ(haplotypes.size(), 1u);
+//     EXPECT_NE(std::find(haplotypes[0].begin(), haplotypes[0].end(), ref_anchor),
+//               haplotypes[0].end())
+//         << "REF-favoring sampler should traverse the REF allele node";
+//   }
+
+//   // ── Test 2: ABSENT for every k-mer (0 penalty) → sampler still returns a path ──
+//   {
+//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
+//       [](const std::string&) { return KmerZygosity::ABSENT; });
+
+//     auto haplotypes = sampler.SampleHaplotypes(2);
+//     EXPECT_EQ(haplotypes.size(), 2u) << "Sampler should return exactly n paths";
+//   }
+
+//   // ── Test 3: discount=0 zeroes the k-mer after first selection ──
+//   // With only one distinguishing HOMOZYGOUS k-mer (TAAAATA) and all others ABSENT at 0,
+//   // the first path scores positively for REF.  After discount the k-mer becomes 0 and
+//   // both paths are equally scored, so both calls return the same REF path — that is the
+//   // expected behaviour (there is no signal to steer the second path elsewhere).
+//   {
+//     HaplotypeSamplerOverlay::Params params;
+//     params.homozygous_discount = 0.0; // score goes to 0 after first selection
+
+//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
+//       [](const std::string& seq) {
+//         if (seq == "TAAAATA") return KmerZygosity::HOMOZYGOUS;
+//         return KmerZygosity::ABSENT;
+//       }, params);
+
+//     auto haplotypes = sampler.SampleHaplotypes(2);
+//     ASSERT_EQ(haplotypes.size(), 2u);
+//     // First path must include the REF allele node
+//     EXPECT_NE(std::find(haplotypes[0].begin(), haplotypes[0].end(), ref_anchor),
+//               haplotypes[0].end())
+//         << "First haplotype should traverse REF allele node";
+//     // Both paths are non-empty (sampler always returns a complete path)
+//     EXPECT_FALSE(haplotypes[0].empty());
+//     EXPECT_FALSE(haplotypes[1].empty());
+//   }
+// }

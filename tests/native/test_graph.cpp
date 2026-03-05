@@ -485,3 +485,62 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0|1	.)VCF");
     Graph graph(HG38FastaPath_, vcf.file_path_, region);
   });
 };
+
+TEST_F(GraphConstructionTest, HaplotypeSamplerGreedilySelectsConsensusPath) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  const size_t k = 7, max_edge = 5;
+  HaplotypeSamplerOverlay sampler(graph, k, max_edge);
+
+  EXPECT_GT(sampler.NumKmers(), 0u);
+
+  EXPECT_TRUE(sampler.HasNodeKmers()) << "Graph has 18bp deletion, so should have some node k-mers";
+  EXPECT_TRUE(sampler.HasShadowEdges()) << "Graph should have shadow edges crossing the breakpoints";
+
+  auto best_path = sampler.FindBestPath();
+
+  // Path must span the whole graph.
+  ASSERT_FALSE(best_path.empty());
+  EXPECT_EQ(best_path.front(), graph.min_node_id());
+  EXPECT_EQ(best_path.back(),  graph.max_node_id());
+
+  // Node IDs are in topological (= ascending) order.
+  EXPECT_TRUE(std::is_sorted(best_path.begin(), best_path.end()));
+
+  // With all k-mers scored as HOMOZYGOUS, the path that maximizes k-mer coverage is the one traversing the 18 bp
+  // deletion sequence, i.e., the reference path.
+  EXPECT_EQ(best_path, graph.PathNodes("chr1"));
+};
+
+TEST_F(GraphConstructionTest, SampleHaplotypesFirstPathMatchesFindBestPath) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  const size_t k = 7, max_edge = 5;
+  HaplotypeSamplerOverlay sampler(graph, k, max_edge);
+
+  // FindBestPath and SampleHaplotypes(1)[0] must agree (scores are unchanged before
+  // the first UpdateScores call, so both reflect the same initial state).
+  auto best_path = sampler.FindBestPath();
+  auto paths = sampler.SampleHaplotypes(1);
+
+  ASSERT_EQ(paths.size(), 1u);
+  EXPECT_EQ(paths[0], best_path);
+}

@@ -5,6 +5,8 @@
 #include <algorithms/kmer.hpp>
 #include <vector>
 #include <iosfwd>
+#include <functional>
+#include <unordered_map>
 #include <boost/dynamic_bitset.hpp>
 
 #include "range.hpp"
@@ -17,6 +19,7 @@ class Haplotype;
 }  // namespace detail
 
 class AllPathGraphOverlay;
+class HaplotypeSamplerOverlay;
 
 class Graph : public handlegraph::HandleGraph {
  public:
@@ -204,6 +207,72 @@ class AllPathGraphOverlay {
   void ForEachPath(CallbackSeq& current_path, const CallbackFunction& callback) const;
 };
 
+
+/// Zygosity classification for a k-mer in a sequencing sample
+enum class KmerZygosity { ABSENT, HETEROZYGOUS, HOMOZYGOUS };
+
+/// Callback type: given a k-mer sequence, return its zygosity
+using KmerZygosityFn = std::function<KmerZygosity(const std::string&)>;
+
+/**
+ * @brief Overlay that greedily samples up to n haplotypes from the graph using
+ *        graph-unique k-mer zygosity scores (Sirén et al. approach).
+ */
+class HaplotypeSamplerOverlay {
+ public:
+  struct Params {
+    double homozygous_score = 1.0; ///< Initial score for HOMOZYGOUS k-mers
+    double absent_score = -0.8; ///< Initial score for ABSENT k-mers
+    double heterozygous_score = 0.0; ///< Initial score for HETEROZYGOUS k-mers
+    double homozygous_discount = 0.9; ///< After selection: HOMOZYGOUS score *= this
+    double het_adjustment = 0.05; ///< After selection: decrement HETEROZYGOUS score by this if on path, increment if not on path
+  };
+
+  /**
+   * @param graph       The variant graph (node IDs must be in topological order)
+   * @param k           K-mer length
+   * @param max_edge    Maximum edges traversed per k-mer
+   * @param params      Scoring parameters
+   */
+  HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge);
+  HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge, Params params);
+
+  /// Greedily select up to n haplotypes; returns one NodeIdSeq per haplotype.
+  std::vector<Graph::NodeIdSeq> SampleHaplotypes(size_t n);
+
+  /// Return the highest-scoring path through the graph using the current k-mer scores.
+  Graph::NodeIdSeq FindBestPath() const;
+
+  /// Number of unique non-universal k-mers collected during construction.
+  size_t NumKmers() const { return kmers_.size(); }
+
+  /// True if any k-mers are entirely within a single node.
+  bool HasNodeKmers() const { return !node_kmers_.empty(); }
+
+  /// True if any k-mers span multiple nodes (recorded as shadow edges).
+  bool HasShadowEdges() const { return !shadow_edges_.empty(); }
+
+ private:
+  struct KmerInfo {
+    std::string sequence;
+    KmerZygosity zygosity;
+    double score;
+  };
+
+  struct ShadowEdge {
+    std::vector<odgi::nid_t> nodes;  ///< [h1 ... h_{n}]
+    std::vector<size_t> kmer_indices; ///< All k-mer indices credited on traversal (e.g., intermediate nodes)
+  };
+
+  const Graph& graph_;
+  Params params_;
+
+  std::vector<KmerInfo> kmers_;
+  std::unordered_map<odgi::nid_t, std::vector<size_t>> node_kmers_; ///< nid to k-mer indices
+  std::unordered_map<odgi::nid_t, std::vector<ShadowEdge>> shadow_edges_;  ///< to-nid to shadow edges
+  
+  void UpdateScores(const Graph::NodeIdSeq& path);
+};
 
 namespace detail {
 template <typename Sequence1, typename Sequence2>

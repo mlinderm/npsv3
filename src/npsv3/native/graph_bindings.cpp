@@ -119,5 +119,45 @@ NB_MODULE(_native_graph, m) {
         handles.push_back(graph.get_handle(nid));
       }
       return graph.PathSequence(handles.begin(), handles.end());
-    }, "nodes"_a);
+    }, "nodes"_a)
+    .def("unique_kmers",
+      [](const npsv3::Graph& graph, size_t k, size_t max_edge, bool exclude_universal) {
+        std::vector<std::tuple<std::string, std::vector<odgi::nid_t>, uint64_t>> result;
+        graph.UniqueKmers(k, max_edge,
+          [&](const std::string& seq,
+              const std::vector<handlegraph::handle_t>& handles,
+              uint64_t offset) {
+            std::vector<odgi::nid_t> node_ids;
+            node_ids.reserve(handles.size());
+            for (const auto& h : handles)
+              node_ids.push_back(graph.get_id(h));
+            result.emplace_back(seq, std::move(node_ids), offset);
+          }, exclude_universal);
+        return result;
+      },
+      "k"_a, "max_edge"_a, "exclude_universal"_a = false);
+
+  nb::enum_<npsv3::KmerZygosity>(m, "KmerZygosity")
+    .value("ABSENT",       npsv3::KmerZygosity::ABSENT)
+    .value("HETEROZYGOUS", npsv3::KmerZygosity::HETEROZYGOUS)
+    .value("HOMOZYGOUS",   npsv3::KmerZygosity::HOMOZYGOUS);
+
+  nb::class_<npsv3::HaplotypeSamplerOverlay>(m, "HaplotypeSamplerOverlay")
+    .def("__init__",
+      [](npsv3::HaplotypeSamplerOverlay* self,
+         const npsv3::Graph& graph,
+         size_t k,
+         size_t max_edge,
+         nb::callable get_zygosity) {
+           new (self) npsv3::HaplotypeSamplerOverlay(
+             graph, k, max_edge,
+             [get_zygosity](const std::string& seq) {
+               return nb::cast<npsv3::KmerZygosity>(get_zygosity(seq));
+             });
+         },
+      "graph"_a, "k"_a, "max_edge"_a, "get_zygosity"_a,
+      nb::keep_alive<1, 2>())
+    .def("sample_haplotypes",
+      &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes,
+      "n"_a);
 }
