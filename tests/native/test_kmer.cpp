@@ -1,3 +1,4 @@
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 #include <odgi.hpp>
 #include <algorithms/kmer.hpp>
@@ -5,12 +6,17 @@
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 #include "test_helpers.hpp"
 #include "graph.hpp"
+#include "kmer.hpp"
 
 using namespace npsv3;
 using npsv3::test::GraphConstructionTest;
+namespace fs = std::filesystem;
 
 TEST_F(GraphConstructionTest, KmersFromSimpleDeletionSV) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
@@ -23,7 +29,6 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
 
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
-  graph.ToGFA(std::cout);
   
   std::unordered_map<std::string, int> kmer_counts;
   std::vector<std::tuple<std::string, std::vector<handlegraph::handle_t>, uint64_t>> all_kmers;
@@ -202,78 +207,127 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   EXPECT_EQ(non_universal.count("GATTCTA"), 0u) << "GATTCTA (backbone-only coverage) should be excluded";
 }
 
-// TEST_F(GraphConstructionTest, HaplotypeSamplerSelectsBestAllele) {
-//   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
-// ##FILTER=<ID=PASS,Description="All filters passed">
-// ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-// ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-// #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
-// chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
-// )VCF");
 
-//   auto region = Range("chr1", 52277181, 52277219);
-//   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
-//   const size_t k = 7, max_edge = 5;
+// Helper: write a FASTA file and run kmc to produce a KMC database.
+// Returns the database path prefix (without extension) or "" if kmc is absent.
+static std::string BuildKmcDatabase(const fs::path& dir,
+                                    const std::string& fasta_contents,
+                                    int k, int min_count = 1) {
+  const fs::path fasta = dir / "seqs.fa";
+  const fs::path db_prefix = dir / "kmers";
+  const fs::path tmp_dir = dir / "kmc_tmp";
+  fs::create_directories(tmp_dir);
 
-//   // "TAAAATA" is exclusively on the REF allele node (verified by UniqueKmersExcludeUniversal).
-//   // Record the anchor node of that k-mer so we can check path membership.
-//   odgi::nid_t ref_anchor = 0;
-//   graph.UniqueKmers(k, max_edge,
-//     [&](const std::string& seq,
-//         const std::vector<handlegraph::handle_t>& handles,
-//         uint64_t) {
-//       if (seq == "TAAAATA") ref_anchor = graph.get_id(handles[0]);
-//     });
-//   ASSERT_NE(ref_anchor, 0u) << "REF-specific k-mer TAAAATA not found";
+  { std::ofstream f(fasta); f << fasta_contents; }
 
-//   // ── Test 1: HOMOZYGOUS for the REF-specific k-mer → sampler must choose REF ──
-//   {
-//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
-//       [](const std::string& seq) {
-//         if (seq == "TAAAATA") return KmerZygosity::HOMOZYGOUS;
-//         return KmerZygosity::ABSENT;
-//       });
+  std::string cmd = fmt::format(
+      "kmc -k{} -ci{} -fm -cs65535 -b {} {} {} >/dev/null 2>&1",
+      k, min_count, fasta.string(), db_prefix.string(), tmp_dir.string());
+  if (std::system(cmd.c_str()) != 0) {
+    throw std::runtime_error("kmc command failed: " + cmd);
+  }
+  return db_prefix.string();
+}
 
-//     auto haplotypes = sampler.SampleHaplotypes(1);
-//     ASSERT_EQ(haplotypes.size(), 1u);
-//     EXPECT_NE(std::find(haplotypes[0].begin(), haplotypes[0].end(), ref_anchor),
-//               haplotypes[0].end())
-//         << "REF-favoring sampler should traverse the REF allele node";
+class KmerCountsTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (std::system("kmc --version >/dev/null 2>&1") != 0) {
+      GTEST_SKIP() << "kmc binary not available";
+    }
+  }
+  npsv3::test::TempDir dir_;
+};
+
+// Build a small database with known counts and verify ABSENT/HET/HOM classification.
+TEST_F(KmerCountsTest, ClassifiesKnownCounts) {
+  // We want a 7-mer that appears:
+  //   once  → count 1 (ABSENT at 30x with default absent_fraction=0.1 → threshold=3)
+  //   ~15x  → HETEROZYGOUS
+  //   ~30x  → HOMOZYGOUS
+  std::string fasta;
+  fasta += ">absent\nAAAAAAA\n";
+  for (int i = 0; i < 15; ++i) fasta += ">het_" + std::to_string(i) + "\nACGTACG\n";
+  for (int i = 0; i < 30; ++i) fasta += ">hom_" + std::to_string(i) + "\nACGACGA\n";
+
+  const int k = 7;
+  auto db_path = BuildKmcDatabase(dir_.path_, fasta, k, /*min_count=*/1);
+
+  // Provide coverage explicitly so we don't need auto-estimation.
+  npsv3::KmerCounts::Params params;
+  params.coverage = 30.0; // k-mer coverage
+
+  npsv3::KmerCounts counts(db_path, params);
+  EXPECT_DOUBLE_EQ(counts.coverage(), 30.0);
+
+  // AAAAAAA: count=1 < 3 (0.1 * 30) → ABSENT
+  EXPECT_EQ(counts.Classify("AAAAAAA"), npsv3::KmerZygosity::ABSENT);
+  // ACGTACG: count=15 in [3, 21) → HETEROZYGOUS
+  EXPECT_EQ(counts.Classify("ACGTACG"), npsv3::KmerZygosity::HETEROZYGOUS);
+  // ACGACGA: count=30 [21, 75) → HOMOZYGOUS
+  EXPECT_EQ(counts.Classify("ACGACGA"), npsv3::KmerZygosity::HOMOZYGOUS);
+}
+
+// // Querying with the reverse complement of a k-mer should give the same result
+// // as querying the forward strand (canonical k-mer handling).
+// TEST_F(KmerClassifierTest, ReverseComplementGivesSameResult) {
+//   // ACGTACG and its revcomp CGTACGT should both resolve to the same count.
+//   const std::string kmer_fwd = "ACGTACG";
+//   const std::string kmer_rc  = "CGTACGT";  // revcomp of ACGTACG
+
+//   std::string fasta;
+//   for (int i = 0; i < 25; ++i) fasta += ">seq_" + std::to_string(i) + "\n" + kmer_fwd + "\n";
+
+//   const int k = 7;
+//   auto db_path = BuildKmcDatabase(dir_.path_, fasta, k, /*min_count=*/1);
+//   ASSERT_FALSE(db_path.empty()) << "kmc failed to build database";
+
+//   npsv3::CoverageParams params;
+//   params.coverage = 30.0;
+
+//   npsv3::KmerClassifier classifier(db_path, params);
+
+//   // Both orientations should return the same zygosity.
+//   EXPECT_EQ(classifier(kmer_fwd), classifier(kmer_rc))
+//       << "Forward and reverse-complement queries must return the same zygosity";
+// }
+
+// // Auto-estimation test: build a database with a clear homozygous peak at 30x
+// // and verify that EstimateCoverage recovers it.
+// TEST_F(KmerClassifierTest, AutoEstimatesCoverageUnimodal) {
+//   // Create ~200 distinct 8-mers, each appearing exactly 30 times.
+//   // The histogram will be a single spike at count=30, so mode=30 > median → coverage=30.
+//   const int k = 8;
+//   const int target_count = 30;
+//   const int num_distinct = 50;  // 50 distinct 8-mers × 30 occurrences
+
+//   // Use sequences of the form NNNNNNNN where N cycles through ACGT to produce
+//   // distinct k-mers that don't overlap each other when isolated in separate reads.
+//   static const char bases[] = "ACGT";
+//   std::string fasta;
+//   int seq_id = 0;
+//   for (int i = 0; i < num_distinct; ++i) {
+//     // Build an 8-character k-mer that is distinct per i
+//     std::string kmer(k, 'A');
+//     int v = i;
+//     for (int b = k - 1; b >= 0; --b) { kmer[b] = bases[v % 4]; v /= 4; }
+
+//     // Skip k-mers that are palindromes (revcomp == self) since they accumulate
+//     // double counts in canonical mode, which would distort the histogram.
+//     // Simple approach: only use k-mers that start with 'A' (half the space).
+//     if (kmer[0] != 'A') continue;
+
+//     for (int rep = 0; rep < target_count; ++rep) {
+//       fasta += ">s" + std::to_string(seq_id++) + "\n" + kmer + "\n";
+//     }
 //   }
 
-//   // ── Test 2: ABSENT for every k-mer (0 penalty) → sampler still returns a path ──
-//   {
-//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
-//       [](const std::string&) { return KmerZygosity::ABSENT; });
+//   auto db_path = BuildKmcDatabase(dir_.path_, fasta, k, /*min_count=*/2);
+//   ASSERT_FALSE(db_path.empty()) << "kmc failed to build database";
 
-//     auto haplotypes = sampler.SampleHaplotypes(2);
-//     EXPECT_EQ(haplotypes.size(), 2u) << "Sampler should return exactly n paths";
-//   }
-
-//   // ── Test 3: discount=0 zeroes the k-mer after first selection ──
-//   // With only one distinguishing HOMOZYGOUS k-mer (TAAAATA) and all others ABSENT at 0,
-//   // the first path scores positively for REF.  After discount the k-mer becomes 0 and
-//   // both paths are equally scored, so both calls return the same REF path — that is the
-//   // expected behaviour (there is no signal to steer the second path elsewhere).
-//   {
-//     HaplotypeSamplerOverlay::Params params;
-//     params.homozygous_discount = 0.0; // score goes to 0 after first selection
-
-//     HaplotypeSamplerOverlay sampler(graph, k, max_edge,
-//       [](const std::string& seq) {
-//         if (seq == "TAAAATA") return KmerZygosity::HOMOZYGOUS;
-//         return KmerZygosity::ABSENT;
-//       }, params);
-
-//     auto haplotypes = sampler.SampleHaplotypes(2);
-//     ASSERT_EQ(haplotypes.size(), 2u);
-//     // First path must include the REF allele node
-//     EXPECT_NE(std::find(haplotypes[0].begin(), haplotypes[0].end(), ref_anchor),
-//               haplotypes[0].end())
-//         << "First haplotype should traverse REF allele node";
-//     // Both paths are non-empty (sampler always returns a complete path)
-//     EXPECT_FALSE(haplotypes[0].empty());
-//     EXPECT_FALSE(haplotypes[1].empty());
-//   }
+//   // Default params: coverage=0 → auto-estimate
+//   npsv3::KmerClassifier classifier(db_path);
+//   EXPECT_NEAR(classifier.coverage(), static_cast<double>(target_count), 2.0)
+//       << "Auto-estimated coverage should be close to " << target_count;
 // }

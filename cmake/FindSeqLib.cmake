@@ -64,7 +64,7 @@ else()
         BUILD_IN_SOURCE 1
         BUILD_COMMAND make
         INSTALL_COMMAND ""
-        PATCH_COMMAND patch --strip=1 --forward --reject-file=- --directory=${SEQLIB_ROOT} --input=${CMAKE_SOURCE_DIR}/seqlib.patch || true
+        PATCH_COMMAND patch --strip=1 --forward --reject-file=- --directory=${SEQLIB_ROOT} --input=${CMAKE_SOURCE_DIR}/patches/seqlib.patch || true
     )
     ExternalProject_Get_Property(seqlib source_dir binary_dir)
     set(SEQLIB_INCLUDE_DIRS ${source_dir} ${source_dir}/htslib)

@@ -1,0 +1,162 @@
+diff --git a/Makefile b/Makefile
+index d5b9f21..3fafe8b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -69,8 +69,8 @@ else
+ endif
+ 
+ 
+-CFLAGS	= -Wall -O3 -fsigned-char $(CPU_FLAGS) $(STATIC_CFLAGS) -std=c++14
+-CLINK	= -lm $(STATIC_LFLAGS) -O3 -std=c++14
++CFLAGS	= -Wall -O3 -fsigned-char $(CPU_FLAGS) $(STATIC_CFLAGS) -std=c++14 -fPIC
++CLINK	= -lm $(STATIC_LFLAGS) -O3 -std=c++14 -lz
+ PY_KMC_API_CFLAGS = $(PY_FLAGS) -Wall -shared -std=c++14 -O3
+ 
+ KMC_CLI_OBJS = \
+@@ -115,7 +115,7 @@ else
+ endif
+ endif
+ 
+-LIB_ZLIB=3rd_party/cloudflare/libz.a
++
+ LIB_KMC_CORE = $(OUT_BIN_DIR)/libkmc_core.a
+ 
+ 
+@@ -144,11 +144,9 @@ $(KMC_TOOLS_DIR)/fastq_writer.o \
+ $(KMC_TOOLS_DIR)/percent_progress.o \
+ $(KMC_TOOLS_DIR)/kff_info_reader.o
+ 
+-$(LIB_ZLIB):
+-	cd 3rd_party/cloudflare; ./configure; make libz.a
+ 
+ $(KMC_CLI_OBJS) $(KMC_CORE_OBJS) $(KMC_DUMP_OBJS) $(KMC_API_OBJS) $(KFF_OBJS) $(KMC_TOOLS_OBJS): %.o: %.cpp
+-	$(CC) $(CFLAGS) -I 3rd_party/cloudflare -c $< -o $@
++	$(CC) $(CFLAGS) -c $< -o $@
+ 
+ $(KMC_MAIN_DIR)/raduls_sse2.o: $(KMC_MAIN_DIR)/raduls_sse2.cpp
+ 	$(CC) $(CFLAGS) -msse2 -c $< -o $@
+@@ -169,17 +167,17 @@ $(LIB_KMC_CORE): $(KMC_CORE_OBJS) $(RADULS_OBJS) $(KMC_API_OBJS) $(KFF_OBJS)
+ 	-mkdir -p $(OUT_BIN_DIR)
+ 	ar rcs $@ $^
+ 
+-kmc: $(KMC_CLI_OBJS) $(LIB_KMC_CORE) $(LIB_ZLIB)
++kmc: $(KMC_CLI_OBJS) $(LIB_KMC_CORE)
+ 	-mkdir -p $(OUT_BIN_DIR)
+-	$(CC) $(CLINK) -o $(OUT_BIN_DIR)/$@ $^
++	$(CC) -o $(OUT_BIN_DIR)/$@ $^ $(CLINK)
+ 
+ kmc_dump: $(KMC_DUMP_OBJS) $(KMC_API_OBJS)
+ 	-mkdir -p $(OUT_BIN_DIR)
+-	$(CC) $(CLINK) -o $(OUT_BIN_DIR)/$@ $^
++	$(CC) -o $(OUT_BIN_DIR)/$@ $^ $(CLINK)
+ 
+-kmc_tools: $(KMC_TOOLS_OBJS) $(KMC_API_OBJS) $(KFF_OBJS) $(LIB_ZLIB)
++kmc_tools: $(KMC_TOOLS_OBJS) $(KMC_API_OBJS) $(KFF_OBJS)
+ 	-mkdir -p $(OUT_BIN_DIR)
+-	$(CC) $(CLINK) -I 3rd_party/cloudflare -o $(OUT_BIN_DIR)/$@ $^
++	$(CC) -o $(OUT_BIN_DIR)/$@ $^ $(CLINK)
+ 
+ $(PY_KMC_API_DIR)/%.o: $(KMC_API_DIR)/%.cpp
+ 	$(CC) -c -fPIC -Wall -O3 $(CPU_FLAGS) -std=c++14 $^ -o $@
+diff --git a/kmc_CLI/kmc.cpp b/kmc_CLI/kmc.cpp
+index 15e579e..4fd723e 100644
+--- a/kmc_CLI/kmc.cpp
++++ b/kmc_CLI/kmc.cpp
+@@ -5,6 +5,7 @@
+ #include <fstream>
+ #include <algorithm>
+ #include <iomanip>
++#include <random>
+ using namespace std;
+ 
+ struct CLIParams
+@@ -264,7 +265,9 @@ bool parse_parameters(int argc, char* argv[], Params& params)
+ 				input_file_names.push_back(s);
+ 
+ 		in.close();
+-		std::random_shuffle(input_file_names.begin(), input_file_names.end());
++		std::random_device rd;
++		std::mt19937 g(rd()); 
++		std::shuffle(input_file_names.begin(), input_file_names.end(), g);
+ 	}
+ 	stage1Params.SetInputFiles(input_file_names);
+ 
+diff --git a/kmc_core/defs.h b/kmc_core/defs.h
+index 1c511c8..b021e3a 100644
+--- a/kmc_core/defs.h
++++ b/kmc_core/defs.h
+@@ -109,8 +109,8 @@ using uint64 = uint64_t;
+ #include <string.h>
+ 
+ #include <stdio.h>
+-#include <ext/algorithm>
+-using __gnu_cxx::copy_n;
++#include <algorithm>
++
+ 
+ #endif
+ 
+diff --git a/kmc_core/fastq_reader.h b/kmc_core/fastq_reader.h
+index e663afd..e38b61f 100644
+--- a/kmc_core/fastq_reader.h
++++ b/kmc_core/fastq_reader.h
+@@ -15,7 +15,7 @@
+ #include "params.h"
+ #include <stdio.h>
+ 
+-#include "../3rd_party/cloudflare/zlib.h"
++#include <zlib.h>
+ 
+ using namespace std;
+ 
+diff --git a/kmc_core/queues.h b/kmc_core/queues.h
+index be3d959..0ce9649 100644
+--- a/kmc_core/queues.h
++++ b/kmc_core/queues.h
+@@ -26,6 +26,7 @@
+ #include <thread>
+ #include <mutex>
+ #include <algorithm>
++#include <random>
+ 
+ using namespace std;
+ 
+@@ -572,6 +573,8 @@ public:
+ 	void init_random()
+ 	{
+ 		lock_guard<mutex> lck(mtx);
++		std::random_device rd;
++		std::mt19937 g(rd());
+ 		vector<pair<int32, int64>> bin_sizes;
+ 
+ 		for (auto& p : m)
+@@ -590,7 +593,7 @@ public:
+ 		for (uint32 i = no_sort_end; i < bin_sizes.size(); ++i)
+ 			random_bins.push_back(bin_sizes[i].first);
+ 
+-		random_shuffle(random_bins.begin(), random_bins.end());
++		std::shuffle(random_bins.begin(), random_bins.end(), g);
+ 
+ 		for (uint32 i = no_sort_start; i < no_sort_end; ++i)
+ 			random_bins.push_back(bin_sizes[i].first);
+diff --git a/kmc_core/s_mapper.h b/kmc_core/s_mapper.h
+index fde8e0c..386a2c5 100644
+--- a/kmc_core/s_mapper.h
++++ b/kmc_core/s_mapper.h
+@@ -59,6 +59,8 @@ public:
+ 
+ 		my_fseek(file, -12, SEEK_END);
+ 		uint32_t kmc_version;
++		#pragma GCC diagnostic push
++		#pragma GCC diagnostic ignored "-Wunused-result"
+ 		fread(&kmc_version, sizeof(uint32), 1, file);
+ 		if (kmc_version != 0x200)
+ 		{
+@@ -118,6 +120,7 @@ public:
+ 
+ 			m[val].push_back(sig);
+ 		}
++		#pragma GCC diagnostic pop
+ 		uint32 bin_no = 0;
+ 		for(const auto& val : m)
+ 		{

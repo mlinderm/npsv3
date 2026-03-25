@@ -47,6 +47,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 # Set global properties
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra>")
 
 # Optional AddressSanitizer support for Debug builds
 option(ENABLE_ASAN "Enable AddressSanitizer in Debug builds" OFF)
@@ -59,6 +60,7 @@ endif()
 find_package(SeqLib REQUIRED) # This will also patch SeqLib as needed
 find_package(HTSLib 1.17 REQUIRED)
 find_package(ODGI REQUIRED)
+find_package(KMC REQUIRED)
 
 # Find (or build) Boost 
 find_package(Boost 1.88 HINTS "${CMAKE_BINARY_DIR}/lib/boost")
@@ -150,6 +152,8 @@ add_library(graph STATIC
   "${SOURCE_DIR}/native/fasta.cpp"
   "${SOURCE_DIR}/native/variant.cpp"
   "${SOURCE_DIR}/native/graph.cpp"
+  "${SOURCE_DIR}/native/kmer.cpp"
+  "${SOURCE_DIR}/native/haplotype.cpp"
 )
 set_target_properties(graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(graph
@@ -163,6 +167,7 @@ target_link_libraries(graph
   Boost::boost
   fmt::fmt
   spdlog::spdlog
+  KMC::Static
 )
 
 nanobind_add_module(_native_graph STABLE_ABI 
@@ -209,6 +214,10 @@ add_executable(graph_test
   "${TEST_DIR}/native/test_helpers.cpp"
   "${TEST_DIR}/native/test_kmer.cpp"
   "${TEST_DIR}/native/test_range.cpp"
+  "${TEST_DIR}/native/test_haplotype.cpp"
+)
+target_compile_definitions(graph_test PRIVATE
+  TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
 )
 target_link_libraries(graph_test
   GTest::gtest_main

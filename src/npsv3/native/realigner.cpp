@@ -128,7 +128,7 @@ double ScoreAlignment(const std::string& read_sequence, const std::string& base_
 
 double MaxScoreAlignment(const std::string& read_sequence, const std::string& base_qualities) {
   double log_prob = 0;  // log10(P(data|alignment))
-  for (int i = 0; i < read_sequence.size(); i++) {
+  for (size_t i = 0; i < read_sequence.size(); i++) {
     auto quality = RescaleQuality(base_qualities[i]);
     log_prob += log10(1. - PhredToProb(quality));
   }
@@ -319,7 +319,7 @@ void IndexedSequence::AlignSequence(const sl::BamRecord& read, sl::BamRecordVect
 }
 
 namespace {
-sl::GenomicRegion BreakpointToGenomicRegion(const std::string& region, const sl::BamHeader& header) {
+[[maybe_unused]] sl::GenomicRegion BreakpointToGenomicRegion(const std::string& region, const sl::BamHeader& header) {
   return sl::GenomicRegion();
   return (region.empty()) ? sl::GenomicRegion() : sl::GenomicRegion(region, header);
 }
@@ -346,7 +346,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
   }
 
   // Since the BWA wrappers are non-copyable, initialize after all sequences are loaded
-  for (int i = 0; i < NumAltAlleles(); i++) {
+  for (size_t i = 0; i < NumAltAlleles(); i++) {
     alt_indexes_[i].Initialize();
   }
 
@@ -356,7 +356,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
     // We assumed the first sequence is the reference sequence
     pyassert(contigs.GetNextSequence(next_sequence), "Reference sequence not present in the IUPAC FASTA");
     ref_index_.SetIUPACSequence(next_sequence);
-    for (int i = 0; i < NumAltAlleles(); i++) {
+    for (size_t i = 0; i < NumAltAlleles(); i++) {
       pyassert(contigs.GetNextSequence(next_sequence), "Missing alternate sequence in the IUPAC FASTA");
       alt_indexes_[i].SetIUPACSequence(next_sequence);
     }
@@ -367,7 +367,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
     pyassert(alt_alignment_paths.size() == NumAltAlleles(),
              "Number of alternate alignment paths must match the number of alleles");
     alt_writers_.reserve(NumAltAlleles());
-    for (int i = 0; i < NumAltAlleles(); i++) {
+    for (size_t i = 0; i < NumAltAlleles(); i++) {
       alt_writers_.emplace_back(sl::BAM);
       alt_writers_.back().Open(alt_alignment_paths[i]);
       alt_writers_.back().SetHeader(AltHeader(i));
@@ -377,7 +377,7 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
 }
 
 namespace {
-std::string ToString(const sl::GenomicRegion& region, const sl::BamHeader& header) {
+[[maybe_unused]] std::string ToString(const sl::GenomicRegion& region, const sl::BamHeader& header) {
   return region.ChrName(header) + ":" + std::to_string(region.pos1) + "-" + std::to_string(region.pos2);
 }
 
@@ -414,7 +414,7 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
   std::vector<RealignedFragment::score_type> total_log_prob(NumAltAlleles(), ref_realignment.TotalLogProb());
 
   std::vector<RealignedFragment> alt_realignments;
-  for (int i = 0; i < NumAltAlleles(); i++) {
+  for (size_t i = 0; i < NumAltAlleles(); i++) {
     // Realign the fragment to this alternate allele
     alt_realignments.emplace_back(read1, read2, alt_indexes_[i], insert_size_dist_);
     total_log_prob[i] = LogSumPow(total_log_prob[i], alt_realignments.back().TotalLogProb());
@@ -433,7 +433,7 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
   }
 
   RealignedFragment::score_type max_alt_score = NAN, max_alt_quality = 0;
-  for (int i = 0; i < NumAltAlleles(); i++) {
+  for (size_t i = 0; i < NumAltAlleles(); i++) {
     const auto& alt_realignment = alt_realignments[i];
     if (alt_realignment.HasBestPair()) {
       auto& best_pair = alt_realignment.BestPair();
