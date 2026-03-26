@@ -255,7 +255,28 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
 }
 
 std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
-  return FindBestPaths(n);
+  std::vector<Graph::NodeIdSeq> results;
+  results.reserve(n);
+
+  for (size_t i = 0; i < n; ++i) {
+    // Request one more path than already selected: by pigeonhole, the best
+    // unselected path (if any) must appear within the top (|selected|+1).
+    auto paths = FindBestPaths(results.size() + 1);
+
+    // Find the first path not already in results.
+    const Graph::NodeIdSeq* new_path = nullptr;
+    for (const auto& path : paths) {
+      if (std::find(results.begin(), results.end(), path) == results.end()) {
+        new_path = &path;
+        break;
+      }
+    }
+    if (!new_path) break;  // no more distinct paths in the graph
+
+    results.push_back(*new_path);
+    UpdateScores(results.back());
+  }
+  return results;
 }
 
 }  // namespace npsv3

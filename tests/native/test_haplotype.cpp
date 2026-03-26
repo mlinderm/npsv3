@@ -56,8 +56,9 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   EXPECT_TRUE(std::is_sorted(best_path.begin(), best_path.end()));
 
   // With all k-mers scored as HOMOZYGOUS, the path that maximizes k-mer coverage is the longer reference path.
-  EXPECT_EQ(best_path, graph.PathNodes("chr1"));
-  EXPECT_NE(paths[1], graph.PathNodes("chr1"));
+  auto ref_path = graph.PathNodes("chr1");
+  EXPECT_EQ(best_path, ref_path);
+  EXPECT_NE(paths[1], ref_path);
 };
 
 TEST_F(GraphConstructionTest, HaplotypeSamplerHandlesAllAbsentKmers) {
@@ -71,7 +72,6 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
 
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
-  graph.ToGFA(std::cout);
 
   const size_t k = 7, max_edge = 5;
 

@@ -466,6 +466,15 @@ std::string Graph::get_sequence(const handlegraph::handle_t& handle) const {
   return (handle_seq != "*") ? handle_seq : "";
 }
 
+handlegraph::path_handle_t Graph::get_path_handle(const std::string& path_name) const {
+  auto handle = graph_.get_path_handle(path_name);
+  std::cerr << handlegraph::as_integer(handle) << std::endl;
+  if (handle == handlegraph::as_path_handle(0)) {
+    throw std::out_of_range("Graph has no path named '" + path_name + "'");
+  }
+  return handle;
+}
+
 std::vector<handlegraph::handle_t> Graph::PathHandles(const handlegraph::path_handle_t& path_handle) const {
   std::vector<handlegraph::handle_t> handles;
   graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
@@ -475,7 +484,7 @@ std::vector<handlegraph::handle_t> Graph::PathHandles(const handlegraph::path_ha
 }
 
 std::vector<handlegraph::handle_t> Graph::PathHandles(const std::string& path_name) const {
-  return PathHandles(graph_.get_path_handle(path_name));
+  return PathHandles(get_path_handle(path_name));
 }
 
 std::vector<odgi::nid_t> Graph::PathNodes(const handlegraph::path_handle_t& path_handle) const {
@@ -487,7 +496,7 @@ std::vector<odgi::nid_t> Graph::PathNodes(const handlegraph::path_handle_t& path
 }
 
 std::vector<odgi::nid_t> Graph::PathNodes(const std::string& path_name) const {
-  return PathNodes(graph_.get_path_handle(path_name));
+  return PathNodes(get_path_handle(path_name));
 }
 
 std::string Graph::PathSequence(const handlegraph::path_handle_t& path_handle) const {
@@ -501,7 +510,7 @@ std::string Graph::PathSequence(const handlegraph::path_handle_t& path_handle) c
 }
 
 std::string Graph::PathSequence(const std::string& path_name) const {
-  return PathSequence(graph_.get_path_handle(path_name));
+  return PathSequence(get_path_handle(path_name));
 }
 
 std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {

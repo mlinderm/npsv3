@@ -3,6 +3,7 @@
 #include <odgi.hpp>
 #include <handlegraph/handle_graph.hpp>
 #include <algorithms/kmer.hpp>
+#include <stdexcept>
 #include <vector>
 #include <iosfwd>
 #include <functional>
@@ -61,7 +62,7 @@ class Graph : public handlegraph::HandleGraph {
   bool has_edge(const handlegraph::handle_t& left, const handlegraph::handle_t& right) const { return graph_.has_edge(left, right); }
 
   bool has_path(const std::string& path_name) const { return graph_.has_path(path_name); }
-  handlegraph::path_handle_t get_path_handle(const std::string& path_name) const { return graph_.get_path_handle(path_name); }
+  handlegraph::path_handle_t get_path_handle(const std::string& path_name) const;
   std::string get_path_name(const handlegraph::path_handle_t& path_handle) const { return graph_.get_path_name(path_handle); }
   handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const { return graph_.path_back(path); }
   handlegraph::step_handle_t path_front_end(const handlegraph::path_handle_t& path_handle) const { return graph_.path_front_end(path_handle); }
