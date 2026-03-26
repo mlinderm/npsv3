@@ -1,5 +1,8 @@
 #include "haplotype.hpp"
 
+#include <algorithm>
+#include <cassert>
+#include <limits>
 #include <numeric>
 
 namespace npsv3 {
@@ -14,12 +17,12 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
 
   graph.UniqueKmers(
       k, max_edge,
-      [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+      [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, [[maybe_unused]] uint64_t offset) {
         auto zyg = counts.Classify(seq);
         double initial_score = params_.absent_score;
         switch (zyg) {
           default:
-            return;  // skip FREQUENT or otherwise unknown k-mers, they don't contribute to haplotype distinction
+            return;  // skip FREQUENT or otherwise unknown k-mers
           case KmerZygosity::HOMOZYGOUS:
             initial_score = params_.homozygous_score;
             break;
@@ -63,21 +66,32 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
           }
         }
       },
-      true /* exclude 'universal' k-mers in each haplotype */);
+      true /* exclude universal k-mers */);
 
-  // Fill in k-mer indices for intermediate nodes in all explicit edges
+  // Absorb intermediate-node k-mers into each shadow edge's k-mer list.
   for (auto& [_, edges] : edge_kmers_) {
     for (auto& edge : edges) {
-      for (auto & intermediate_node : edge.intermediate_nodes) {
-        if (auto it = node_kmers_.find(intermediate_node); it != node_kmers_.end()) {
+      for (auto& intermediate_node : edge.intermediate_nodes) {
+        if (auto it = node_kmers_.find(intermediate_node); it != node_kmers_.end())
           edge.kmers.insert(edge.kmers.end(), it->second.begin(), it->second.end());
-        }
       }
     }
   }
 }
 
-Graph::NodeIdSeq HaplotypeSamplerOverlay::FindBestPath() const {
+namespace {
+  template<typename T>
+  void SortAndTrimBacktrack(T& backtrack, size_t n) {
+    size_t new_size = std::min(n, backtrack.size());
+    std::partial_sort(backtrack.begin(), backtrack.begin() + new_size, backtrack.end(),
+        [](const auto& a, const auto& b) { return a.score > b.score; });
+    backtrack.resize(new_size);
+  }
+}
+
+std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
+  if (n == 0) return {};
+
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
 
@@ -86,23 +100,38 @@ Graph::NodeIdSeq HaplotypeSamplerOverlay::FindBestPath() const {
     return acc - kmer.score;
   });
 
-  struct DPState {
-    double score;
+  // dp[v - min_id] holds up to n backpointer entries for distinct paths from min_id to v.
+  // pred_path_idx indexes into dp[pred_node - min_id], which is frozen before propagation
+  // so the indices remain stable.
+  struct Backpointer {
+    double score = -std::numeric_limits<double>::infinity();
     odgi::nid_t pred_node = 0;
-    int edge_idx = -1; // If pred_node is an explicit edge, index in edge_kmers_ value
+    int edge_idx = -1; // -1 = real edge; >= 0 = index into edge_kmers_[{pred_node, cur}]
+    size_t pred_path_idx = std::numeric_limits<size_t>::max(); // index into dp[pred_node - min_id]
   };
-  std::vector<DPState> dp(max_id - min_id + 1, DPState{min_score});
+  std::vector<std::vector<Backpointer>> dp(max_id - min_id + 1);
 
-  // Forward pass in topological, i.e., ascending node ID, order. 
+  // Seed the source node.
+  dp[0].push_back({ min_score });
+
   for (odgi::nid_t i = min_id; i <= max_id; ++i) {
     if (!graph_.has_node(i)) continue;
-    auto& state = dp[i - min_id];
+    
+    auto& back_pointers = dp[i - min_id];
+    assert(!back_pointers.empty());  // Should have at least one path to every reachable node
 
-    // Credit this node's own (single-node) k-mers, since we are switching pH(x) = −1 to pH(x) = 1, we
-    // add 2*score.
-    if (auto it = node_kmers_.find(i); it != node_kmers_.end()) {
-      for (auto idx : it->second)
-        state.score += 2 * kmers_[idx].score;
+    // Trim to top n before propagating. After this point dp[i] is frozen: we only push entries
+    // into successor lists, never back into dp[i], so pred_path_idx values are stable.
+    SortAndTrimBacktrack(back_pointers, n);
+
+    { // Credit this node's own k-mers: switching pH(x) from -1 to +1 adds 2*score per k-mer.
+      double node_score_delta = 0.0;
+      if (auto it = node_kmers_.find(i); it != node_kmers_.end()) {
+          for (auto idx : it->second)
+            node_score_delta += 2.0 * kmers_[idx].score;
+      }
+      for (auto& back : back_pointers)
+        back.score += node_score_delta;
     }
 
     // Propagate along real forward edges without explicit edge counterparts
@@ -112,59 +141,68 @@ Graph::NodeIdSeq HaplotypeSamplerOverlay::FindBestPath() const {
           it != edge_kmers_.end() && std::any_of(it->second.begin(), it->second.end(), [](const EdgeInfo& edge) {
             return edge.intermediate_nodes.empty();
           })) {
-        return true;  // Explicit edge exists, skip implicit edge
+        // Explicit edge exists for this implicit edge (i -> next_node, w/ no intermediate nodes), use that explicit
+        // edge instead.
+        return true;  
       }
-
-      // >= to ensure we update the predecessor for ties, which can occur when edges don't have k-mers and thus don't
-      // change the score
-      if (auto& next_state = dp[graph_.get_id(next) - min_id]; state.score >= next_state.score) {
-        next_state.score = state.score;
-        next_state.pred_node = i;
+      auto& next_back_pointers = dp[next_node - min_id];
+      for (size_t b_idx = 0; b_idx < back_pointers.size(); ++b_idx) {
+        next_back_pointers.push_back({back_pointers[b_idx].score, i /* predecessor node */, -1 /* no explicit edge */,
+                                      b_idx /* path index in predecessor node */});
       }
       return true;
     });
 
-    // Propagate along explicit edges that start at node i
-    for (auto it = edge_kmers_.lower_bound(Edge{i, min_id}), end = edge_kmers_.upper_bound(Edge{i, max_id}); it != end; ++it) {
-      assert(it->first.from == i);
+    // Propagate along explicit starting at i; each EdgeInfo is a distinct path option.
+    for (auto it = edge_kmers_.lower_bound(Edge{i, min_id}), end = edge_kmers_.upper_bound(Edge{i, max_id}); it != end;
+         ++it) {
       const auto& edges = it->second;
       for (size_t e_idx = 0; e_idx < edges.size(); ++e_idx) {
-        const auto& edge = edges[e_idx];
-        double score = std::accumulate(edge.kmers.begin(), edge.kmers.end(), state.score, [&](double acc, size_t k_idx) {
-          return acc + 2 * kmers_[k_idx].score;
-        });
-        
-        if (auto & next_state = dp[it->first.to - min_id]; score >= next_state.score) {
-          next_state.score = score;
-          next_state.pred_node = i;
-          next_state.edge_idx = e_idx;
+        const double edge_delta =
+            std::accumulate(edges[e_idx].kmers.begin(), edges[e_idx].kmers.end(), 0.0,
+                            [&](double acc, size_t k_idx) { return acc + 2.0 * kmers_[k_idx].score; });
+        auto& next_back_pointers = dp[it->first.to - min_id];
+        for (size_t b_idx = 0; b_idx < back_pointers.size(); ++b_idx) {
+          next_back_pointers.push_back({back_pointers[b_idx].score + edge_delta, i /* predecessor node */,
+                                        static_cast<int>(e_idx) /* explicit edge */,
+                                        b_idx /* path index in predecessor node */});
         }
       }
     }
   }
 
-  // Backtrack from max_id to min_id, inserting intermediate nodes for shadow-edge predecessors. 
-  Graph::NodeIdSeq path;
-  odgi::nid_t current = max_id;
-  while (current != min_id) {
-    const auto& state = dp[current - min_id]; 
-    
-    path.push_back(current);
-    if ( state.edge_idx >= 0) {
-      // Came via explict edge with nodes = [h1,...,h_{n-1}], add h_* in reverse order
-      const auto& edge = edge_kmers_.at(Edge{state.pred_node, current}).at(state.edge_idx);
-      for (auto nit = edge.intermediate_nodes.rbegin(); nit != edge.intermediate_nodes.rend(); ++nit) {
-        path.push_back(*nit);
+  // Sort and trim the final node's backpointers.
+  auto & final_backtrack = dp[max_id - min_id];
+  SortAndTrimBacktrack(final_backtrack, n);
+
+  // Backtrack from max_id to min_id for each of the (up to n) best paths.
+  std::vector<Graph::NodeIdSeq> result;
+  result.reserve(final_backtrack.size());
+  for (size_t back_idx = 0; back_idx < final_backtrack.size(); ++back_idx) {
+    Graph::NodeIdSeq path;
+    odgi::nid_t current_node = max_id;
+    size_t current_back_idx = back_idx;
+
+    while (current_node != min_id) {
+      path.push_back(current_node);
+      const auto& backpointer = dp[current_node - min_id][current_back_idx];
+      if (backpointer.edge_idx >= 0) {
+        // Expand explicit edge's intermediate nodes in reverse order.
+        const auto& edge = edge_kmers_.at(Edge{backpointer.pred_node, current_node}).at(backpointer.edge_idx);
+        for (auto nit = edge.intermediate_nodes.rbegin(); nit != edge.intermediate_nodes.rend(); ++nit)
+          path.push_back(*nit);
       }
+      current_back_idx = backpointer.pred_path_idx; assert(current_back_idx < n);
+      current_node = backpointer.pred_node; assert(current_node >= min_id && current_node <= max_id);
     }
+    path.push_back(current_node); // Include source node
 
-    current = state.pred_node;
+    std::reverse(path.begin(), path.end());
+    result.push_back(std::move(path));
   }
-  path.push_back(current); // Add the starting node
-
-  std::reverse(path.begin(), path.end());
-  return path;
+  return result;
 }
+
 
 void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
   const odgi::nid_t min_id = graph_.min_node_id();
@@ -184,7 +222,7 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
          e_it != e_end && !found_edge; ++e_it) {
       const auto& edges = e_it->second;
       for (const auto& edge : edges) {
-        // Does the nodes on this shadow edge match the next nodes on the path?
+        // Does the nodes on this explicit edge match the next nodes on the path?
         auto [edge_it, past_edge_it] =
             std::mismatch(edge.intermediate_nodes.begin(), edge.intermediate_nodes.end(), path_it + 1, path.end());
         if (edge_it == edge.intermediate_nodes.end() && *past_edge_it == e_it->first.to) {
@@ -217,14 +255,7 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
 }
 
 std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
-  std::vector<Graph::NodeIdSeq> result;
-  result.reserve(n);
-  for (size_t i = 0; i < n; ++i) {
-    auto path = FindBestPath();
-    result.push_back(path);
-    UpdateScores(path);
-  }
-  return result;
+  return FindBestPaths(n);
 }
 
-}
+}  // namespace npsv3

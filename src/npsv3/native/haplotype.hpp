@@ -34,8 +34,8 @@ class HaplotypeSamplerOverlay {
   /// Greedily select up to n haplotypes; returns one NodeIdSeq per haplotype.
   std::vector<Graph::NodeIdSeq> SampleHaplotypes(size_t n);
 
-  /// Return the highest-scoring path through the graph using the current k-mer scores.
-  Graph::NodeIdSeq FindBestPath() const;
+  /// Return the up to n unique highest-scoring distinct paths through the graph using the current k-mer scores.
+  std::vector<Graph::NodeIdSeq> FindBestPaths(size_t n) const;
 
   /// Number of unique non-universal k-mers collected during construction.
   size_t NumKmers() const { return kmers_.size(); }
