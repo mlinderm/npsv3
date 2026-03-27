@@ -139,9 +139,25 @@ class Graph : public handlegraph::HandleGraph {
    */
   void UniqueKmers(size_t k, size_t max_edge, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, bool exclude_universal=false) const;
 
+  /** 
+   * @brief Populate masks for nodes and paths based on an inference VCF
+   * 
+   * @param inference_vcf Path to the VCF file defining the variants for path enumeration
+   * @param region Restrict inference variants to this region
+   * @param min_size Minimum size of allele length change to consider for path enumeration
+   * @param node_mask Mask for nodes
+   * @param path_mask Mask for paths
+   */
+  void PopulateNodeAndPathMasks(const std::string& inference_vcf, const Range& region, size_t min_size, NodeIdSet& node_mask, PathIdSet& path_mask) const;
+
+  /** @brief Write the graph in GFA format to an output stream
+   * 
+   * @param out Output stream to write the GFA format to
+   */
   void ToGFA(std::ostream&);
 
   friend AllPathGraphOverlay;
+  friend HaplotypeSamplerOverlay;
   friend detail::Polytype;
   friend detail::Haplotype;
 

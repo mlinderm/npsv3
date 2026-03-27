@@ -17,6 +17,9 @@ class HaplotypeSamplerOverlay {
     double heterozygous_score = 0.0; ///< Initial score for HETEROZYGOUS k-mers
     double homozygous_discount = 0.9; ///< After selection: HOMOZYGOUS score *= this
     double het_adjustment = 0.05; ///< After selection: decrement HETEROZYGOUS score by this if on path, increment if not on path
+
+    // Need an explicit constructor to indicate nested type is default constructible
+    Params() {};
   };
 
   /**
@@ -26,10 +29,32 @@ class HaplotypeSamplerOverlay {
    * @param counts  KmerCounts instance used to classify k-mer sequences
    * @param params  Scoring parameters (optional)
    */
+  // HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
+  //                         const KmerCounts& counts);
+  explicit HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
+                          const KmerCounts& counts, const Params& params = {});
+
+  /**
+   * @brief Construct with inference-VCF path filtering active.
+   *
+   * Paths returned by FindBestPaths will be restricted to those that differ at
+   * variants in @p inference_vcf whose allele length change is >= @p min_size.
+   *
+   * @param graph         The variant graph
+   * @param k             K-mer length
+   * @param max_edge      Maximum edges traversed per k-mer
+   * @param counts        KmerCounts instance
+   * @param inference_vcf Path to the inference VCF
+   * @param region        Region to restrict inference variants to
+   * @param min_size      Minimum allele length change to consider (default 50)
+   * @param params        Scoring parameters (optional)
+   */
   HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                          const KmerCounts& counts);
-  HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                          const KmerCounts& counts, Params params);
+                          const KmerCounts& counts,
+                          const std::string& inference_vcf,
+                          const Range& region,
+                          size_t min_size = 50,
+                          const Params& params = {});
 
   /// Greedily select up to n haplotypes; returns one NodeIdSeq per haplotype.
   std::vector<Graph::NodeIdSeq> SampleHaplotypes(size_t n);
@@ -69,6 +94,10 @@ class HaplotypeSamplerOverlay {
 
   const Graph& graph_;
   Params params_;
+
+  Graph::NodeIdSet inference_node_mask_; ///< Variant nodes whose allele coverage is tracked in covered_paths
+  Graph::PathIdSet inference_path_mask_; ///< Path-ID bits for tracked alleles (masks node_variant_paths_ lookups)
+  bool apply_path_filter_ = false; ///< When true, skip paths with no covered inference alleles (set by inference-VCF constructor)
 
   std::vector<KmerInfo> kmers_;
   std::unordered_map<odgi::nid_t, std::vector<size_t>> node_kmers_; ///< nid to k-mer indices

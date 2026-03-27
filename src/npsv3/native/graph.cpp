@@ -11,7 +11,6 @@
 
 #include "fasta.hpp"
 #include "variant.hpp"
-#include "haplotype.hpp"
 
 /*
 Construct a pangenome graph from a VCF in a specific region, with paths for each haplotype.
@@ -46,7 +45,6 @@ bool PathsInSingleVariant(const Graph::PathIdSet& paths1, const Graph::PathIdSet
 
   auto last = std::upper_bound(variant_path_starts.begin(), variant_path_starts.end(), path_id);
   assert(last != variant_path_starts.begin());
-  auto first = std::prev(last);
 
   for (auto next_path_id = combined_paths.find_next(path_id); next_path_id != Graph::PathIdSet::npos;
        next_path_id = combined_paths.find_next(next_path_id)) {
@@ -468,7 +466,6 @@ std::string Graph::get_sequence(const handlegraph::handle_t& handle) const {
 
 handlegraph::path_handle_t Graph::get_path_handle(const std::string& path_name) const {
   auto handle = graph_.get_path_handle(path_name);
-  std::cerr << handlegraph::as_integer(handle) << std::endl;
   if (handle == handlegraph::as_path_handle(0)) {
     throw std::out_of_range("Graph has no path named '" + path_name + "'");
   }
@@ -663,6 +660,43 @@ AllPathGraphOverlay Graph::AllPaths(const std::string& inference_vcf, const std:
 std::string Graph::AltPathName(const Variant::VariantId& variant_id, int allele,
                                const std::string& path_prefix) const {
   return fmt::format("_{}_{}_{}", path_prefix, to_string(variant_id), allele);
+}
+
+void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range& region, size_t min_size, Graph::NodeIdSet& node_mask, Graph::PathIdSet& path_mask) const {
+  // Identify inference alleles, marking the corresponding identifying nodes and recording the associated inference paths
+  node_mask.reset().resize(max_node_id() + 1);
+  path_mask.reset().resize(variant_path_starts_.back());
+  
+  auto source_vcf_file = VariantFileReader::Open(source_vcf);
+  source_vcf_file->SetRegion(region);
+  while (auto variant = source_vcf_file->NextVariant()) {
+    auto variant_id = variant->variant_id();
+    
+    auto ref_path = get_path_handle(AltPathName(variant_id, 0));
+    auto ref_path_idx = as_integer(ref_path);
+    auto ref_nodes = PathNodes(ref_path);
+    for (int i=1; i < variant->num_alleles(); i++) {
+      auto change = variant->AlleleLengthChange(i);
+      if (!change || std::abs(*change) < min_size) {
+        continue; // Only consider alleles above a size threshold
+      }
+
+      auto alt_path = get_path_handle(AltPathName(variant_id, i));
+      auto alt_path_idx = as_integer(alt_path);
+      
+      // Mark the differing nodes between alt and ref paths as zero cost and set the corresponding inference path bit
+      auto alt_nodes = PathNodes(alt_path);
+      auto [ref_prefix, ref_suffix, alt_prefix, alt_suffix] = detail::TrimSequence(ref_nodes, alt_nodes);
+      for (auto it = ref_prefix; it != ref_suffix; ++it) {
+        node_mask.set(*it);
+        path_mask.set(ref_path_idx);
+      }
+      for (auto it = alt_prefix; it != alt_suffix; ++it) {
+        node_mask.set(*it);
+        path_mask.set(alt_path_idx);
+      }
+    }
+  }
 }
 
 void Graph::ToGFA(std::ostream& ostream) {

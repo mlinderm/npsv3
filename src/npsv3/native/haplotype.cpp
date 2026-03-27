@@ -5,15 +5,13 @@
 #include <limits>
 #include <numeric>
 
+#include "variant.hpp"
+
 namespace npsv3 {
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                                                 const KmerCounts& counts)
-    : HaplotypeSamplerOverlay(graph, k, max_edge, counts, Params{}) {}
-
-HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                                                 const KmerCounts& counts, Params params)
-    : graph_(graph), params_(params) {
+                                                 const KmerCounts& counts, const Params& params)
+    : graph_(graph), params_(params), apply_path_filter_(false) {
 
   graph.UniqueKmers(
       k, max_edge,
@@ -38,7 +36,7 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
         kmers_.push_back({seq, zyg, initial_score});
 
         // Record k-mer presence. K-mers within a node are associated with that node. K-mers that span multiple nodes
-        // are associated with (shadow) edges spanning all the handles in their path.
+        // are associated with explicit (shadow) edges spanning all the handles in their path.
         if (handles.size() == 1) {
           node_kmers_[graph.get_id(handles.front())].push_back(kmer_idx);
         } else {
@@ -68,7 +66,7 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
       },
       true /* exclude universal k-mers */);
 
-  // Absorb intermediate-node k-mers into each shadow edge's k-mer list.
+  // Absorb intermediate-node k-mers into each explicit edge's k-mer list.
   for (auto& [_, edges] : edge_kmers_) {
     for (auto& edge : edges) {
       for (auto& intermediate_node : edge.intermediate_nodes) {
@@ -79,9 +77,37 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
   }
 }
 
+HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
+                                                 const KmerCounts& counts,
+                                                 const std::string& inference_vcf,
+                                                 const Range& region,
+                                                 size_t min_size,
+                                                 const Params& params)
+    : HaplotypeSamplerOverlay(graph, k, max_edge, counts, params) {
+  apply_path_filter_ = true;
+  graph.PopulateNodeAndPathMasks(inference_vcf, region, min_size, inference_node_mask_, inference_path_mask_);
+  assert(inference_path_mask_.any()); // Should have at least one path to track, otherwise no paths will be selected
+}
+
 namespace {
   template<typename T>
-  void SortAndTrimBacktrack(T& backtrack, size_t n) {
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool dedup_covered_paths = true) {
+    if (dedup_covered_paths && !backtrack.empty()) {
+      std::sort(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) { 
+        // Group by covered_paths first, then sort by descending score within groups
+        if (a.covered_paths == b.covered_paths) {
+          return a.score > b.score;
+        }
+        return a.covered_paths > b.covered_paths;
+      });
+
+      // Retain only the highest-scoring representative per inference equivalence class.
+      auto last = std::unique(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) {
+        return a.covered_paths == b.covered_paths;
+      });
+      backtrack.resize(std::distance(backtrack.begin(), last));
+    }
+
     size_t new_size = std::min(n, backtrack.size());
     std::partial_sort(backtrack.begin(), backtrack.begin() + new_size, backtrack.end(),
         [](const auto& a, const auto& b) { return a.score > b.score; });
@@ -94,6 +120,7 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
 
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
+  const size_t covered_paths_size = graph_.node_variant_paths_[min_id].size(); // All nodes should have the same size of path sets
 
   // Minimum possible score is if none of the k-mers are present in the haplotype, i.e., pH(x) = −1
   double min_score = std::accumulate(kmers_.begin(), kmers_.end(), 0.0, [](double acc, const KmerInfo& kmer) {
@@ -108,19 +135,32 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
     odgi::nid_t pred_node = 0;
     int edge_idx = -1; // -1 = real edge; >= 0 = index into edge_kmers_[{pred_node, cur}]
     size_t pred_path_idx = std::numeric_limits<size_t>::max(); // index into dp[pred_node - min_id]
+    Graph::PathIdSet covered_paths = {}; // inference allele coverage; empty (size 0) when filtering is off
   };
   std::vector<std::vector<Backpointer>> dp(max_id - min_id + 1);
 
   // Seed the source node.
   dp[0].push_back({ min_score });
+  dp[0].back().covered_paths.resize(covered_paths_size);
 
   for (odgi::nid_t i = min_id; i <= max_id; ++i) {
     if (!graph_.has_node(i)) continue;
-    
+
     auto& back_pointers = dp[i - min_id];
     assert(!back_pointers.empty());  // Should have at least one path to every reachable node
 
-    // Trim to top n before propagating. After this point dp[i] is frozen: we only push entries
+    // Accumulate inference paths for node i before trimming/deduplicating, so we can use covered_paths as the equivalence key.
+    if (!apply_path_filter_) {
+      const auto & node_paths = graph_.node_variant_paths_[i];
+      for (auto& back : back_pointers)
+        back.covered_paths |= node_paths;
+    } else if (inference_node_mask_.test(i)) {
+      auto node_paths = graph_.node_variant_paths_[i] & inference_path_mask_;
+      for (auto& back : back_pointers)
+        back.covered_paths |= node_paths;
+    }
+
+    // Trim to top 'n' before propagating. After this point dp[i] is frozen: we only push entries
     // into successor lists, never back into dp[i], so pred_path_idx values are stable.
     SortAndTrimBacktrack(back_pointers, n);
 
@@ -143,17 +183,17 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
           })) {
         // Explicit edge exists for this implicit edge (i -> next_node, w/ no intermediate nodes), use that explicit
         // edge instead.
-        return true;  
+        return true;
       }
       auto& next_back_pointers = dp[next_node - min_id];
       for (size_t b_idx = 0; b_idx < back_pointers.size(); ++b_idx) {
         next_back_pointers.push_back({back_pointers[b_idx].score, i /* predecessor node */, -1 /* no explicit edge */,
-                                      b_idx /* path index in predecessor node */});
+                                      b_idx /* path index in predecessor node */, back_pointers[b_idx].covered_paths});
       }
       return true;
     });
 
-    // Propagate along explicit starting at i; each EdgeInfo is a distinct path option.
+    // Propagate along explicit edges starting at i; each EdgeInfo is a distinct path option.
     for (auto it = edge_kmers_.lower_bound(Edge{i, min_id}), end = edge_kmers_.upper_bound(Edge{i, max_id}); it != end;
          ++it) {
       const auto& edges = it->second;
@@ -161,24 +201,49 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
         const double edge_delta =
             std::accumulate(edges[e_idx].kmers.begin(), edges[e_idx].kmers.end(), 0.0,
                             [&](double acc, size_t k_idx) { return acc + 2.0 * kmers_[k_idx].score; });
+
+        // Accumulate inference paths for intermediate nodes of this explicit edge.
+        Graph::PathIdSet edge_intermediate_paths(covered_paths_size);
+        if (!apply_path_filter_) {
+          for (auto nid : edges[e_idx].intermediate_nodes) {
+            edge_intermediate_paths |= graph_.node_variant_paths_[nid];
+          }
+        } else {
+          for (auto nid : edges[e_idx].intermediate_nodes) {
+            if (inference_node_mask_.test(nid))
+              edge_intermediate_paths |= graph_.node_variant_paths_[nid];
+          }
+          edge_intermediate_paths &= inference_path_mask_;
+        }
+
         auto& next_back_pointers = dp[it->first.to - min_id];
         for (size_t b_idx = 0; b_idx < back_pointers.size(); ++b_idx) {
+          // Graph::PathIdSet combined = back_pointers[b_idx].covered_paths;
+          // if (filtering) {
+          //   combined |= edge_intermediate_paths;
+          // }
           next_back_pointers.push_back({back_pointers[b_idx].score + edge_delta, i /* predecessor node */,
                                         static_cast<int>(e_idx) /* explicit edge */,
-                                        b_idx /* path index in predecessor node */});
+                                        b_idx /* path index in predecessor node */,
+                                        back_pointers[b_idx].covered_paths | edge_intermediate_paths});
         }
       }
     }
   }
 
   // Sort and trim the final node's backpointers.
-  auto & final_backtrack = dp[max_id - min_id];
+  auto& final_backtrack = dp[max_id - min_id];
   SortAndTrimBacktrack(final_backtrack, n);
 
   // Backtrack from max_id to min_id for each of the (up to n) best paths.
   std::vector<Graph::NodeIdSeq> result;
   result.reserve(final_backtrack.size());
   for (size_t back_idx = 0; back_idx < final_backtrack.size(); ++back_idx) {
+    // When inference filtering is active, skip paths that don't traverse any inference nodes/paths.
+    if (apply_path_filter_ && final_backtrack[back_idx].covered_paths.none()) {
+      continue;
+    }
+
     Graph::NodeIdSeq path;
     odgi::nid_t current_node = max_id;
     size_t current_back_idx = back_idx;
