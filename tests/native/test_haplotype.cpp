@@ -135,6 +135,38 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   }
 }
 
+TEST_F(GraphConstructionTest, SampleDiplotypesSelectsHomozygousRefWithAllHomozygousKmers) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+  // All k-mers HOMOZYGOUS (expected copy count = 2). The best diplotype should
+  // be two copies of the reference path (the longer path with more k-mers).
+  ConstantKmerCounts counts(KmerZygosity::HOMOZYGOUS);
+  HaplotypeSamplerOverlay sampler(graph, 7, 5, counts);
+
+  auto candidates = sampler.SampleHaplotypes(4 /* finite limit larger than the expected number of paths */);
+  ASSERT_GE(candidates.size(), 2u);
+
+  auto diplotypes = sampler.SampleDiplotypes(candidates, 8 /* finite limit larger than the expected number of diplotypes */);
+  ASSERT_EQ(diplotypes.size(), 3u);
+
+  // Both haplotypes in the top-scoring diplotype should be the reference path.
+  auto ref_path = graph.PathNodes("chr1");
+  EXPECT_EQ(diplotypes[0][0], ref_path) << "First haplotype should be the reference path";
+  EXPECT_EQ(diplotypes[0][1], ref_path) << "Second haplotype should be the reference path (with-replacement)";
+
+  EXPECT_TRUE((diplotypes[1][0] == ref_path) != (diplotypes[1][1] == ref_path)) << "Second-best diplotype should contain one reference path";
+  EXPECT_TRUE(diplotypes[2][0] != ref_path && diplotypes[2][1] != ref_path) << "Third-best diplotype should contain no reference paths";
+}
+
 TEST_F(GraphConstructionTest, HaplotypeSamplerFromBAMFindsHomAltForDeletion) {
   if (std::system("kmc --version >/dev/null 2>&1") != 0) {
     GTEST_SKIP() << "kmc binary not available";

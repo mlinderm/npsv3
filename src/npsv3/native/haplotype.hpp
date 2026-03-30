@@ -1,4 +1,7 @@
+#include <array>
 #include <vector>
+
+#include <boost/dynamic_bitset.hpp>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -11,6 +14,8 @@ namespace npsv3 {
  */
 class HaplotypeSamplerOverlay {
  public:
+  using Diplotype = std::array<Graph::NodeIdSeq, 2>; 
+ 
   struct Params {
     double homozygous_score = 1.0; ///< Initial score for HOMOZYGOUS k-mers
     double absent_score = -0.8; ///< Initial score for ABSENT k-mers
@@ -56,11 +61,18 @@ class HaplotypeSamplerOverlay {
                           size_t min_size = 50,
                           const Params& params = {});
 
+  
+
   /// Greedily select up to n haplotypes; returns one NodeIdSeq per haplotype.
   std::vector<Graph::NodeIdSeq> SampleHaplotypes(size_t n);
 
   /// Return the up to n unique highest-scoring distinct paths through the graph using the current k-mer scores.
   std::vector<Graph::NodeIdSeq> FindBestPaths(size_t n) const;
+
+  /// Return the top max_diplotypes highest-scoring diplotypes from all pairs of the given
+  /// candidate haplotypes, sorted by descending score.
+  std::vector<Diplotype> SampleDiplotypes(const std::vector<Graph::NodeIdSeq>& candidates,
+                                          size_t max_diplotypes = 1) const;
 
   /// Number of unique non-universal k-mers collected during construction.
   size_t NumKmers() const { return kmers_.size(); }
@@ -103,6 +115,9 @@ class HaplotypeSamplerOverlay {
   std::unordered_map<odgi::nid_t, std::vector<size_t>> node_kmers_; ///< nid to k-mer indices
   std::map<Edge, std::vector<EdgeInfo>> edge_kmers_;  ///< edge (from,to) to edge info (w/ intermediate nodes and k-mer indices)
   
+  /// Return a bitset of length kmers_.size() indicating which k-mers lie on the given path.
+  boost::dynamic_bitset<> KmersOnPath(const Graph::NodeIdSeq& path) const;
+
   void UpdateScores(const Graph::NodeIdSeq& path);
 
 };

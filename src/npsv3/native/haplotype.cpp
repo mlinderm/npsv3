@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <limits>
 #include <numeric>
+
+#include <boost/dynamic_bitset.hpp>
 
 #include "variant.hpp"
 
@@ -269,17 +272,17 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
 }
 
 
-void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
+boost::dynamic_bitset<> HaplotypeSamplerOverlay::KmersOnPath(const Graph::NodeIdSeq& path) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
-  std::unordered_set<size_t> on_path;
+  boost::dynamic_bitset<> on_path(kmers_.size());
 
   for (auto path_it = path.begin(), path_end = path.end(); path_it != path_end;) {
     // Collect single-node k-mer indices for each node on the path.
     auto nid = *path_it;
     if (auto k_it = node_kmers_.find(nid); k_it != node_kmers_.end()) {
-      const auto & kmer_indices = k_it->second;
-      on_path.insert(kmer_indices.begin(), kmer_indices.end());
+      for (auto idx : k_it->second)
+        on_path.set(idx);
     }
     // Collect edge k-mer indices for explicit edges on the path
     bool found_edge = false;
@@ -291,7 +294,8 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
         auto [edge_it, past_edge_it] =
             std::mismatch(edge.intermediate_nodes.begin(), edge.intermediate_nodes.end(), path_it + 1, path.end());
         if (edge_it == edge.intermediate_nodes.end() && *past_edge_it == e_it->first.to) {
-          on_path.insert(edge.kmers.begin(), edge.kmers.end());
+          for (auto idx : edge.kmers)
+            on_path.set(idx);
           path_it = past_edge_it;
           found_edge = true;
           break;  // Only one edge can match since they can't share intermediate nodes
@@ -300,20 +304,22 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
     }
     if (!found_edge) ++path_it;
   }
+  return on_path;
+}
 
-  // Apply score adjustments based on zygosity.
+void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
+  auto on_path = KmersOnPath(path);
+
   for (size_t i = 0; i < kmers_.size(); ++i) {
     auto& km = kmers_[i];
     switch (km.zygosity) {
       default:
         break;
       case KmerZygosity::HOMOZYGOUS:
-        // "If x is a homozygous k-mer and x ∈ H, we discount its score by a multiplicative factor: w(x) ≔ 0.9 × w(x)."
-        if (on_path.count(i) > 0) km.score *= params_.homozygous_discount;
+        if (on_path.test(i)) km.score *= params_.homozygous_discount;
         break;
       case KmerZygosity::HETEROZYGOUS:
-        // "if x is a heterozygous k-mer, we adjust its score by an additive term to make the opposite outcome more likely: w(x) ≔ w(x) − 0.05 × pH(x)."
-        km.score -= ((on_path.count(i) > 0) ? params_.het_adjustment : -params_.het_adjustment);  
+        km.score -= (on_path.test(i) ? params_.het_adjustment : -params_.het_adjustment);
         break;
     }
   }
@@ -342,6 +348,52 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n
     UpdateScores(results.back());
   }
   return results;
+}
+
+std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleDiplotypes(
+    const std::vector<Graph::NodeIdSeq>& candidates, size_t max_diplotypes) const {
+  if (candidates.empty() || max_diplotypes == 0) return {};
+
+  // Pre-compute on-path bitsets once per candidate.
+  std::vector<boost::dynamic_bitset<>> on_paths;
+  on_paths.reserve(candidates.size());
+  for (const auto& cand : candidates)
+    on_paths.push_back(KmersOnPath(cand));
+
+  // Score all pairs with replacement (j >= i).
+  struct ScoredPair { double score; size_t i, j; };
+  std::vector<ScoredPair> scored;
+  scored.reserve(candidates.size() * (candidates.size() + 1) / 2);
+
+  for (size_t ci = 0; ci < candidates.size(); ++ci) {
+    for (size_t cj = ci; cj < candidates.size(); ++cj) {
+      // w(H, H') = sum over all k-mers of (1 - |observed_copy_count - expected_copy_count|)
+      double score = 0.0;
+      for (size_t k = 0; k < kmers_.size(); ++k) {
+        int copy_count = (on_paths[ci].test(k) ? 1 : 0) + (on_paths[cj].test(k) ? 1 : 0);
+        int expected;
+        switch (kmers_[k].zygosity) {
+          case KmerZygosity::ABSENT:       expected = 0; break;
+          case KmerZygosity::HETEROZYGOUS: expected = 1; break;
+          case KmerZygosity::HOMOZYGOUS:   expected = 2; break;
+          default: continue;  // skip FREQUENT
+        }
+        score += 1.0 - std::abs(copy_count - expected);
+      }
+      scored.push_back({score, ci, cj});
+    }
+  }
+
+  size_t keep = std::min(max_diplotypes, scored.size());
+  std::partial_sort(scored.begin(), scored.begin() + keep, scored.end(),
+      [](const ScoredPair& a, const ScoredPair& b) { return a.score > b.score; });
+  scored.resize(keep);
+
+  std::vector<Diplotype> result;
+  result.reserve(keep);
+  for (const auto& sp : scored)
+    result.push_back({candidates[sp.i], candidates[sp.j]});
+  return result;
 }
 
 }  // namespace npsv3
