@@ -76,5 +76,17 @@ def result_path(path: str) -> str:
     return os.path.join(RESULT_DIR, path)
 
 
+def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
+    """Create and return path to bgzip-compressed VCF file at tmp_path/name containing vcf"""
+    from pysam import BGZFile
+    from npsv3.util.vcf import index_variant_file
+    
+    vcf_path = os.path.join(tmp_path, os.name)
+    assert vcf_path.endswith(".vcf.gz"), "VCF path must end with .vcf.gz"
+    with BGZFile(vcf_path, "wb", index=None) as vcf_file:
+        vcf_file.write(vcf)
+    index_variant_file(vcf_path)
+    return vcf_path
+
 # Register resolvers for OmegaConf
 setup_resolvers()

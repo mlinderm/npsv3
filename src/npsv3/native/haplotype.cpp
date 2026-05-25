@@ -272,6 +272,19 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
 }
 
 
+Graph::PathIdSet HaplotypeSamplerOverlay::CoveredAlleles(const Graph::NodeIdSeq& path) const {
+  const size_t covered_paths_size = graph_.node_variant_paths_[graph_.min_node_id()].size();
+  Graph::PathIdSet result(covered_paths_size);
+  if (!apply_path_filter_) return result;
+
+  for (auto nid : path) {
+    if (inference_node_mask_.test(nid)) {
+      result |= graph_.node_variant_paths_[nid] & inference_path_mask_;
+    }
+  }
+  return result;
+}
+
 boost::dynamic_bitset<> HaplotypeSamplerOverlay::KmersOnPath(const Graph::NodeIdSeq& path) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();

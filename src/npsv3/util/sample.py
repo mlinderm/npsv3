@@ -2,16 +2,19 @@ import io
 import json
 import logging
 import os
+import struct
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from shlex import quote
 
 import numpy as np
+import omegaconf
 import pandas as pd
 import pybedtools.bedtool as bed
 import pysam
 
-_SAMPLE_STATS_FIELDS = ("sequencer", "read_length", "mean_coverage", "mean_insert_size", "std_insert_size")
+_REQUIRED_STATS_FIELDS = ("sequencer", "read_length", "mean_coverage", "mean_insert_size", "std_insert_size")
 
 
 def sample_name_from_bam(bam_path) -> str:
@@ -24,25 +27,23 @@ def sample_name_from_bam(bam_path) -> str:
         return sample
 
 
+@dataclass
 class Sample:
-    def __init__(self, name, **kwargs):
-        self.name = name
-
-        self.bam = kwargs.get("bam")
-        self.gender = kwargs.get("gender", 0)  # Use PED encoding
-
-        # Statistics fields initialized to None
-        for k in _SAMPLE_STATS_FIELDS:
-            setattr(self, k, kwargs.get(k))
-
-        self._chrom_normalized_coverage = kwargs.get("chrom_normalized_coverage", {})
-        self._gc_normalized_coverage = kwargs.get("gc_normalized_coverage", {})
-
-    def gc_normalized_coverage(self, gc_fraction: int) -> float:
-        return self._gc_normalized_coverage.get(gc_fraction, 1.0)
+    name: str
+    sequencer: str
+    read_length: int
+    mean_coverage: float
+    mean_insert_size: float
+    std_insert_size: float
+    bam: str|None = None
+    sex: int = 0
+    chrom_normalized_coverage: dict = field(default_factory=dict)
+    gc_normalized_coverage: dict = field(default_factory=dict)
+    kmc_prefix: str|None = None
+    kmer_coverage: float|None = None
 
     def chrom_mean_coverage(self, chrom: str) -> float:
-        """Return mean coverage for specific chromosome
+        """Return mean coverage for specific chromosome, defaulting to overall mean coverage.
 
         Args:
             chrom (str): Chromosome
@@ -50,22 +51,25 @@ class Sample:
         Returns:
             float: Mean coverage
         """
-        return self._chrom_normalized_coverage.get(chrom, 1.0) * self.mean_coverage
+        return self.chrom_normalized_coverage.get(chrom, 1.0) * self.mean_coverage
 
     @classmethod
     def from_json(cls, json_path: str, min_gc_bin=100, max_gc_error=0.01) -> "Sample":
         with open(json_path) as file:
             sample_info = json.load(file)
 
-            fields = {k: sample_info[k] for k in _SAMPLE_STATS_FIELDS}
+            fields = {k: sample_info[k] for k in _REQUIRED_STATS_FIELDS}
 
             # Optional fields
             fields["bam"] = sample_info.get("bam", None)
+            fields["sex"] = sample_info.get("sex", 0)
             fields["chrom_normalized_coverage"] = sample_info.get("chrom_normalized_coverage", {})
+            fields["kmc_prefix"] = sample_info.get("kmc_prefix", None)
+            fields["kmer_coverage"] = sample_info.get("kmer_coverage", None)
 
             # Filter GC entries with limited data
             gc_normalized_coverage = {}
-            for gc, norm_covg in sample_info["gc_normalized_coverage"].items():
+            for gc, norm_covg in sample_info.get("gc_normalized_coverage", {}).items():
                 if (
                     sample_info.get("gc_bin_count", {}).get(gc, 0) >= min_gc_bin
                     and sample_info.get("gc_normalized_coverage_error", {}).get(gc, 0) <= max_gc_error
@@ -229,7 +233,174 @@ def _compute_coverage_with_indexcov(read_path: str, fasta_path: str) -> dict:
         return norm_coverage_by_chrom
 
 
-def compute_read_stats(cfg, read_path: str) -> dict:
+def _kmc_db_kmer_size(prefix: str) -> int | None:
+    """Return the k-mer size stored in an existing KMC database, or None if unreadable."""
+    pre_path = f"{prefix}.kmc_pre"
+    suf_path = f"{prefix}.kmc_suf"
+    if not (os.path.exists(pre_path) and os.path.exists(suf_path)):
+        return None
+    try:
+        with open(pre_path, "rb") as f:
+            if f.read(4) != b"KMCP":
+                return None
+            f.seek(-4, 2)
+            if f.read(4) != b"KMCP":
+                return None
+            # KMC stores a version uint32 at -12 and a 1-byte header_offset at -8;
+            # kmer_length (uint32) is the first field in the footer at -(header_offset+8).
+            f.seek(-12, 2)
+            (kmc_version,) = struct.unpack("<I", f.read(4))
+            if kmc_version not in (0, 0x200):
+                return None
+            f.seek(-8, 2)
+            header_offset = f.read(1)[0]
+            f.seek(-(header_offset + 8), 2)
+            (kmer_length,) = struct.unpack("<I", f.read(4))
+            return kmer_length
+    except (OSError, struct.error, IndexError):
+        return None
+
+
+def _find_or_create_kmc_db(
+    read_path: str,
+    output_prefix: str,
+    reference_path: str,
+    kmer_size: int = 31,
+    min_count: int = 1,
+    threads: int = 1,
+    max_memory: int = 12,
+) -> str:
+    """Create a KMC k-mer database from a BAM or CRAM file.
+
+    Args:
+        read_path: Path to BAM or CRAM file.
+        output_prefix: Output path prefix for the KMC database (without extension).
+        reference_path: Reference FASTA used to decode CRAM. Required for CRAM input.
+        kmer_size: K-mer length. Defaults to 31.
+        min_count: Minimum k-mer count to retain. Defaults to 1.
+        threads: Number of threads for both samtools and KMC. Defaults to 1.
+        max_memory: Maximum memory in GB for KMC. Defaults to 12.
+
+    Returns:
+        str: The output_prefix, pointing to the created KMC database.
+    """
+    if _kmc_db_kmer_size(output_prefix) == kmer_size:
+        logging.debug("Reusing existing KMC database at %s (k=%d)", output_prefix, kmer_size)
+        return output_prefix
+
+    logging.info("Building KMC k-mer database at %s (k=%d)", output_prefix, kmer_size)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        if read_path.endswith(".cram"):
+            # KMC does not support CRAM so convert to BAM. We don't convert to FASTQ because that requires sorting.
+            bam_path = os.path.join(tmp_dir, "reads.bam")
+            convert_commandline = f"samtools view -@ {threads} --bam --reference {quote(reference_path)} -o {bam_path} {quote(read_path)}"
+            subprocess.check_call(
+                convert_commandline,
+                shell=True,
+                stderr=subprocess.DEVNULL,
+            )
+            read_path = bam_path
+
+        kmc_commandline = f"kmc \
+            -t{threads} \
+            -m{max_memory} -sm \
+            -k{kmer_size} \
+            -ci{min_count} \
+            -fbam \
+            {quote(read_path)} \
+            {quote(output_prefix)} \
+            {quote(tmp_dir)}"
+        subprocess.check_call(
+            kmc_commandline,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return output_prefix
+
+
+def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
+    """Estimate haploid k-mer coverage from a count histogram (Sirén et al. §2.1).
+
+    Args:
+        histogram: Mapping of count -> frequency, with singletons (count=1) already excluded.
+
+    Returns:
+        float: Estimated haploid coverage.
+
+    Raises:
+        ValueError: If the coverage cannot be determined from the histogram shape.
+    """
+    if histogram.empty:
+        raise ValueError("K-mer count histogram is empty; cannot auto-estimate coverage")
+
+    mode_count = int(histogram.idxmax())
+    mode_freq = histogram[mode_count]
+
+    # Weighted median: smallest count where cumulative frequency >= 50% of total
+    median_idx = histogram.cumsum().searchsorted(histogram.sum() // 2, side="left")
+    median_count = int(histogram.index[int(median_idx)])  # Need int conversion to silence type errors
+
+    # From Sirén et al. §2.1:
+    # Let N be the most common count and m the median count. If N ≥ m, we assume that most k-mers that
+    # are present in the sample are homozygous and use N as the estimate of k-mer coverage.
+    if mode_count >= median_count:
+        return mode_count
+
+    # Otherwise we consider the case that most present k-mers are heterozygous. Let
+    # N′ = argmax_{1.7N≤n≤2.3N}f(n) be the secondary peak near 2N. If N′ ≥ m and f(N′) ≥ 0.5f(N ),
+    # we assume that N′ is the most common count of homozygous k-mers and use it as the estimate.
+    search_idxs = (histogram.index >= 1.7 * mode_count) & (histogram.index <= 2.3 * mode_count)
+    window = histogram[search_idxs]
+    if not window.empty:
+        prime_count = int(window.idxmax())
+        if prime_count >= median_count and histogram[prime_count] >= 0.5 * mode_freq:
+            return prime_count
+
+    raise ValueError(
+        "Cannot auto-estimate coverage from k-mer count distribution; please supply kmer_coverage explicitly"
+    )
+
+
+def _estimate_kmer_coverage(kmc_prefix: str, threads: int = 1) -> float:
+    """Estimate haploid k-mer coverage from an existing KMC database using the Sirén et al. §2.1
+    peak-finding algorithm
+
+    Args:
+        kmc_prefix (str): Path prefix for an existing KMC database (without extension).
+        threads (int): Number of threads to use for kmc_tools.
+
+    Returns:
+        float: Estimated k-mer coverage.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".hist", delete=False) as hist_file:
+        hist_path = hist_file.name
+    try:
+        subprocess.check_call(
+            f"kmc_tools -t{threads} -hp transform {quote(kmc_prefix)} histogram {quote(hist_path)}",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        histogram = pd.read_csv(hist_path, sep="\t", index_col=0, names=["count", "freq"], dtype=int)["freq"]
+    finally:
+        os.unlink(hist_path)
+
+    return _estimate_coverage_from_histogram(histogram)
+
+
+def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: str|None = None) -> dict:
+    """Compute read stats for a aligned read file
+
+    Args:
+        cfg (omegaconf.DictConfig): Configuration object.
+        read_path (str): Path to the aligned read file.
+        kmc_prefix (str | None, optional): Path prefix for an existing KMC database (without extension). Defaults to None.
+
+    Returns:
+        dict: Dictionary containing the computed stats.
+    """    
+
     # Generate stats for the entire read file using goleft covstats
     logging.info("Computing coverage and insert size statistics with goleft")
     covstats_commandline = f"goleft \
@@ -261,4 +432,17 @@ def compute_read_stats(cfg, read_path: str) -> dict:
         "gc_normalized_coverage": gc_norm_covg,
         "gc_bin_count": gc_norm_covg_count,
     }
+
+    if kmc_prefix is not None:
+        _find_or_create_kmc_db(
+            read_path,
+            kmc_prefix,
+            reference_path=cfg.reference,
+            kmer_size=cfg.kmer.kmer_size,
+            threads=cfg.threads,
+        )
+        stats["kmc_prefix"] = kmc_prefix
+        logging.info("Estimating k-mer coverage from KMC database")
+        stats["kmer_coverage"] = _estimate_kmer_coverage(kmc_prefix, threads=cfg.threads)
+
     return stats

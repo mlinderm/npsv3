@@ -74,6 +74,11 @@ class HaplotypeSamplerOverlay {
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Graph::NodeIdSeq>& candidates,
                                           size_t max_diplotypes = 1) const;
 
+  /// Returns the set of inference allele paths covered by the given NodeIdSeq,
+  /// using the active inference node/path masks. Empty bitset if no inference VCF
+  /// was provided at construction.
+  Graph::PathIdSet CoveredAlleles(const Graph::NodeIdSeq& path) const;
+
   /// Number of unique non-universal k-mers collected during construction.
   size_t NumKmers() const { return kmers_.size(); }
 

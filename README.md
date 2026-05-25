@@ -128,18 +128,20 @@ docker run --rm --entrypoint /bin/bash \
 ```
 
 As described above, for easily rebuilding when making changes to the C++ extension run the following. The name of the hatch environment and corresponding build directory are determined by the Python version in the container:
+
 ```
-hatch -e hatch-test.py3.12 shell
-pip install nanobind scikit-build-core[pyproject]
-pip install --no-build-isolation -ve .
+hatch -e $HATCH_TEST_ENV shell
+uv pip install nanobind scikit-build-core[pyproject]
+uv pip install --no-build-isolation -ve .
 pytest tests
 ```
-Having done the above at least once, you can just build and run the native test suite with:
-```
-cmake --build build/cp312-abi3-linux_aarch64 -t graph_test
-ctest --test-dir build/cp312-abi3-linux_aarch64
-```
 
+Having done the above at least once, you can just build and run the native test suite with:
+
+```
+cmake --build $EXT_BUILD_DIR -t graph_test
+ctest --test-dir $EXT_BUILD_DIR
+```
 
 ## License
 

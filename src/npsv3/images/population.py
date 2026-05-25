@@ -46,6 +46,7 @@ def overlapping_variants(vcf_file: VariantFileReader|str, region: Range|None = N
 
     if isinstance(vcf_file, str):
         vcf_file = VariantFileReader.open(vcf_file)
+        # TODO: Automatically close this file when done
     assert isinstance(vcf_file, VariantFileReader)
 
     for variant in vcf_file.fetch(region=region):

@@ -94,6 +94,10 @@ class Graph : public handlegraph::HandleGraph {
   HandleSeq PathHandles(const std::string& path_name) const;
   NodeIdSeq PathNodes(const handlegraph::path_handle_t& path_handle) const;
   NodeIdSeq PathNodes(const std::string& path_name) const;
+
+  /// Enumerate all path names with the given prefix and return a concatenated NodeIdSeq.
+  /// Used to gather all segments of one sample haplotype (e.g., prefix = "SAMPLE#0#chr1").
+  NodeIdSeq HaplotypePaths(const std::string& prefix) const;
   
   /** Return the sequence of a path from path name, handle or node ID iterator */
   // @{

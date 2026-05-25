@@ -31,6 +31,51 @@ class VariantFileReaderIterator {
 };
 
 NB_MODULE(_native_graph, m) {
+  nb::enum_<npsv3::KmerZygosity>(m, "KmerZygosity")
+    .value("ABSENT", npsv3::KmerZygosity::ABSENT)
+    .value("HETEROZYGOUS", npsv3::KmerZygosity::HETEROZYGOUS)
+    .value("HOMOZYGOUS", npsv3::KmerZygosity::HOMOZYGOUS)
+    .value("FREQUENT", npsv3::KmerZygosity::FREQUENT);
+
+  nb::class_<npsv3::KmerCounts>(m, "KmerCounts")
+    .def("__init__", [](npsv3::KmerCounts* self, const std::string& db_path, double coverage) {
+      new (self) npsv3::KmerCounts(db_path, npsv3::KmerCounts::Params{coverage});
+    }, "db_path"_a, "coverage"_a = 0.0)
+    .def("coverage", &npsv3::KmerCounts::coverage);
+
+  nb::class_<npsv3::HaplotypeSamplerOverlay>(m, "HaplotypeSamplerOverlay")
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph,
+                        size_t k, size_t max_edge, const npsv3::KmerCounts& counts) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, k, max_edge, counts);
+    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 5>(),
+    "graph"_a, "k"_a, "max_edge"_a, "counts"_a)
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph,
+                        size_t k, size_t max_edge, const npsv3::KmerCounts& counts,
+                        const std::string& inference_vcf, const npsv3::Range& region, size_t min_size) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, k, max_edge, counts, inference_vcf, region, min_size);
+    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 5>(),
+    "graph"_a, "k"_a, "max_edge"_a, "counts"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
+    .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
+    .def("sample_diplotypes", [](npsv3::HaplotypeSamplerOverlay& self,
+                                  const std::vector<npsv3::Graph::NodeIdSeq>& candidates,
+                                  size_t max_diplotypes) {
+      auto diplotypes = self.SampleDiplotypes(candidates, max_diplotypes);
+      std::vector<std::tuple<npsv3::Graph::NodeIdSeq, npsv3::Graph::NodeIdSeq>> result;
+      result.reserve(diplotypes.size());
+      for (const auto& d : diplotypes)
+        result.emplace_back(d[0], d[1]);
+      return result;
+    }, "candidates"_a, "max_diplotypes"_a = 1)
+    .def("covered_alleles", [](const npsv3::HaplotypeSamplerOverlay& self,
+                                const npsv3::Graph::NodeIdSeq& path) {
+      auto bitset = self.CoveredAlleles(path);
+      std::vector<bool> result(bitset.size());
+      for (size_t i = 0; i < bitset.size(); ++i)
+        result[i] = bitset.test(i);
+      return result;
+    }, "path"_a);
+
+
   m.doc() = "NPSV3 native graph tools";
 
   nb::class_<npsv3::Range>(m, "Range")
@@ -78,6 +123,11 @@ NB_MODULE(_native_graph, m) {
 
   nb::class_<npsv3::VariantFileReader>(m, "VariantFileReader")
     .def_static("open", &npsv3::VariantFileReader::Open)
+    .def("__enter__", [](npsv3::VariantFileReader& reader) { return &reader; })
+    .def("__exit__", [](npsv3::VariantFileReader& reader, [[maybe_unused]] nb::handle exc_type, [[maybe_unused]] nb::handle exc_value, [[maybe_unused]] nb::handle traceback) {
+      reader.Close();
+      return false; // Don't suppress exceptions
+    })
     .def("fetch", [](npsv3::VariantFileReader& reader) {
       reader.SetRegion();
       return VariantFileReaderIterator(reader);
@@ -122,6 +172,7 @@ NB_MODULE(_native_graph, m) {
       }
       return graph.PathSequence(handles.begin(), handles.end());
     }, "nodes"_a)
+    .def("haplotype_paths", &npsv3::Graph::HaplotypePaths, "prefix"_a)
     .def("unique_kmers",
       [](const npsv3::Graph& graph, size_t k, size_t max_edge, bool exclude_universal) {
         std::vector<std::tuple<std::string, std::vector<odgi::nid_t>, uint64_t>> result;

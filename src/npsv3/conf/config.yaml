@@ -5,6 +5,7 @@ defaults:
   - model: paired_packed_inception_contrastive
   - data: packed_images
   - trainer: paired
+  - kmer: kmc
   - command: genotype
   - checkpoint_callback: base
   - _self_

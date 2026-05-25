@@ -496,6 +496,34 @@ std::vector<odgi::nid_t> Graph::PathNodes(const std::string& path_name) const {
   return PathNodes(get_path_handle(path_name));
 }
 
+Graph::NodeIdSeq Graph::HaplotypePaths(const std::string& prefix) const {
+  const std::string full_prefix = prefix + "#";
+
+  std::vector<std::pair<int, NodeIdSeq>> segments;
+  graph_.for_each_path_handle([&](const handlegraph::path_handle_t& path_handle) {
+    const auto name = graph_.get_path_name(path_handle);
+    if (name.size() <= full_prefix.size()) return;
+    if (!std::equal(full_prefix.begin(), full_prefix.end(), name.begin())) return;
+    const auto suffix = name.substr(full_prefix.size());
+    try {
+      size_t pos;
+      int seg_idx = std::stoi(suffix, &pos);
+      if (pos == suffix.size()) {
+        segments.emplace_back(seg_idx, PathNodes(path_handle));
+      }
+    } catch (...) {}
+  });
+
+  std::sort(segments.begin(), segments.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  NodeIdSeq result;
+  for (auto& [_, nodes] : segments) {
+    result.insert(result.end(), nodes.begin(), nodes.end());
+  }
+  return result;
+}
+
 std::string Graph::PathSequence(const handlegraph::path_handle_t& path_handle) const {
   std::string seq;
   graph_.for_each_step_in_path(path_handle, [&](const handlegraph::step_handle_t& step) {
