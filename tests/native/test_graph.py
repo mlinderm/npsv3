@@ -6,16 +6,7 @@ from npsv3._native_graph import Graph, Range, VariantFileReader
 from npsv3.util.vcf import index_variant_file
 from npsv3.variant import Variant
 
-from .. import HG38_REF_FASTA
-
-
-def _create_vcf(tmp_path: str, vcf: bytes) -> str:
-    vcf_path = os.path.join(tmp_path, "test.vcf.gz")
-    with pysam.BGZFile(vcf_path, "wb") as vcf_file:
-        vcf_file.write(vcf)
-    index_variant_file(vcf_path)
-    return vcf_path
-
+from .. import HG38_REF_FASTA, _create_vcf
 
 class TestVariantFileReader:
     def test_variant_reader(self, tmp_path):

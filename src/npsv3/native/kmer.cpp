@@ -1,169 +1,203 @@
 #include "kmer.hpp"
 
 #include <algorithm>
+#include <numeric>
+#include <fstream>
 #include <map>
 #include <stdexcept>
+#include <utility>
+
+#include <boost/scope/scope_exit.hpp>
+#include <boost/dynamic_bitset.hpp>
+#include <handlegraph/util.hpp>
 
 namespace npsv3 {
 
 namespace {
+  // Map from node_id to the [start, end) range within that node covered by a k-mer.
+using NodeCoverageMap = std::unordered_map<handlegraph::handle_t, std::pair<size_t, size_t>>;
 
-/// Estimate haploid coverage from a KMC count histogram (Sirén et al. §2.1).
-///
-/// Algorithm:
-///   1. Find the primary peak p = argmax(histogram[count >= 2]).
-///   2. If p > weighted median of the non-singleton distribution → coverage = p
-///      (unimodal distribution; the homozygous peak dominates).
-///   3. Otherwise search for a secondary local maximum in [1.5·p, 2.5·p] whose
-///      frequency is at least half the primary-peak frequency (a "good enough"
-///      secondary peak that corresponds to the homozygous peak when the het peak
-///      is primary). If found → coverage = secondary peak count.
-///   4. If both steps fail, throw CoverageEstimationError.
-double EstimateCoverageFromHistogram(const std::map<uint32_t, uint64_t>& histogram) {
-  if (histogram.empty()) {
-    throw CoverageEstimationError(
-        "k-mer count histogram is empty; cannot auto-estimate coverage");
-  }
-
-  // Total non-singleton k-mers and the primary peak.
-  uint64_t total = 0;
-  uint32_t mode_count = 0;
-  uint64_t mode_freq = 0;
-
-  for (const auto& [cnt, freq] : histogram) {
-    total += freq;
-    if (freq > mode_freq) {
-      mode_freq = freq;
-      mode_count = cnt;
+/**
+ * @brief Compute the coverage of a k-mer within each node of its handle path.
+ *
+ * @param graph The graph to query for node sequences.
+ * @param handles The handle path of the k-mer occurrence, in order.
+ * @param start_offset The offset within the first handle where the k-mer starts.
+ * @param k The length of the k-mer.
+ *
+ * @return A map from handle to the half-open [start, end) range within that node covered by the k-mer. Zero-length
+ * (deletion) nodes are included with the sentinel value {0, 0}.
+ */
+NodeCoverageMap ComputeKmerCoverage(const handlegraph::HandleGraph& graph,
+                                    const std::vector<handlegraph::handle_t>& handles,
+                                    uint64_t start_offset, size_t k) {
+  NodeCoverageMap coverage;
+  for (size_t i = 0, remaining = k; i < handles.size() && remaining > 0; ++i) {
+    auto seq = graph.get_sequence(handles[i]);
+    size_t seq_length = seq.size();
+    if (seq_length == 0) {
+      // Deletion node: Record traversal with sentinel {0,0} so it participates
+      // in the common-intersection check across occurrences.
+      coverage[handles[i]] = {0, 0};
+      continue;
+    }
+    size_t node_start = (i == 0) ? static_cast<size_t>(start_offset) : 0;
+    assert(node_start < seq_length); // node_start should always be within the node sequence
+    size_t covered = std::min(remaining, seq_length - node_start);
+    if (covered > 0) {
+      coverage[handles[i]] = {node_start, node_start + covered};
+      remaining -= covered;
     }
   }
-
-  // Weighted median: the count value at which cumulative weight reaches 50%.
-  uint64_t cumulative = 0;
-  uint32_t median_count = 0;
-  for (const auto& [cnt, freq] : histogram) {  // std::map iterates in ascending key order
-    cumulative += freq;
-    if (2 * cumulative >= total) {
-      median_count = cnt;
-      break;
-    }
-  }
-
-  // Step 2: unimodal check. "most common count exceeds the median" (Sirén et al. §2.1).
-  // Use >= so that a perfectly unimodal distribution (mode == median) also succeeds.
-  if (mode_count >= median_count) {
-    return static_cast<double>(mode_count);
-  }
-
-  // Step 3: look for a secondary peak at approximately 2x the primary peak.
-  const uint32_t search_lo = static_cast<uint32_t>(1.5 * mode_count);
-  const uint32_t search_hi = static_cast<uint32_t>(2.5 * mode_count);
-
-  uint32_t secondary_count = 0;
-  uint64_t secondary_freq = 0;
-
-  // Find the local maximum in the search range — a count whose frequency
-  // exceeds both its immediate neighbours in the histogram.
-  uint32_t prev_cnt = 0;
-  uint64_t prev_freq = 0;
-  for (auto it = histogram.lower_bound(search_lo); it != histogram.end() && it->first <= search_hi; ++it) {
-    auto next_it = std::next(it);
-    const uint64_t next_freq = (next_it != histogram.end() && next_it->first <= search_hi)
-                                   ? next_it->second
-                                   : 0;
-    if (it->second >= prev_freq && it->second >= next_freq && it->second > secondary_freq) {
-      secondary_freq = it->second;
-      secondary_count = it->first;
-    }
-    prev_cnt = it->first;
-    prev_freq = it->second;
-  }
-
-  // "Good enough" = secondary peak frequency is at least half the primary peak frequency.
-  if (secondary_count > 0 && secondary_freq * 2 >= mode_freq) {
-    return static_cast<double>(secondary_count);
-  }
-
-  throw CoverageEstimationError(
-      "Cannot auto-estimate coverage from k-mer count distribution; "
-      "please supply KmerCountsParams::coverage explicitly");
+  return coverage;
 }
 
-}  // namespace
+
+/**
+ * @brief Intersect k-mer coverage maps in place
+ */
+void IntersectCoverage(NodeCoverageMap& current, const NodeCoverageMap& other) {
+  for (auto it = current.begin(); it != current.end();) {
+    auto jt = other.find(it->first);
+    if (jt == other.end()) {
+      it = current.erase(it);
+    } else if (it->second == NodeCoverageMap::mapped_type({0, 0}) &&
+               jt->second == NodeCoverageMap::mapped_type({0, 0})) {
+      // Both occurrences traversed the same deletion node
+      ++it;
+    } else {
+      const auto& [start1, end1] = it->second;
+      const auto& [start2, end2] = jt->second;
+      size_t new_start = std::max(start1, start2);
+      size_t new_end = std::min(end1, end2);
+      if (new_start >= new_end) {
+        it = current.erase(it);
+      } else {
+        it->second = {new_start, new_end};
+        ++it;
+      }
+    }
+  }
+}
+
+template<typename T>
+void apply_permutation_in_place(const std::vector<size_t>& perm, std::vector<T>& vec) {
+  // https://stackoverflow.com/a/17074810
+  assert(perm.size() == vec.size());
+  boost::dynamic_bitset<> done(perm.size(), 0);
+  for (size_t i = 0; i < vec.size(); ++i) {
+    if (done.test(i)) {
+        continue;
+    }
+    done.set(i);
+    std::size_t prev_j = i;
+    std::size_t j = perm[i];
+    while (i != j) {
+      std::swap(vec[prev_j], vec[j]);
+      done.set(j);
+      prev_j = j;
+      j = perm[j];
+    }
+  }
+}
+
+std::string CanonicalKmer(const std::string& seq) {
+  std::string rc = odgi::reverse_complement(seq);
+  return rc < seq ? rc : seq;
+}
+
+} // anonymous namespace
+
+UniqueKmersOverlay::UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_edges, bool exclude_universal, bool canonicalize) : graph_(graph), k_(k) {
+  struct Location : public KmerLocation {
+    NodeCoverageMap coverage_;  // running intersection across all occurrences seen so far
+  };
+  std::unordered_map<std::string, Location> seen;
+  std::unordered_set<std::string> non_unique;
+
+  graph_.Kmers(k_, max_edges, [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+    // When canonicalize is set, forward and reverse-complement occurrences share one key so
+    // their coverage maps are intersected together, just like multiple forward occurrences are.
+    // TODO: Optimize canonicalization to not create copy when not canonicalizing or when the reverse complement is greater than the forward sequence.
+    std::string key = canonicalize ? CanonicalKmer(seq) : seq;
+    if (non_unique.count(key)) return;
+
+    // A k-mer is **graph-unique** if all occurrences of its sequence in the graph share a non-empty coverage intersection
+    // of at least one node — i.e., every occurrence traverses the same portion of some common node. This allows the k-mer
+    // to start or end in different nodes across haplotypes (e.g., when multiple predecessor paths converge into a shared
+    // node), as long as all occurrences pass through a shared node segment.
+
+    auto curr_coverage = ComputeKmerCoverage(graph_, handles, offset, k);
+    auto it = seen.find(key);
+    if (it == seen.end()) {
+      seen.emplace(key, Location{ handles, offset, std::move(curr_coverage) });
+    } else {
+      auto& entry = it->second;
+      IntersectCoverage(entry.coverage_, curr_coverage);
+      if (entry.coverage_.empty()) {
+        non_unique.insert(key);
+        seen.erase(it);
+      }
+    }
+  });
+
+  // Collect survivors applying universal filter if requested.
+  sequences_.reserve(seen.size());
+  locations_.reserve(seen.size());
+  for (auto it = seen.begin(); it != seen.end(); ) {
+    auto node = seen.extract(it++); // Extract invalidates iterator, so post-increment before processing
+    if (exclude_universal) {
+      // A k-mer is "universal" if all nodes uniquely covered by this k-mer are not part of any variants and thus must
+      // appear on any traversal of the graph.
+      bool is_universal = std::all_of(node.mapped().coverage_.begin(), node.mapped().coverage_.end(),
+        [&](const auto& kv) {
+          auto node_id = graph_.get_id(kv.first);
+          assert(node_id < graph_.node_variant_paths_.size());
+          return graph_.node_variant_paths_[node_id].none();
+        });
+      
+      if (is_universal) continue;
+    }
+    sequences_.push_back(std::move(node.key()));
+    locations_.push_back(std::move(static_cast<KmerLocation>(node.mapped())));
+  }
+  sequences_.shrink_to_fit();
+  locations_.shrink_to_fit();
+
+  // Sort the sequences by creating a permutation and applying it to both vectors
+  {
+    std::vector<size_t> perm(sequences_.size());
+    std::iota(perm.begin(), perm.end(), 0);
+    std::sort(perm.begin(), perm.end(), [&](size_t i, size_t j) {
+      return sequences_[i] < sequences_[j];
+    });
+    apply_permutation_in_place(perm, sequences_);
+    apply_permutation_in_place(perm, locations_);
+  }
+}
+
+void UniqueKmersOverlay::SaveFasta(const std::string& fasta_path) const {
+  // TODO: Write compressed FASTA
+  std::ofstream fasta(fasta_path);
+  for (size_t i = 0; i < sequences_.size(); ++i) {
+    fasta << ">" << i << "\n";
+    fasta << sequences_[i] << "\n";
+  }
+}
+
+KmerCounts::KmerCounts(const std::string& db_path, double coverage, const KmerCounts::Params& params)
+    : db_path_(db_path) {
+  assert(params.absent_fraction < params.heterozygous_fraction &&
+         params.heterozygous_fraction < params.homozygous_fraction);
+  absent_coverage_ = params.absent_fraction * coverage;
+  heterozygous_coverage_ = params.heterozygous_fraction * coverage;
+  homozygous_coverage_ = params.homozygous_fraction * coverage;
+}
 
 // ---------------------------------------------------------------------------
 
-double KmerCounts::EstimateCoverage(const std::string& db_path) {
-  CKMCFile db;
-  if (!db.OpenForListing(db_path)) {
-    throw std::runtime_error("Cannot open KMC database for listing: " + db_path);
-  }
-
-  const uint32_t k = db.KmerLength();
-  CKmerAPI kmer(k);
-  uint32_t count = 0;
-
-  // Build histogram, skipping singletons (dominated by sequencing errors).
-  std::map<uint32_t, uint64_t> histogram;
-  while (db.ReadNextKmer(kmer, count)) {
-    if (count > 1) {
-      histogram[count]++;
-    }
-  }
-  db.Close();
-
-  return EstimateCoverageFromHistogram(histogram);
-}
-
-// ---------------------------------------------------------------------------
-
-KmerCounts::KmerCounts(const std::string& db_path, const KmerCounts::Params& params) {
-  // Auto-estimate coverage before opening in RA mode (requires a listing pass).
-  if (params.coverage <= 0.0) {
-    coverage_ = EstimateCoverage(db_path);
-  } else {
-    coverage_ = params.coverage;
-  }
-
-  // Compute coverage thresholds from the coverage estimate and the specified cutoffs
-  assert(params.absent_fraction < params.heterozygous_fraction && params.heterozygous_fraction < params.homozygous_fraction);
-  absent_coverage_ = params.absent_fraction * coverage_;
-  heterozygous_coverage_ = params.heterozygous_fraction * coverage_;
-  homozygous_coverage_ = params.homozygous_fraction * coverage_;
-
-  if (!db_.OpenForRA(db_path)) {
-    throw std::runtime_error("Cannot open KMC database for random access: " + db_path);
-  }
-
-  // GetBothStrands() returns true when KMC was run WITHOUT the -b flag, i.e. all k-mers are stored in canonical form. 
-  canonicalize_ = db_.GetBothStrands();
-}
-
-KmerCounts::~KmerCounts() {
-  db_.Close();
-}
-
-KmerZygosity KmerCounts::Classify(const std::string& seq) const {
-  const uint32_t k = db_.KmerLength();
-  CKmerAPI kmer(k);
-
-  if (!kmer.from_string(seq)) {
-    // Treat k-mers with invalid characters as absent
-    return KmerZygosity::ABSENT;
-  }
-
-  if (canonicalize_) {
-    // KMC only stores the canonical (lexicographically smaller) k-mer. Canonicalize the query k-mer before lookup.
-    CKmerAPI rev(kmer);
-    rev.reverse();
-    if (rev < kmer) {
-      kmer = rev;
-    }
-  }
-
-  uint32_t count = 0;
-  auto found = db_.CheckKmer(kmer, count);  // returns false (count=0) if k-mer absent
-  if (!found || count < absent_coverage_) {
+KmerZygosity KmerCounts::ClassifyCount(uint32_t count) const {
+  if (count < absent_coverage_) {
     return KmerZygosity::ABSENT;
   } else if (count < heterozygous_coverage_) {
     return KmerZygosity::HETEROZYGOUS;
@@ -171,6 +205,53 @@ KmerZygosity KmerCounts::Classify(const std::string& seq) const {
     return KmerZygosity::HOMOZYGOUS;
   } else {
     return KmerZygosity::FREQUENT;
+  }
+}
+
+void KmerCounts::ClassifySorted(const std::vector<std::string>& sequences, const std::function<void(size_t idx, KmerZygosity zyg)>& callback) const {
+  CKMCFile db;
+  if (!db.OpenForListing(db_path_)) {
+    throw std::runtime_error("Cannot open KMC database for listing: " + db_path_);
+  }
+  auto cleanup = boost::scope::make_scope_exit([&db] {
+    db.Close();
+  });
+
+  auto k = db.KmerLength();
+
+  // Track which indices had a DB "hit", emitting ABSENT for the rest after the loop. We can't emit
+  // ABSENT inline because the DB may only be locally sorted, not globally sorted.
+  boost::dynamic_bitset<> matched(sequences.size(), 0);
+
+  size_t pos = 0;
+  std::string prev_kmer_str;
+
+  CKmerAPI kmer(k);
+  uint32_t count = 0;
+  while (db.ReadNextKmer(kmer, count)) {
+    std::string kmer_str = kmer.to_string();
+
+    // Detect a locally-sorted chunk boundary and reset the merge position.
+    if (kmer_str < prev_kmer_str) {
+      pos = std::distance(sequences.begin(), std::lower_bound(sequences.begin(), sequences.begin() + pos, kmer_str));
+    }
+
+    // Advance past entries that sort before this k-mer, then emit any matches
+    while (pos < sequences.size() && sequences[pos] < kmer_str) {
+      ++pos;
+    }
+    for (; pos < sequences.size() && sequences[pos] == kmer_str; ++pos) {
+      matched[pos] = true;
+      callback(pos, ClassifyCount(count));
+    }
+
+    prev_kmer_str = std::move(kmer_str);
+  }
+
+  for (size_t i = 0; i < sequences.size(); ++i) {
+    if (!matched.test(i)) {
+      callback(i, KmerZygosity::ABSENT);
+    }
   }
 }
 

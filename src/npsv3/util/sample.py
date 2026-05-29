@@ -266,7 +266,9 @@ def _find_or_create_kmc_db(
     output_prefix: str,
     reference_path: str,
     kmer_size: int = 31,
+    canonicalize: bool = False,
     min_count: int = 1,
+    tmp_dir: str | None = None,
     threads: int = 1,
     max_memory: int = 12,
 ) -> str:
@@ -289,7 +291,7 @@ def _find_or_create_kmc_db(
         return output_prefix
 
     logging.info("Building KMC k-mer database at %s (k=%d)", output_prefix, kmer_size)
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory(dir=tmp_dir) as tmp_dir:
         if read_path.endswith(".cram"):
             # KMC does not support CRAM so convert to BAM. We don't convert to FASTQ because that requires sorting.
             bam_path = os.path.join(tmp_dir, "reads.bam")
@@ -305,6 +307,7 @@ def _find_or_create_kmc_db(
             -t{threads} \
             -m{max_memory} -sm \
             -k{kmer_size} \
+            {'-b' if not canonicalize else ""} \
             -ci{min_count} \
             -fbam \
             {quote(read_path)} \
@@ -317,7 +320,6 @@ def _find_or_create_kmc_db(
             stderr=subprocess.DEVNULL,
         )
     return output_prefix
-
 
 def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
     """Estimate haploid k-mer coverage from a count histogram (Sirén et al. §2.1).
@@ -446,3 +448,54 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
         stats["kmer_coverage"] = _estimate_kmer_coverage(kmc_prefix, threads=cfg.threads)
 
     return stats
+
+def filter_kmc_database(
+    genome_db_prefix: str|os.PathLike[str],
+    unique_kmers,
+    k: int,
+    output_db_prefix: str|os.PathLike[str],
+    canonicalize: bool = False,
+    tmp_dir: str | None = None,
+    threads: int = 1,
+    max_memory: int = 12,
+) -> str|os.PathLike[str]:
+    """Create a KMC database containing only the subset of genome_db_prefix with unique k-mers from the graph
+
+    Args:
+        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
+        unique_kmers: UniqueKmersOverlay object containing the unique k-mers.
+        k: K-mer length used when building the graph unique k-mers.
+        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
+        tmp_dir: Directory for temporary files, Python default directory if None.
+        threads: Number of threads for KMC tools. Defaults to 1.
+        max_memory: Maximum memory to use for KMC tools. Defaults to 12.
+    Returns:
+        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
+    """
+    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
+
+        # Write graph unique k-mer sequences as FASTA (one entry per k-mer).
+        fasta_path = os.path.join(work_dir, "graph_kmers.fa")
+        unique_kmers.save_fasta(fasta_path)
+
+        # Build a small KMC database from the FASTA.
+        graph_db = os.path.join(work_dir, "graph_kmers")
+        kmc_tmp = os.path.join(work_dir, "graph_kmers_tmp")
+        os.makedirs(kmc_tmp)
+
+        subprocess.check_call(
+            f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci0 -cs65535 -fa {quote(fasta_path)} {quote(graph_db)} {quote(kmc_tmp)}",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Intersect with the genome database, keeping database counts
+        os.makedirs(os.path.dirname(output_db_prefix), exist_ok=True)
+        subprocess.check_call(
+            f"kmc_tools -t{threads} -hp simple {quote(str(genome_db_prefix))} {quote(str(graph_db))} intersect {quote(str(output_db_prefix))} -ocleft",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return output_db_prefix

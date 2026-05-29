@@ -12,6 +12,7 @@ RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
 EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
 
 def _first_existing(*paths: str) -> str|None:
+    """Return the first path that exists, or None if none exist."""
     for path in paths:
         if os.path.exists(path):
             return path
@@ -68,10 +69,12 @@ HG00731_TRAINING_SV_VCF = _first_existing(os.path.join(EXPERIMENTS_DIR, "trainin
 HG00731_HG38_BAM = _first_existing(os.path.join(RESOURCES_DIR, "sequence/HG00731.final.cram"))
 
 def data_path(path: str) -> str:
+    """Return path to file in the test data directory"""
     return os.path.join(DATA_DIR, path)
 
 
 def result_path(path: str) -> str:
+    """Return path to file in the test results directory, creating the directory if it doesn't exist"""
     os.makedirs(RESULT_DIR, exist_ok=True)
     return os.path.join(RESULT_DIR, path)
 
@@ -81,7 +84,7 @@ def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
     from pysam import BGZFile
     from npsv3.util.vcf import index_variant_file
     
-    vcf_path = os.path.join(tmp_path, os.name)
+    vcf_path = os.path.join(tmp_path, name)
     assert vcf_path.endswith(".vcf.gz"), "VCF path must end with .vcf.gz"
     with BGZFile(vcf_path, "wb", index=None) as vcf_file:
         vcf_file.write(vcf)

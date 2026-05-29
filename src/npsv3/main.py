@@ -188,15 +188,18 @@ def main(cfg: DictConfig) -> None:
             hydra.utils.to_absolute_path(cfg.input),
             output,
         )
-    elif cfg.command == "top_k_genotype":
-        from npsv3.topk import top_k_genotype
+    elif cfg.command == "genotype_topk":
+        from npsv3.graphs.genotype import genotypes_in_topk
+        from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference"])
-        output = "top_k_stats.json" if OmegaConf.is_missing(cfg, "output") else \
-            hydra.utils.to_absolute_path(cfg.output)
+        _make_paths_absolute(cfg, ["reference", "stats_path", "input"])
+        sample = Sample.from_json(cfg.stats_path)
+        
+        statistics = genotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True) # Use kmc tools to filter k-mers
+        print(statistics)
 
-        sample_kmc_map = OmegaConf.to_container(cfg.kmc)
-        top_k_genotype(cfg, hydra.utils.to_absolute_path(cfg.input), sample_kmc_map, output)
+        #  output = "top_k_stats.json" if OmegaConf.is_missing(cfg, "output") else \
+        #     hydra.utils.to_absolute_path(cfg.output)
 
     else:
         msg = f"Command {cfg.command} not implemented"

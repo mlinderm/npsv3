@@ -1,2 +1,11 @@
 kmer_size: 31
-kmc_prefix: ???
+
+kmc_prefix: null
+
+# Unique k-mer related parameters
+max_edges: 5
+canonicalize: false
+
+# Sampling related parameters (adapted from Sirén et al. 2024)
+max_haplotypes: 6
+max_diplotypes: 32

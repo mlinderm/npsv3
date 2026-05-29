@@ -7,6 +7,7 @@
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/operators.h>
 
 #include "graph.hpp"
@@ -31,55 +32,48 @@ class VariantFileReaderIterator {
 };
 
 NB_MODULE(_native_graph, m) {
+   m.doc() = "NPSV3 native graph tools";
+
   nb::enum_<npsv3::KmerZygosity>(m, "KmerZygosity")
     .value("ABSENT", npsv3::KmerZygosity::ABSENT)
     .value("HETEROZYGOUS", npsv3::KmerZygosity::HETEROZYGOUS)
     .value("HOMOZYGOUS", npsv3::KmerZygosity::HOMOZYGOUS)
     .value("FREQUENT", npsv3::KmerZygosity::FREQUENT);
 
+  nb::class_<npsv3::UniqueKmersOverlay>(m, "UniqueKmersOverlay")
+    // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together
+    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, size_t k, size_t max_edges, bool exclude_universal, bool canonicalize) {
+      new (self) npsv3::UniqueKmersOverlay(graph, k, max_edges, exclude_universal, canonicalize);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "k"_a, "max_edges"_a = 1000, "exclude_universal"_a = true, "canonicalize"_a = false)
+    .def("__len__", &npsv3::UniqueKmersOverlay::size)
+    .def("save_fasta", &npsv3::UniqueKmersOverlay::SaveFasta, "fasta_path"_a);;
+
   nb::class_<npsv3::KmerCounts>(m, "KmerCounts")
     .def("__init__", [](npsv3::KmerCounts* self, const std::string& db_path, double coverage) {
-      new (self) npsv3::KmerCounts(db_path, npsv3::KmerCounts::Params{coverage});
-    }, "db_path"_a, "coverage"_a = 0.0)
-    .def("coverage", &npsv3::KmerCounts::coverage);
+      new (self) npsv3::KmerCounts(db_path, coverage);
+    }, "db_path"_a, "coverage"_a);
+
+  nb::class_<npsv3::HaplotypeSamplerOverlay::Diplotype>(m, "Diplotype")
+    .def_prop_ro("haplotypes", [](const npsv3::HaplotypeSamplerOverlay::Diplotype& d) {
+      return nb::make_tuple(d.h1, d.h2);
+    })
+    .def_ro("score", &npsv3::HaplotypeSamplerOverlay::Diplotype::score);
 
   nb::class_<npsv3::HaplotypeSamplerOverlay>(m, "HaplotypeSamplerOverlay")
-    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph,
-                        size_t k, size_t max_edge, const npsv3::KmerCounts& counts) {
-      new (self) npsv3::HaplotypeSamplerOverlay(graph, k, max_edge, counts);
-    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 5>(),
-    "graph"_a, "k"_a, "max_edge"_a, "counts"_a)
-    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph,
-                        size_t k, size_t max_edge, const npsv3::KmerCounts& counts,
-                        const std::string& inference_vcf, const npsv3::Range& region, size_t min_size) {
-      new (self) npsv3::HaplotypeSamplerOverlay(graph, k, max_edge, counts, inference_vcf, region, min_size);
-    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 5>(),
-    "graph"_a, "k"_a, "max_edge"_a, "counts"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
+    // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a)
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers, const std::string& inference_vcf, const npsv3::Range& region, size_t min_size) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers, inference_vcf, region, min_size);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
+    .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
-    .def("sample_diplotypes", [](npsv3::HaplotypeSamplerOverlay& self,
-                                  const std::vector<npsv3::Graph::NodeIdSeq>& candidates,
-                                  size_t max_diplotypes) {
-      auto diplotypes = self.SampleDiplotypes(candidates, max_diplotypes);
-      std::vector<std::tuple<npsv3::Graph::NodeIdSeq, npsv3::Graph::NodeIdSeq>> result;
-      result.reserve(diplotypes.size());
-      for (const auto& d : diplotypes)
-        result.emplace_back(d[0], d[1]);
-      return result;
-    }, "candidates"_a, "max_diplotypes"_a = 1)
-    .def("covered_alleles", [](const npsv3::HaplotypeSamplerOverlay& self,
-                                const npsv3::Graph::NodeIdSeq& path) {
-      auto bitset = self.CoveredAlleles(path);
-      std::vector<bool> result(bitset.size());
-      for (size_t i = 0; i < bitset.size(); ++i)
-        result[i] = bitset.test(i);
-      return result;
-    }, "path"_a);
-
-
-  m.doc() = "NPSV3 native graph tools";
+    .def("sample_diplotypes", &npsv3::HaplotypeSamplerOverlay::SampleDiplotypes, "candidates"_a, "n"_a)
+    .def("num_kmers", &npsv3::HaplotypeSamplerOverlay::NumKmers);
 
   nb::class_<npsv3::Range>(m, "Range")
-      // https://nanobind.readthedocs.io/en/latest/api_core.html#_CPPv4IDpEN8nanobind4initE
+    // https://nanobind.readthedocs.io/en/latest/api_core.html#_CPPv4IDpEN8nanobind4initE
     .def("__init__", [](npsv3::Range* r, const char* contig, npsv3::Pos start, npsv3::Pos end) {
       new (r) npsv3::Range(contig, start, end);
     })
@@ -108,6 +102,21 @@ NB_MODULE(_native_graph, m) {
     .def("set_filter_pass", &npsv3::Variant::SetFilterToPass)
     .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))
     .def("subset_samples", &npsv3::Variant::SubsetSamples)
+    .def("genotype", [](const npsv3::Variant& v, int sample_idx) {
+      auto genotypes = v.Genotypes();
+      if (sample_idx < 0 || static_cast<size_t>(sample_idx) >= genotypes.size())
+        throw std::out_of_range("Sample index out of range");
+      const auto& gt = genotypes[sample_idx];
+      const auto& idx = gt.allele_indices();
+      static_assert(npsv3::Variant::Genotype::kMaxPloidy == 3,
+          "genotype() binding switch must be updated to cover all cases");
+      switch (gt.num_alleles()) {
+        case 1: return nb::make_tuple(idx[0]);
+        case 2: return nb::make_tuple(idx[0], idx[1]);
+        case 3: return nb::make_tuple(idx[0], idx[1], idx[2]);
+        default: return nb::make_tuple();
+      }
+    }, "sample_idx"_a)
     .def("__str__", [](const npsv3::Variant& v) {
       std::ostringstream oss;
       oss << v;
@@ -173,20 +182,5 @@ NB_MODULE(_native_graph, m) {
       return graph.PathSequence(handles.begin(), handles.end());
     }, "nodes"_a)
     .def("haplotype_paths", &npsv3::Graph::HaplotypePaths, "prefix"_a)
-    .def("unique_kmers",
-      [](const npsv3::Graph& graph, size_t k, size_t max_edge, bool exclude_universal) {
-        std::vector<std::tuple<std::string, std::vector<odgi::nid_t>, uint64_t>> result;
-        graph.UniqueKmers(k, max_edge,
-          [&](const std::string& seq,
-              const std::vector<handlegraph::handle_t>& handles,
-              uint64_t offset) {
-            std::vector<odgi::nid_t> node_ids;
-            node_ids.reserve(handles.size());
-            for (const auto& h : handles)
-              node_ids.push_back(graph.get_id(h));
-            result.emplace_back(seq, std::move(node_ids), offset);
-          }, exclude_universal);
-        return result;
-      },
-      "k"_a, "max_edge"_a, "exclude_universal"_a = false);
+    ;
 }

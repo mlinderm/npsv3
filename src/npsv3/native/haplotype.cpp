@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 
 #include <boost/dynamic_bitset.hpp>
 
@@ -12,62 +13,44 @@
 
 namespace npsv3 {
 
-HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                                                 const KmerCounts& counts, const Params& params)
-    : graph_(graph), params_(params), apply_path_filter_(false) {
+HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers, const Params& params)
+    : graph_(graph), params_(params), apply_path_filter_(false), kmer_sequences_(unique_kmers.sequences()) {
+  // Maintain internal kmers_ in the same order as unique_kmers for consistent indexing.
+  kmers_.reserve(unique_kmers.size());
+  for (const auto & [handles, offset] : unique_kmers.locations()) { 
+    // Need to wait for C++20 for parenthesized initialization in emplace_back
+    auto kmer_idx = kmers_.size();
+    kmers_.push_back({ KmerZygosity::ABSENT, params_.absent_score}); 
 
-  graph.UniqueKmers(
-      k, max_edge,
-      [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, [[maybe_unused]] uint64_t offset) {
-        auto zyg = counts.Classify(seq);
-        double initial_score = params_.absent_score;
-        switch (zyg) {
-          default:
-            return;  // skip FREQUENT or otherwise unknown k-mers
-          case KmerZygosity::HOMOZYGOUS:
-            initial_score = params_.homozygous_score;
-            break;
-          case KmerZygosity::HETEROZYGOUS:
-            initial_score = params_.heterozygous_score;
-            break;
-          case KmerZygosity::ABSENT:
-            break;
-        }
+    // Record k-mer presence. K-mers within a node are associated with that node. K-mers that span multiple nodes
+    // are associated with explicit (shadow) edges spanning all the handles in their path.
+    if (handles.size() == 1) {
+      node_kmers_[graph.get_id(handles.front())].push_back(kmer_idx);
+    } else {
+      // Find edge, insert if not found
+      auto& edges = edge_kmers_[Edge{graph.get_id(handles.front()), graph.get_id(handles.back())}];
+      auto it = std::find_if(edges.begin(), edges.end(), [&](const EdgeInfo& e) {
+        // A matching node must have the same nodes (the first and last are already checked by the map key).
+        return std::equal(e.intermediate_nodes.begin(), e.intermediate_nodes.end(), handles.begin() + 1, handles.end() - 1, [&](odgi::nid_t node_id, const handlegraph::handle_t& handle) {
+          return node_id == graph.get_id(handle);
+        });
+      });
 
-        // Need to wait for C++20 for parenthesized initialization in emplace_back
-        auto kmer_idx = kmers_.size();
-        kmers_.push_back({seq, zyg, initial_score});
+      if (it == edges.end()) {
+        // No existing edges match this handle path, create a new one
+        EdgeInfo new_edge_info{ {}, {kmer_idx} };
 
-        // Record k-mer presence. K-mers within a node are associated with that node. K-mers that span multiple nodes
-        // are associated with explicit (shadow) edges spanning all the handles in their path.
-        if (handles.size() == 1) {
-          node_kmers_[graph.get_id(handles.front())].push_back(kmer_idx);
-        } else {
-          // Find edge, insert if not found
-          auto& edges = edge_kmers_[Edge{graph.get_id(handles.front()), graph.get_id(handles.back())}];
-          auto it = std::find_if(edges.begin(), edges.end(), [&](const EdgeInfo& e) {
-            // A matching node must have the same nodes (the first and last are already checked by the map key).
-            return std::equal(e.intermediate_nodes.begin(), e.intermediate_nodes.end(), handles.begin() + 1, handles.end() - 1, [&](odgi::nid_t node_id, const handlegraph::handle_t& handle) {
-              return node_id == graph.get_id(handle);
-            });
-          });
+        new_edge_info.intermediate_nodes.reserve(handles.size() - 2);
+        std::transform(handles.begin() + 1, handles.end() - 1, std::back_inserter(new_edge_info.intermediate_nodes),
+                        [&](const handlegraph::handle_t& handle) { return graph.get_id(handle); });
 
-          if (it == edges.end()) {
-            // No existing edges match this handle path, create a new one
-            EdgeInfo new_edge_info{ {}, {kmer_idx} };
-
-            new_edge_info.intermediate_nodes.reserve(handles.size() - 2);
-            std::transform(handles.begin() + 1, handles.end() - 1, std::back_inserter(new_edge_info.intermediate_nodes),
-                           [&](const handlegraph::handle_t& handle) { return graph.get_id(handle); });
-
-            edges.push_back(std::move(new_edge_info));
-          } else {
-            // Existing edge matches this handle path, add k-mer index to it
-            it->kmers.push_back(kmer_idx);
-          }
-        }
-      },
-      true /* exclude universal k-mers */);
+        edges.push_back(std::move(new_edge_info));
+      } else {
+        // Existing edge matches this handle path, add k-mer index to it
+        it->kmers.push_back(kmer_idx);
+      }
+    }
+  }
 
   // Absorb intermediate-node k-mers into each explicit edge's k-mer list.
   for (auto& [_, edges] : edge_kmers_) {
@@ -80,16 +63,35 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, s
   }
 }
 
-HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, size_t k, size_t max_edge,
-                                                 const KmerCounts& counts,
-                                                 const std::string& inference_vcf,
-                                                 const Range& region,
-                                                 size_t min_size,
-                                                 const Params& params)
-    : HaplotypeSamplerOverlay(graph, k, max_edge, counts, params) {
+HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
+                                                 const std::string& inference_vcf, const Range& region,
+                                                 size_t min_size, const Params& params)
+    : HaplotypeSamplerOverlay(graph, unique_kmers, params) {
   apply_path_filter_ = true;
   graph.PopulateNodeAndPathMasks(inference_vcf, region, min_size, inference_node_mask_, inference_path_mask_);
-  assert(inference_path_mask_.any()); // Should have at least one path to track, otherwise no paths will be selected
+  assert(inference_path_mask_.any());
+}
+
+void HaplotypeSamplerOverlay::InitializeScores(const KmerCounts& counts) {
+  // Re-classify k-mers to reset scores based on current parameters. FREQUENT or otherwise unknown k-mers
+  // are set to 0 (a neutral score) and not updated during sampling.
+  counts.ClassifySorted(kmer_sequences_, [&](size_t idx, KmerZygosity zyg) {
+    double initial_score = 0.0; // A neutral score for unknown k-mers, which are effectively ignored during sampling
+    switch (zyg) {
+      default: // FREQUENT or unknown k-mers receive neutral score
+        break;
+      case KmerZygosity::HOMOZYGOUS:
+        initial_score = params_.homozygous_score;
+        break;
+      case KmerZygosity::HETEROZYGOUS:
+        initial_score = params_.heterozygous_score;
+        break;
+      case KmerZygosity::ABSENT:
+        initial_score = params_.absent_score;
+        break;
+    }
+    kmers_[idx] = { zyg, initial_score };
+  });
 }
 
 namespace {
@@ -118,7 +120,7 @@ namespace {
   }
 }
 
-std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
   if (n == 0) return {};
 
   const odgi::nid_t min_id = graph_.min_node_id();
@@ -221,10 +223,6 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
 
         auto& next_back_pointers = dp[it->first.to - min_id];
         for (size_t b_idx = 0; b_idx < back_pointers.size(); ++b_idx) {
-          // Graph::PathIdSet combined = back_pointers[b_idx].covered_paths;
-          // if (filtering) {
-          //   combined |= edge_intermediate_paths;
-          // }
           next_back_pointers.push_back({back_pointers[b_idx].score + edge_delta, i /* predecessor node */,
                                         static_cast<int>(e_idx) /* explicit edge */,
                                         b_idx /* path index in predecessor node */,
@@ -239,7 +237,7 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
   SortAndTrimBacktrack(final_backtrack, n);
 
   // Backtrack from max_id to min_id for each of the (up to n) best paths.
-  std::vector<Graph::NodeIdSeq> result;
+  std::vector<Haplotype> result;
   result.reserve(final_backtrack.size());
   for (size_t back_idx = 0; back_idx < final_backtrack.size(); ++back_idx) {
     // When inference filtering is active, skip paths that don't traverse any inference nodes/paths.
@@ -247,7 +245,7 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
       continue;
     }
 
-    Graph::NodeIdSeq path;
+    Haplotype path;
     odgi::nid_t current_node = max_id;
     size_t current_back_idx = back_idx;
 
@@ -271,21 +269,7 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::FindBestPaths(size_t n) c
   return result;
 }
 
-
-Graph::PathIdSet HaplotypeSamplerOverlay::CoveredAlleles(const Graph::NodeIdSeq& path) const {
-  const size_t covered_paths_size = graph_.node_variant_paths_[graph_.min_node_id()].size();
-  Graph::PathIdSet result(covered_paths_size);
-  if (!apply_path_filter_) return result;
-
-  for (auto nid : path) {
-    if (inference_node_mask_.test(nid)) {
-      result |= graph_.node_variant_paths_[nid] & inference_path_mask_;
-    }
-  }
-  return result;
-}
-
-boost::dynamic_bitset<> HaplotypeSamplerOverlay::KmersOnPath(const Graph::NodeIdSeq& path) const {
+boost::dynamic_bitset<> HaplotypeSamplerOverlay::KmersOnPath(const Haplotype& path) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
   boost::dynamic_bitset<> on_path(kmers_.size());
@@ -320,7 +304,7 @@ boost::dynamic_bitset<> HaplotypeSamplerOverlay::KmersOnPath(const Graph::NodeId
   return on_path;
 }
 
-void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
+void HaplotypeSamplerOverlay::UpdateScores(const Haplotype& path) {
   auto on_path = KmersOnPath(path);
 
   for (size_t i = 0; i < kmers_.size(); ++i) {
@@ -338,8 +322,8 @@ void HaplotypeSamplerOverlay::UpdateScores(const Graph::NodeIdSeq& path) {
   }
 }
 
-std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
-  std::vector<Graph::NodeIdSeq> results;
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
+  std::vector<Haplotype> results;
   results.reserve(n);
 
   for (size_t i = 0; i < n; ++i) {
@@ -348,7 +332,7 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n
     auto paths = FindBestPaths(results.size() + 1);
 
     // Find the first path not already in results.
-    const Graph::NodeIdSeq* new_path = nullptr;
+    const Haplotype* new_path = nullptr;
     for (const auto& path : paths) {
       if (std::find(results.begin(), results.end(), path) == results.end()) {
         new_path = &path;
@@ -363,9 +347,10 @@ std::vector<Graph::NodeIdSeq> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n
   return results;
 }
 
-std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleDiplotypes(
-    const std::vector<Graph::NodeIdSeq>& candidates, size_t max_diplotypes) const {
-  if (candidates.empty() || max_diplotypes == 0) return {};
+std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n) const {
+  if (candidates.empty() || n == 0) {
+    return {};
+  }
 
   // Pre-compute on-path bitsets once per candidate.
   std::vector<boost::dynamic_bitset<>> on_paths;
@@ -374,8 +359,7 @@ std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleD
     on_paths.push_back(KmersOnPath(cand));
 
   // Score all pairs with replacement (j >= i).
-  struct ScoredPair { double score; size_t i, j; };
-  std::vector<ScoredPair> scored;
+  std::vector<Diplotype> scored;
   scored.reserve(candidates.size() * (candidates.size() + 1) / 2);
 
   for (size_t ci = 0; ci < candidates.size(); ++ci) {
@@ -393,20 +377,16 @@ std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleD
         }
         score += 1.0 - std::abs(copy_count - expected);
       }
-      scored.push_back({score, ci, cj});
+      scored.push_back({ci, cj, score});
     }
   }
 
-  size_t keep = std::min(max_diplotypes, scored.size());
+  size_t keep = std::min(n, scored.size());
   std::partial_sort(scored.begin(), scored.begin() + keep, scored.end(),
-      [](const ScoredPair& a, const ScoredPair& b) { return a.score > b.score; });
+      [](const Diplotype& a, const Diplotype& b) { return a.score > b.score; });
   scored.resize(keep);
-
-  std::vector<Diplotype> result;
-  result.reserve(keep);
-  for (const auto& sp : scored)
-    result.push_back({candidates[sp.i], candidates[sp.j]});
-  return result;
+  scored.shrink_to_fit();
+  return scored;
 }
 
 }  // namespace npsv3

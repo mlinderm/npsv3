@@ -1,9 +1,0 @@
-# @package _global_
-command: top_k_genotype
-
-n_haplotypes: 10      # Haplotypes to sample before diplotype scoring
-max_diplotypes: 10    # Top-k diplotypes to keep
-kmer_size: 31
-max_edge: 3
-min_sv_size: 50
-coverage: 0.0         # 0.0 = auto-estimate from KMC histogram

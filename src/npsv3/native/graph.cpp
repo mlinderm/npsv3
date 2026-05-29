@@ -256,7 +256,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
         ref_nodes.CreateRefNode(*next_zw, *next_zw);
         ++next_zw;
       }
-      for (int i = 0; i < ref_breakpoints.size() - 1; i++) {
+      for (auto i = 0; i < ref_breakpoints.size() - 1; i++) {
         ref_nodes.CreateRefNode(ref_breakpoints[i], ref_breakpoints[i + 1]);
         // Insert any zero-width regions (for insertions). There can only be one for each breakpoint interval.
         if (next_zw != zero_width_breakpoints.end() && *next_zw <= ref_breakpoints[i + 1]) {
@@ -776,72 +776,6 @@ void KmersDFS(
   });
 }
 
-// Map from node_id to the [start, end) range within that node covered by a k-mer.
-using NodeCoverageMap = std::unordered_map<handlegraph::handle_t, std::pair<size_t, size_t>>;
-
-/**
- * @brief Compute the coverage of a k-mer within each node of its handle path.
- *
- * @param graph The graph to query for node sequences.
- * @param handles The handle path of the k-mer occurrence, in order.
- * @param start_offset The offset within the first handle where the k-mer starts.
- * @param k The length of the k-mer.
- *
- * @return A map from handle to the half-open [start, end) range within that node covered by the k-mer. Zero-length
- * (deletion) nodes are included with the sentinel value {0, 0}.
- */
-NodeCoverageMap ComputeKmerCoverage(const handlegraph::HandleGraph& graph,
-                                     const std::vector<handlegraph::handle_t>& handles,
-                                     uint64_t start_offset, size_t k) {
-  NodeCoverageMap coverage;
-  for (size_t i = 0, remaining = k; i < handles.size() && remaining > 0; ++i) {
-    auto seq = graph.get_sequence(handles[i]);
-    size_t seq_length = seq.size();
-    if (seq_length == 0) {
-      // Deletion node: Record traversal with sentinel {0,0} so it participates
-      // in the common-intersection check across occurrences.
-      coverage[handles[i]] = {0, 0};
-      continue;
-    }
-    size_t node_start = (i == 0) ? static_cast<size_t>(start_offset) : 0;
-    assert(node_start < seq_length); // node_start should always be within the node sequence
-    size_t covered = std::min(remaining, seq_length - node_start);
-    if (covered > 0) {
-      coverage[handles[i]] = {node_start, node_start + covered};
-      remaining -= covered;
-    }
-  }
-  return coverage;
-}
-
-
-/**
- * @brief Intersect k-mer coverage maps in place
- */
-void IntersectCoverage(NodeCoverageMap& current, const NodeCoverageMap& other) {
-  for (auto it = current.begin(); it != current.end();) {
-    auto jt = other.find(it->first);
-    if (jt == other.end()) {
-      it = current.erase(it);
-    } else if (it->second == NodeCoverageMap::mapped_type({0, 0}) &&
-               jt->second == NodeCoverageMap::mapped_type({0, 0})) {
-      // Both occurrences traversed the same deletion node
-      ++it;
-    } else {
-      const auto& [start1, end1] = it->second;
-      const auto& [start2, end2] = jt->second;
-      size_t new_start = std::max(start1, start2);
-      size_t new_end = std::min(end1, end2);
-      if (new_start >= new_end) {
-        it = current.erase(it);
-      } else {
-        it->second = {new_start, new_end};
-        ++it;
-      }
-    }
-  }
-}
-
 } // namespace
 
 void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback) const {
@@ -867,48 +801,6 @@ void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std:
   }, false /* parallel */);
 }
 
-void Graph::UniqueKmers(size_t k, size_t edge_max, const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback, bool exclude_universal) const {
-  struct Entry {
-    std::vector<handlegraph::handle_t> handles_;
-    uint64_t starting_handle_offset_;
-    NodeCoverageMap coverage_;  // running intersection across all occurrences seen so far
-  };
-  std::unordered_map<std::string, Entry> seen;
-  std::unordered_set<std::string> non_unique;
-
-  Kmers(k, edge_max, [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
-    if (non_unique.count(seq)) return;
-
-    auto curr_coverage = ComputeKmerCoverage(*this, handles, offset, k);
-    auto it = seen.find(seq);
-    if (it == seen.end()) {
-      seen.emplace(seq, Entry{handles, offset, std::move(curr_coverage)});
-    } else {
-      auto & [seq, entry] = *it;
-      IntersectCoverage(entry.coverage_, curr_coverage);
-      if (entry.coverage_.empty()) {
-        non_unique.insert(seq);
-        seen.erase(it);
-      }
-    }
-  });
-
-  for (const auto& [seq, entry] : seen) {
-    if (exclude_universal) {
-      // A k-mer is "universal" if all nodes uniquely covered by this k-mer are not part of any variants and thus must
-      // appear on any traversal of the graph.
-      bool is_universal = std::all_of(entry.coverage_.begin(), entry.coverage_.end(),
-        [&](const auto& kv) {
-          auto node_id = get_id(kv.first);
-          assert(node_id < node_variant_paths_.size());
-          return node_variant_paths_[node_id].none();
-        });
-      if (is_universal) continue;
-    }
-    callback(seq, entry.handles_, entry.starting_handle_offset_);
-  }
-}
-
 void AllPathGraphOverlay::ForEachPath(const function<void(const CallbackIter&, const CallbackIter&, const Graph::PathIdSet&)>& callback) const { 
     CallbackSeq current_path({graph_.get_handle(graph_.max_node_id())});
     return ForEachPath(current_path, callback);
@@ -920,7 +812,7 @@ void AllPathGraphOverlay::ForEachPath(CallbackSeq& current_path, const function<
   auto current_node = graph_.get_id(current_handle);
   if (current_node == graph_.min_node_id()) {
     // Compute inference paths for this complete path
-    Graph::PathIdSet inference_paths(graph_.variant_path_starts_.back()); //inference_path_handles_.size());
+    Graph::PathIdSet inference_paths(graph_.variant_path_starts_.back());
     for (auto it = current_path.rbegin(); it != current_path.rend(); ++it) {
       auto node_id = graph_.get_id(*it);
       if (node_mask_.test(node_id)) {

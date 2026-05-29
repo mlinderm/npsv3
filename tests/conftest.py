@@ -94,3 +94,15 @@ def hg00731_sample():
         sequencer="HSXn",
         read_length=150,
     )
+
+@pytest.fixture
+def hg00096_sample():
+    return Sample(
+        name="HG00096",
+        sequencer="HSXn",
+        read_length=150,
+        mean_coverage=32.29,
+        mean_insert_size=437.41,
+        std_insert_size=102.4,
+        kmer_coverage=29,
+    )

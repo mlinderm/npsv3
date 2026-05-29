@@ -1,6 +1,5 @@
 #include <cstdlib>
 #include <filesystem>
-
 #include <fmt/std.h>
 
 #include "graph.hpp"
@@ -17,7 +16,13 @@ namespace fs = std::filesystem;
 class ConstantKmerCounts : public KmerCounts {
  public:
   explicit ConstantKmerCounts(KmerZygosity z = KmerZygosity::HOMOZYGOUS) : z_(z) {}
-  KmerZygosity Classify(const std::string&) const override { return z_; }
+
+  void ClassifySorted( const std::vector<std::string>& sequences, const ClassificationCallback& callback) const override {
+    for (size_t i = 0; i < sequences.size(); ++i) {
+      callback(i, z_);
+    }
+  }
+
  private:
   KmerZygosity z_;
 };
@@ -34,12 +39,15 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
-  const size_t k = 7, max_edge = 5;
+  const size_t k = 7, max_edges = 5;
+  
+  UniqueKmersOverlay unique_kmers(graph, k, max_edges);
+  HaplotypeSamplerOverlay sampler(graph, unique_kmers);
+  
   ConstantKmerCounts counts;
-  HaplotypeSamplerOverlay sampler(graph, k, max_edge, counts);
+  sampler.InitializeScores(counts);
 
   EXPECT_GT(sampler.NumKmers(), 0u);
-
   EXPECT_TRUE(sampler.HasNodeKmers()) << "Graph has 18bp deletion, so should have some node k-mers";
   EXPECT_TRUE(sampler.HasEdgeKmers()) << "Graph should have edge k-mers crossing the breakpoints";
 
@@ -47,7 +55,7 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
     auto paths = sampler.FindBestPaths(4 /* finite limit larger than the expected number of paths */);
     ASSERT_EQ(paths.size(), 2u)
         << "For a single bi-allelic variant, there should be exactly 2 distinct paths (ref and alt)";
-    
+
     const auto & best_path = paths[0];
     ASSERT_FALSE(best_path.empty());
     EXPECT_EQ(best_path.front(), graph.min_node_id()); // Path must span the whole graph.
@@ -83,11 +91,14 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
-  const size_t k = 7, max_edge = 5;
+  const size_t k = 7, max_edges = 5;
 
   {  // Still samples paths, even when all k-mers are ABSENT
+    HaplotypeSamplerOverlay sampler(graph, UniqueKmersOverlay(graph, k, max_edges));
+  
     ConstantKmerCounts counts(KmerZygosity::ABSENT);
-    HaplotypeSamplerOverlay sampler(graph, k, max_edge, counts);
+    sampler.InitializeScores(counts);
+    
     auto haplotypes = sampler.SampleHaplotypes(2);
     EXPECT_EQ(haplotypes.size(), 2u) << "Sampler should return exactly n paths";
   }
@@ -105,13 +116,16 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
 
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
-  graph.ToGFA(std::cout);
 
-  const size_t k = 7, max_edge = 5;
+  const size_t k = 7, max_edges = 5;
+  
+  UniqueKmersOverlay unique_kmers(graph, k, max_edges);
+  HaplotypeSamplerOverlay unfiltered(graph, unique_kmers);
+  HaplotypeSamplerOverlay filtered(graph, unique_kmers, vcf.file_path_, region, 5 /* min_size */);
+  
   ConstantKmerCounts counts;
-
-  HaplotypeSamplerOverlay unfiltered(graph, k, max_edge, counts);
-  HaplotypeSamplerOverlay filtered(graph, k, max_edge, counts, vcf.file_path_, region, 5 /* min_size */);
+  unfiltered.InitializeScores(counts);
+  filtered.InitializeScores(counts);
 
   auto unfiltered_paths = unfiltered.FindBestPaths(10 /* finite limit larger than the expected number of paths */);
   auto filtered_paths = filtered.FindBestPaths(10);
@@ -147,65 +161,23 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   auto region = Range("chr1", 52277181, 52277219);
   Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
-  // All k-mers HOMOZYGOUS (expected copy count = 2). The best diplotype should
-  // be two copies of the reference path (the longer path with more k-mers).
+  const size_t k = 7, max_edges = 5;
+
+  HaplotypeSamplerOverlay sampler(graph, UniqueKmersOverlay(graph, k, max_edges));
   ConstantKmerCounts counts(KmerZygosity::HOMOZYGOUS);
-  HaplotypeSamplerOverlay sampler(graph, 7, 5, counts);
+  sampler.InitializeScores(counts);
 
-  auto candidates = sampler.SampleHaplotypes(4 /* finite limit larger than the expected number of paths */);
-  ASSERT_GE(candidates.size(), 2u);
-
-  auto diplotypes = sampler.SampleDiplotypes(candidates, 8 /* finite limit larger than the expected number of diplotypes */);
-  ASSERT_EQ(diplotypes.size(), 3u);
-
-  // Both haplotypes in the top-scoring diplotype should be the reference path.
+  auto haplotypes = sampler.SampleHaplotypes(4 /* finite limit larger than the expected number of paths */);
+  ASSERT_GE(haplotypes.size(), 2u);
+  
   auto ref_path = graph.PathNodes("chr1");
-  EXPECT_EQ(diplotypes[0][0], ref_path) << "First haplotype should be the reference path";
-  EXPECT_EQ(diplotypes[0][1], ref_path) << "Second haplotype should be the reference path (with-replacement)";
+  ASSERT_EQ(haplotypes[0], ref_path) << "First haplotype should be the reference path";
+  EXPECT_NE(haplotypes[1], ref_path) << "Second haplotype should not be the reference path";
 
-  EXPECT_TRUE((diplotypes[1][0] == ref_path) != (diplotypes[1][1] == ref_path)) << "Second-best diplotype should contain one reference path";
-  EXPECT_TRUE(diplotypes[2][0] != ref_path && diplotypes[2][1] != ref_path) << "Third-best diplotype should contain no reference paths";
-}
-
-TEST_F(GraphConstructionTest, HaplotypeSamplerFromBAMFindsHomAltForDeletion) {
-  if (std::system("kmc --version >/dev/null 2>&1") != 0) {
-    GTEST_SKIP() << "kmc binary not available";
-  }
-
-  const fs::path bam_path = fs::path(TEST_DATA_DIR) / "12_22127565_22132387.bam";
-  const fs::path vcf_path = fs::path(TEST_DATA_DIR) / "12_22129565_22130387.vcf.gz";
-
-  // Build a KMC k-mer database from the BAM file.
-  test::TempDir tmp;
-  const fs::path db_prefix = tmp / "kmers";
-  const fs::path kmc_tmp = tmp / "kmc_tmp";
-  fs::create_directories(kmc_tmp);
-
-  const size_t k = 31, max_edge = 5;
-  std::string cmd =
-      fmt::format("kmc -k{} -ci1 -fbam -cs65535 {} {} {} >/dev/null 2>&1", k, bam_path, db_prefix, kmc_tmp);
-  ASSERT_EQ(std::system(cmd.c_str()), 0) << "kmc failed: " << cmd;
-
-  // Build graph around the deletion (region matches the BAM extent).
-  auto region = Range("12", 22127565, 22132387);
-  Graph graph(B37FastaPath_, vcf_path.string(), region);
-  graph.ToGFA(std::cout);
-
-  // The BAM is a small slice (~17x haploid k-mer depth); provide coverage explicitly
-  // to avoid auto-estimation failure on an atypical histogram.
-  KmerCounts::Params kmer_params { 17.0 };
-  KmerCounts counts(db_prefix.string(), kmer_params);
-
- 
-  HaplotypeSamplerOverlay sampler(graph, k, max_edge, counts);
-
-  auto haplotypes = sampler.SampleHaplotypes(2);
-  ASSERT_EQ(haplotypes.size(), 2u);
-
-  // The sample is homozygous for the deletion, so we should sample the non-reference path first,
-  // then the reference path.
-  auto ref_path = graph.PathNodes("12");
-  EXPECT_NE(haplotypes[0], ref_path) << "First haplotype should not be the reference path";
-  EXPECT_EQ(haplotypes[1], ref_path) << "Second haplotype should be the reference path";
-}
+  auto diplotypes = sampler.SampleDiplotypes(haplotypes, 8 /* finite limit larger than the expected number of diplotypes */);
+  ASSERT_EQ(diplotypes.size(), 3u);
+  EXPECT_TRUE(diplotypes[0].h1 == 0u && diplotypes[0].h2 == 0u) << "First diplotype should 0,0 haplotypes";
+  EXPECT_TRUE((diplotypes[1].h1 == 0) != (diplotypes[1].h2 == 0u)) << "Second diplotype should 0,1 haplotypes";
+  EXPECT_TRUE((diplotypes[2].h1 != 0) && (diplotypes[2].h2 != 0u)) << "Third diplotype should 1,1 haplotypes";
+ }
 

@@ -130,10 +130,11 @@ class Phase {
   uint32_t value_;
 };
 
-template <int kMaxPloidy = 3, typename AlleleIndex = int8_t>
+template <int MaxPloidy = 3, typename AlleleIndex = int8_t>
 class PackedGenotype {
  public:
-  typedef std::array<AlleleIndex, kMaxPloidy> AlleleIndices;
+  typedef std::array<AlleleIndex, MaxPloidy> AlleleIndices;
+  static inline constexpr int kMaxPloidy = MaxPloidy;
   static inline constexpr AlleleIndex kMissingAllele = -1;
   static inline constexpr size_t kMaxAlleles = 0x3F;  // 6 bits for allele index
 
