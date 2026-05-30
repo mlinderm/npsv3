@@ -192,6 +192,7 @@ install(TARGETS _native_realign LIBRARY DESTINATION npsv3)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/_native_graph.pyi ${CMAKE_CURRENT_BINARY_DIR}/py.typed DESTINATION npsv3)
 install(TARGETS _native_graph LIBRARY DESTINATION npsv3)
 install(PROGRAMS scripts/synthBAM DESTINATION ${SKBUILD_SCRIPTS_DIR})
+install(PROGRAMS ${KMC_EXECUTABLES} DESTINATION ${SKBUILD_SCRIPTS_DIR})
 
 # C++ unit tests using GoogleTest
 FetchContent_Declare(

@@ -38,7 +38,7 @@ along with standard command-line utilities, CMake and a C++14 compiler.
 We have installed `npsv3` with conda, e.g.,
 
 ```
-conda create -n npsv3 python=3.11
+conda create -n npsv3 python=3.12
 conda activate npsv3
 python -m pip install -e .
 ```
@@ -62,7 +62,7 @@ docker run --rm --entrypoint /bin/bash \
 
 The C++ extension build is implemented with scikit-build-score. Run the following to rebuild when making changes to the C++ extension. The name of the hatch environment and corresponding build directory are determined by the Python version in use: 
 ```
-hatch -e hatch-test.py3.11 shell
+hatch -e hatch-test.py3.12 shell
 pip install nanobind scikit-build-core[pyproject]
 pip install --no-build-isolation -ve .
 ```
@@ -70,8 +70,8 @@ at which point you can run the tests with `pytest <pytest args...>`, e.g., `pyte
 
 There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.11, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
 ```
-cmake --build build/cp311-cp311-linux_x86_64 -t graph_test
-ctest --test-dir build/cp311-cp311-linux_x86_64
+cmake --build build/cp312-abi3-linux_x86_64 -t graph_test
+ctest --test-dir build/cp312-abi3-linux_x86_64
 ```
 
 To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--dist no` disables the distributed test plugin.
@@ -94,9 +94,9 @@ then run the tests ensuring libasan is preloaded before execution:
 LD_PRELOAD="$(gcc -print-file-name=libasan.so):$LD_PRELOAD" python3 -m pytest --dist no tests
 ```
 
-To run the native tests with GDB, run the tests with `-V` to report the specific test command that failed, e.g., `build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"`, then run that command under GDB, e.g.,
+To run the native tests with GDB, run the tests with `-V` to report the specific test command that failed, e.g., `build/cp312-abi3-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"`, then run that command under GDB, e.g.,
 ```
-gdb -args build/cp311-cp311-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"
+gdb -args build/cp312-abi3-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"
 ```
 
 To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE_ARGS="--fresh"`.
@@ -105,7 +105,7 @@ To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE
 
 Build the container using the provided Docker file:
 ```
-docker build -f Dockerfile.arm64 --target build -t npsv3-build .
+docker build --target build -t npsv3-build .
 ```
 
 The following launches a restartable container in the background (for use with the VScode devcontainer extension). We set the shared memory to support loading the BWA indices into shared memory and mount a local directory at `/data` containing the reference genomes, etc.
@@ -116,28 +116,36 @@ docker run --entrypoint /bin/bash \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
     -dt npsv3-build
+docker exec -it <container name> bash -l  
 ```
-Alternately you can launch directly into an interactive shell:
+
+Alternately you can launch directly into an interactive login shell:
 ```
-docker run --rm --entrypoint /bin/bash \
+docker run --rm \
     --shm-size=8g \
     -v ~/Research/data:/data \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
-    -it npsv3-build
+    -it npsv3-build bash -l
 ```
 
-As described above, for easily rebuilding when making changes to the C++ extension run the following. The name of the hatch environment and corresponding build directory are determined by the Python version in the container:
+The hatch test environment is automatically setup for easy rebuilding when making changes to the C++ extension (i.e., without build isolation), i.e., creating the environment is equivalent to running the following:
+```
+pip install nanobind scikit-build-core[pyproject]
+pip install --no-build-isolation -ve .
+```
 
+The name of the hatch environment and corresponding build directory are determined by the Python version in the container. For convenience the test environment is embedded as the `HATCH_TEST_ENV` environment variable. Create and enter the environment with (this may take a few minutes the first time):
 ```
 hatch -e $HATCH_TEST_ENV shell
-uv pip install nanobind scikit-build-core[pyproject]
-uv pip install --no-build-isolation -ve .
-pytest tests
 ```
 
-Having done the above at least once, you can just build and run the native test suite with:
+Then you can run the Python tests with `pytest tests`. If the Python tests depend on changes in the C++ extension, reinstall the package with
+```
+uv pip install --no-build-isolation -ve .
+```
 
+To rebuild run the native test suite:
 ```
 cmake --build $EXT_BUILD_DIR -t graph_test
 ctest --test-dir $EXT_BUILD_DIR

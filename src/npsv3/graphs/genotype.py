@@ -7,6 +7,8 @@ from shlex import quote
 import subprocess
 import tempfile
 
+import pandas as pd
+
 from npsv3._native_graph import Range, VariantFileReader, Graph, UniqueKmersOverlay, HaplotypeSamplerOverlay, KmerCounts 
 from npsv3.images.population import overlapping_variants
 from npsv3.util.sample import filter_kmc_database
@@ -138,11 +140,7 @@ def genotypes_in_topk(cfg, vcf_path, sample, min_variant_size=50, filter_kmers=F
         vcf_path: Path to the input VCF (must be indexed).
         sample_kmc_map: dict mapping sample name -> KMC db path (without extension).
     """
-    total_regions = 0
-    total_variants = 0
-    total_genotypes = 0
-    hap_idx_counts = Counter()
-    dip_idx_counts = Counter()
+    result_table = []
 
     vcf_file = VariantFileReader.open(vcf_path)
     sample_idx = vcf_file.samples().index(sample.name)
@@ -150,9 +148,6 @@ def genotypes_in_topk(cfg, vcf_path, sample, min_variant_size=50, filter_kmers=F
         analysis_variants = _filter_variants(variants, min_variant_size)
         if not analysis_variants:
             continue  # Skip regions with no variants meeting the size threshold
-
-        total_regions += 1
-        total_variants += len(analysis_variants)
 
         # TODO: For the unique k-mer analysis to work correctly, we may need to expand the region to include nearby
         # repetitive sequence. For example, if the variant is a DEL of a single copy of a longer repeat, e.g., 1kb,m
@@ -200,32 +195,30 @@ def genotypes_in_topk(cfg, vcf_path, sample, min_variant_size=50, filter_kmers=F
             alleles = variant.genotype(sample_idx)
             if any(allele < 0 for allele in alleles):
                 continue  # Skip missing genotypes
-            total_genotypes += 1
 
             matching_haplotypes = tuple([(variant.variant_id, allele) in paths for paths in haplotype_paths] for allele in alleles)
 
             # Compute the rank (0-indexed) of the true haplotypes (a True in matching_haplotypes)
-            haplotype_idxs = tuple(
+            haplotype_idxs = [
                 next((i for i, match in enumerate(allele_matches) if match), -1)
                 for allele_matches in matching_haplotypes
-            )
-            for idx in haplotype_idxs:
-                hap_idx_counts[idx] += 1
-            if -1 in haplotype_idxs:
+            ]
+            if -1 not in haplotype_idxs:
+                # Normalize diplotype (compare genotypes without phasing) and compute rank (0-indexed) of the true diplotype
+                haplotype_idxs = sorted(haplotype_idxs)
+                diplotype_idx = next((i for i, diplotype in enumerate(diplotypes) if sorted(diplotype.haplotypes) == haplotype_idxs), -1)
+            else:
                 # If either haplotype is not found, there can't be a correct diplotype match
-                dip_idx_counts[-1] += 1
-                continue 
+                diplotype_idx = -1
 
-            # Normalize diplotype (compare genotypes without phasing) and compute rank (0-indexed) of the true diplotype
-            haplotype_idxs = sorted(haplotype_idxs)
-            diplotype_idx = next((i for i, diplotype in enumerate(diplotypes) if sorted(diplotype.haplotypes) == haplotype_idxs), -1)
-            dip_idx_counts[diplotype_idx] += 1
+            result_table.append({
+                "region": str(region),
+                "variant": variant.variant_id,
+                "sample": sample.name,
+                "haplotypes": len(haplotypes),
+                "haplotype_idxs": tuple(haplotype_idxs),
+                "diplotypes": len(diplotypes),
+                "diplotype_idx": diplotype_idx,
+            })
 
-    statistics = {
-        "total_regions": total_regions,
-        "total_variants": total_variants,
-        "total_genotypes": total_genotypes,
-        "haplotype_rank_counts": [hap_idx_counts[i] for i in range(-1, cfg.kmer.max_haplotypes)],
-        "diplotype_rank_counts": [dip_idx_counts[i] for i in range(-1, cfg.kmer.max_diplotypes)],
-    }
-    return statistics
+    return pd.DataFrame(result_table)

@@ -4,6 +4,7 @@ from shlex import quote
 import tempfile
 
 import pytest
+import pandas as pd
 
 from npsv3._native_graph import Range
 from npsv3.graphs.genotype import genotypes_in_topk, sample_diplotypes, genotypes_in_topk
@@ -139,17 +140,25 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
         # if kmc_prefix_path is None:
         #     pytest.skip("Example KMC database not found")
         # kmc_prefix = os.path.splitext(kmc_prefix_path)[0]
-        
+
         hg00096_sample.kmc_prefix = kmc_prefix
 
         statistics = genotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
-        assert statistics["total_regions"] == 1
-        assert statistics["total_variants"] == 1
-        assert statistics["total_genotypes"] == 1
-        # For this simple case, the true haplotypes and diplotypes should both be ranked first
-        assert statistics["haplotype_rank_counts"][1] == 2 and sum(statistics["haplotype_rank_counts"]) == 2
-        assert statistics["diplotype_rank_counts"][1] == 1 and sum(statistics["diplotype_rank_counts"]) == 1
-        
+        pd.testing.assert_frame_equal(
+            statistics,
+            pd.DataFrame(
+                {
+                    "region": [str(Range("chr12", 21976631, 21977453).expand(cfg.pileup.variant_padding))],
+                    "variant": ["fe58cd4ae772afe360ddf77af9ff2297f4b2e809"],
+                    "sample": ["HG00096"],
+                    "haplotypes": [2],
+                    "haplotype_idxs": [(0, 0)],
+                    "diplotypes": [3],
+                    "diplotype_idx": [0],
+                }
+            ),
+        )
+
 
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -183,6 +192,6 @@ chr1	1924223	.	G	GACCACCCCCCAGCTCACAGCCCACCCCCCCATCTCACCGCCCAGCCCCCCCATCTCACCAGC
         hg00096_sample.kmc_prefix = kmc_prefix
 
         statistics = genotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
-        # We expect to correctly sample the true haplotypes and diplotype, but not necessarily first
-        assert sum(statistics["haplotype_rank_counts"]) == 2
-        assert sum(statistics["diplotype_rank_counts"]) == 1
+        assert len(statistics) == 1, "There should be one row of statistics for the single variant"
+        assert all(h > 0 for h in statistics.iloc[0]["haplotype_idxs"]), "The true haplotypes should be found, but not necessarily top-ranked"
+        assert statistics.iloc[0]["diplotype_idx"] > 0, "The true diplotype should be found, but not top-ranked"

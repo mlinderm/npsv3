@@ -7,7 +7,7 @@ name = "npsv3"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text ="MIT"}
 keywords = []
 authors = [
@@ -16,7 +16,7 @@ authors = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
@@ -75,16 +75,26 @@ installer = "uv"
 extra-dependencies = [
   "mypy>=1.0.0",
 ]
+
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/npsv3 tests}"
 
 [tool.hatch.envs.hatch-test]
+# In build-isolation, uv, etc. ignores build.requires so pre-install build packages for npsv3 and its dependencies
+pre-install-commands = [
+  "uv pip install 'scikit-build-core[pyproject]>=0.4.3' 'nanobind>=1.3.2' setuptools setuptools_scm[toml] cython", 
+]
 extra-dependencies = [
   "pytest-timeout",
   "debugpy>=1.8.0", # Needed by Ray
 ]
+
 [tool.hatch.envs.hatch-test.env-vars]
-RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO= "0"
+RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO = "0"
+PIP_NO_BUILD_ISOLATION = "1"
+UV_NO_BUILD_ISOLATION = "1"
+PIP_INDEX_URL = "https://download.pytorch.org/whl/cpu" # Use CPU packages for tests to speed up installation
+UV_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 
 [tool.hatch.envs.hatch-static-analysis]
 dependencies = ["ruff==0.11.2"]
@@ -121,6 +131,9 @@ extend-ignore = [
 
 [tool.ruff.lint.extend-per-file-ignores]
 "**/tests/**/*" = ["SLF001"]
+
+[tool.uv.extra-build-dependencies]
+npsv3 = ["scikit-build-core[pyproject]", "nanobind"]
 
 # Define "standalone" environment for running the NPSV2-NPSV3 TFRecordConverter script
 [tool.hatch.envs.tfrecordconverter]

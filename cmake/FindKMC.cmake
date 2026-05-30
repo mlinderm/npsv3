@@ -14,7 +14,7 @@ ExternalProject_Add(kmc
   PREFIX "${CMAKE_BINARY_DIR}/lib/kmc"
   PATCH_COMMAND patch --strip=1 --forward --reject-file=- --input=${CMAKE_SOURCE_DIR}/patches/kmc-v3.2.4.patch || true
   CONFIGURE_COMMAND ""
-  BUILD_COMMAND ${MAKE_COMMAND} kmc
+  BUILD_COMMAND ${MAKE_COMMAND} kmc kmc_tools
   BUILD_IN_SOURCE true
   INSTALL_COMMAND ""
 )
@@ -26,3 +26,4 @@ set_target_properties(KMC::Static PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${source_dir}"
 )
 
+set(KMC_EXECUTABLES "${binary_dir}/bin/kmc" "${binary_dir}/bin/kmc_tools")
