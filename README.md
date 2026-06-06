@@ -5,13 +5,15 @@
 **Table of Contents**
 
 - [Installation](#installation)
+- [Running](#running)
+- [Development](#development)
 - [License](#license)
 
 ## Installation
 
-When cloning `npsv3`, make sure to recursively clone all of the submodules, i.e. `git clone --recursive git@github.com:mlinderm/npsv3.git`.
+When cloning NPSV3, make sure to recursively clone all of the submodules, i.e. `git clone --recursive git@github.com:mlinderm/npsv3.git`.
 
-`npsv3` requires Python 3.11+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
+NPSV3 requires Python 3.12+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
 
 ```
 docker build -t npsv3 .
@@ -19,7 +21,7 @@ docker build -t npsv3 .
 
 ### Manual installation
 
-To manually install and run NPSV-deep from the source, you will need the following dependencies:
+To manually install and run NPSV3 from the source, you will need the following dependencies:
 
 * ART (NGS simulator)
 * bwa
@@ -33,14 +35,14 @@ To manually install and run NPSV-deep from the source, you will need the followi
 * sambamba
 * samtools
 
-along with standard command-line utilities, CMake and a C++14 compiler.
+along with standard command-line utilities, CMake and a C++17 compiler.
 
-We have installed `npsv3` with conda, e.g.,
+We have installed NPSV3 with conda, e.g.,
 
 ```
 conda create -n npsv3 python=3.12
 conda activate npsv3
-python -m pip install -e .
+uv pip install -e .
 ```
 
 ## Running
@@ -58,17 +60,24 @@ docker run --rm --entrypoint /bin/bash \
 
 ## Development
 
+NPSV3 is configured a [Hatch project](https://hatch.pypa.io/latest/) that uses [scikit-build-core](https://github.com/scikit-build/scikit-build-core) as the build backed and [uv](https://docs.astral.sh/uv/) as the installer.
+
 ### Building and testing the native extension
 
-The C++ extension build is implemented with scikit-build-score. Run the following to rebuild when making changes to the C++ extension. The name of the hatch environment and corresponding build directory are determined by the Python version in use: 
+The C++ extension build is implemented with scikit-build-core. The hatch test environment is automatically setup for easy rebuilding when making changes to the C++ extension (i.e., it builds the project without build isolation). 
+
+Run the following to rebuild when making changes to the C++ extension. The name of the hatch environment and corresponding build directory are determined by the Python version in use: 
 ```
 hatch -e hatch-test.py3.12 shell
-pip install nanobind scikit-build-core[pyproject]
-pip install --no-build-isolation -ve .
 ```
 at which point you can run the tests with `pytest <pytest args...>`, e.g., `pytest tests` to run all tests.
 
-There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.11, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
+If the Python tests depend on changes in the C++ extension, reinstall the package with
+```
+uv pip install --no-build-isolation -ve .
+```
+
+There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.12, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
 ```
 cmake --build build/cp312-abi3-linux_x86_64 -t graph_test
 ctest --test-dir build/cp312-abi3-linux_x86_64
@@ -76,7 +85,7 @@ ctest --test-dir build/cp312-abi3-linux_x86_64
 
 To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--dist no` disables the distributed test plugin.
 ```
-pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"
+uv pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"
 gdb -args python3 -m pytest --dist no tests
 ```
 
@@ -87,7 +96,7 @@ valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt pyth
 
 To use Address Sanitizer (ASan), set the CMAKE ENABLE_ASAN option to ON during build
 ```
-pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug" --config-settings=cmake.define.ENABLE_ASAN:BOOL=ON
+uv pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug" --config-settings=cmake.define.ENABLE_ASAN:BOOL=ON
 ```
 then run the tests ensuring libasan is preloaded before execution:
 ```
@@ -129,28 +138,8 @@ docker run --rm \
     -it npsv3-build bash -l
 ```
 
-The hatch test environment is automatically setup for easy rebuilding when making changes to the C++ extension (i.e., without build isolation), i.e., creating the environment is equivalent to running the following:
-```
-pip install nanobind scikit-build-core[pyproject]
-pip install --no-build-isolation -ve .
-```
-
-The name of the hatch environment and corresponding build directory are determined by the Python version in the container. For convenience the test environment is embedded as the `HATCH_TEST_ENV` environment variable. Create and enter the environment with (this may take a few minutes the first time):
-```
-hatch -e $HATCH_TEST_ENV shell
-```
-
-Then you can run the Python tests with `pytest tests`. If the Python tests depend on changes in the C++ extension, reinstall the package with
-```
-uv pip install --no-build-isolation -ve .
-```
-
-To rebuild run the native test suite:
-```
-cmake --build $EXT_BUILD_DIR -t graph_test
-ctest --test-dir $EXT_BUILD_DIR
-```
+The development process is the same as described above. The name of the hatch environment and corresponding build directory are determined by the Python version in the container. For convenience the test environment is embedded as the `HATCH_TEST_ENV` environment variable and the build directory as `EXT_BUILD_DIR`.
 
 ## License
 
-`npsv3` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
+NPSV3 is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
