@@ -13,29 +13,52 @@
 
 namespace npsv3 {
 
+class KmerCounts;
+
 class UniqueKmersOverlay {
  public:
   struct KmerLocation {
     std::vector<handlegraph::handle_t> handles_;
     uint64_t starting_handle_offset_;
+
+    bool operator==(const KmerLocation&) const;
   };
 
-  UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_edges, bool exclude_universal=true, bool canonicalize=false);
+  UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_edges, bool exclude_universal=true, bool canonicalize=false, const KmerCounts* ref_kmer_counts = nullptr);
 
   size_t size() const { return sequences_.size(); }
 
   const std::vector<std::string>& sequences() const { return sequences_; }
-  const std::vector<KmerLocation>& locations() const { return locations_; }
-
+  const std::vector<std::vector<KmerLocation>>& locations() const { return locations_; }
 
   void SaveFasta(const std::string& fasta_path) const;
 
+  /** @brief Serialize k-mer sequences and locations (as node IDs) to an output stream */
+  void Save(std::ostream& out) const;
+  /** @brief Serialize k-mer sequences and locations (as node IDs) to a binary file */
+  void Save(const std::string& path) const;
+
+  /**
+   * @brief Deserialize into a pre-allocated UniqueKmersOverlay via placement new.
+   *
+   * Handles are reconstructed from stored node IDs using @p graph.
+   * Use as the target of a nanobind __init__ overload so that the graph
+   * reference lifetime is managed by keep_alive.
+   */
+  static void Load(UniqueKmersOverlay* target, const Graph& graph, std::istream& in);
+  static void Load(UniqueKmersOverlay* target, const Graph& graph, const std::string& path);
+
  private:
+  // Used by Load() to construct from pre-built sequences and locations.
+  UniqueKmersOverlay(const Graph& graph, size_t k,
+                     std::vector<std::string> sequences,
+                     std::vector<std::vector<KmerLocation>> locations);
+
   const Graph& graph_;
   const size_t k_;
 
   std::vector<std::string> sequences_;
-  std::vector<KmerLocation> locations_;
+  std::vector<std::vector<KmerLocation>> locations_;
 };
 
 
@@ -44,13 +67,28 @@ enum class KmerZygosity { ABSENT, HETEROZYGOUS, HOMOZYGOUS, FREQUENT };
 
 
 /**
- * @brief Classifies k-mer sequences as ABSENT / HETEROZYGOUS / HOMOZYGOUS using
- *        a pre-built KMC database (Sirén et al. §2.1).
+ * @brief Report k-mer count from a pre-built KMC database using random access.
  */
 class KmerCounts {
  public:
+  explicit KmerCounts(const std::string& db_path);
+  ~KmerCounts();
+
+  uint32_t Count(const std::string& kmer) const;
+
+ private:
+  mutable CKMCFile kmc_file_;
+};
+
+
+/**
+ * @brief Classifies k-mer sequences as ABSENT / HETEROZYGOUS / HOMOZYGOUS using
+ *        a pre-built KMC database (Sirén et al. §2.1).
+ */
+class KmerClassify {
+ public:
   typedef std::function<void(size_t idx, KmerZygosity zyg)> ClassificationCallback;
- 
+
   /// Parameters controlling zygosity classification from k-mer counts.
   struct Params {
     double absent_fraction;
@@ -66,33 +104,30 @@ class KmerCounts {
 
   /**
    * @param db_path Path to a KMC database (without suffixes).
-   * @param coverage Haploid coverage estimate (must be > 0).
-   * @param params Coverage and threshold parameters.
+   * @param coverage K-mer coverage estimate (must be > 0).
+   * @param params Coverage threshold parameters.
    * @throws std::runtime_error If the database cannot be opened.
    * @throws std::invalid_argument If params.coverage <= 0.
    */
-  explicit KmerCounts(const std::string& db_path, double coverage, const Params& params = {});
+  explicit KmerClassify(const std::string& db_path, double coverage, const Params& params = {});
 
-  virtual ~KmerCounts() = default;
-
+  virtual ~KmerClassify() = default;
 
   /**
-   * @brief Classify k-mers in the globally sorted @p sequences using a merge-like pass of the k-mer DB, 
+   * @brief Classify k-mers in the globally sorted @p sequences using a merge-like pass of the k-mer DB,
    * calling @p callback with the index into @p sequences and zygosity.
-   * 
+   *
    * The callback may be called in any order.
    */
-  virtual void ClassifySorted(
-      const std::vector<std::string>& sequences,
-      const ClassificationCallback& callback) const;
+  virtual void ClassifySorted(const std::vector<std::string>& sequences, const ClassificationCallback& callback) const;
 
  protected:
-  /// Protected default constructor for subclasses that override ClassifyBatch without a KMC database.
-  KmerCounts() : absent_coverage_(0.0), heterozygous_coverage_(0.0), homozygous_coverage_(0.0) {}
+  /// Protected default constructor for subclasses that override ClassifySorted without a KMC database.
+  KmerClassify() : absent_coverage_(0.0), heterozygous_coverage_(0.0), homozygous_coverage_(0.0) {}
 
  private:
   std::string db_path_;
-  
+
   double absent_coverage_;
   double heterozygous_coverage_;
   double homozygous_coverage_;

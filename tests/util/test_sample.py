@@ -1,11 +1,13 @@
+import logging
 import os
-from unittest.mock import patch
 
-import pytest
 import pandas as pd
+import pytest
 
 from npsv3.util.sample import Sample, _estimate_coverage_from_histogram, _estimate_kmer_coverage
-from .. import data_path, _first_existing
+
+from .. import _first_existing, data_path
+
 
 class TestSampleDataclass:
     def test_default_optional_fields(self):
@@ -88,15 +90,30 @@ class TestEstimateKmerCoverage:
         # secondary peak at 30 with 45k distinct kmers
         histogram = pd.Series({15: 50_000, 16: 40_000, 29: 25_000, 30: 45_000, 31: 20_000})
         assert _estimate_coverage_from_histogram(histogram) == 30
-    
+
     def test_example_histogram(self):
         kmc_hist = _first_existing(
+            data_path("HG00096.final.kmc.hist"),
             "/data/HG00096.final.kmc.hist"
         )
         if kmc_hist is None:
             pytest.skip("Example KMC histogram not found")
+            return
         histogram = pd.read_csv(kmc_hist, sep="\t", index_col=0, names=["count", "freq"])["freq"]
         assert _estimate_coverage_from_histogram(histogram) == 29
+
+    def test_example_histogram_unable_to_estimate(self, caplog):
+        kmc_hist = _first_existing(
+            data_path("HG00733.final.kmc.hist")
+        )
+        if kmc_hist is None:
+            pytest.skip("Example KMC histogram not found")
+            return
+        histogram = pd.read_csv(kmc_hist, sep="\t", index_col=0, names=["count", "freq"])["freq"]
+        # This sample has a mode of 13, but no clear secondary peak according to Sirén et al.'s criteria
+        with caplog.at_level(logging.WARNING):
+            _estimate = _estimate_coverage_from_histogram(histogram)
+            assert "Failed to estimate k-mer coverage, instead setting to median coverage." in caplog.text
 
     @pytest.mark.skip(reason="Can be slow to generate KMC histogram")
     def test_example_kmc_database(self):
@@ -105,5 +122,6 @@ class TestEstimateKmerCoverage:
         )
         if kmc_db is None:
             pytest.skip("Example KMC database not found")
+            return
         assert _estimate_kmer_coverage(os.path.splitext(kmc_db)[0]) == 29
 

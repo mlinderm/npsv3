@@ -15,6 +15,7 @@ typedef uint64_t Pos;
 
 class Range {
  public:
+  Range() : contig_(), start_(0), end_(0) {}
   Range(const ContigName& contig, Pos start, Pos end) : contig_(contig), start_(start), end_(end) {
     assert(start <= end);
   }
@@ -43,7 +44,7 @@ class Range {
     return contig_ == other.contig_ && start_ >= other.start_ && end_ <= other.end_;
   }
 
-  friend std::ostream& operator<<(std::ostream&, const Range&);
+  // friend std::ostream& operator<<(std::ostream&, const Range&);
 
  protected:
   ContigName contig_;

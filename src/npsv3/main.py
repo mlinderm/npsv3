@@ -45,9 +45,9 @@ def main(cfg: DictConfig) -> None:
         # If no output file is specified, create a fixed file in the Hydra output directory
         output = "stats.json" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
-        _make_paths_absolute(cfg, ["reference"])
+        _make_paths_absolute(cfg, ["reference", "reads", "kmer.kmc_prefix"])
 
-        stats = compute_read_stats(cfg, hydra.utils.to_absolute_path(cfg.reads), kmc_prefix=OmegaConf.select(cfg, "kmer.kmc_prefix"))
+        stats = compute_read_stats(cfg, cfg.reads, kmc_prefix=OmegaConf.select(cfg, "kmer.kmc_prefix"))
         with open(output, "w") as file:
             json.dump(stats, file)
 
@@ -189,12 +189,19 @@ def main(cfg: DictConfig) -> None:
             output,
         )
     elif cfg.command == "genotype_topk":
-        from npsv3.graphs.genotype import genotypes_in_topk
+        from npsv3.graphs.genotype import genotypes_in_topk, serialize_graph_and_unique_kmers
         from npsv3.util.sample import Sample
 
         _make_paths_absolute(cfg, ["reference", "stats_path", "input"])
         sample = Sample.from_json(cfg.stats_path)
-        
+
+        # serialize_graph_and_unique_kmers(
+        #     cfg,
+        #     cfg.input,
+        #     sample,
+        #     output_dir=os.getcwd(),
+        #     filter_kmers=True,
+        # )
         statistics = genotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True) # Use kmc tools to filter k-mers
         print(statistics)
 

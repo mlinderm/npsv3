@@ -1,16 +1,23 @@
+import glob
 import os
 import subprocess
-from shlex import quote
 import tempfile
+from shlex import quote
 
-import pytest
 import pandas as pd
+import pytest
 
-from npsv3._native_graph import Range
-from npsv3.graphs.genotype import genotypes_in_topk, sample_diplotypes, genotypes_in_topk
-from npsv3.util.sample import Sample
+from npsv3._native_graph import KmerCounts, Range
+from npsv3.graphs.genotype import (
+    _create_graph_and_sampler,
+    _sample_diplotypes_from_counts,
+    genotypes_in_topk,
+    sample_diplotypes,
+)
+from npsv3.util.sample import Sample, filter_kmc_database, filter_kmc_database_from_fasta
 
-from .. import HG38_REF_FASTA, data_path, _create_vcf
+from .. import HG38_REF_FASTA, _create_vcf, _first_existing, data_path, result_path
+
 
 @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
 class TestTopkHaplotypeSampling:
@@ -162,6 +169,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
 
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
+        "kmer.kmer_size=31",  # Test files were generated with k=31, so we need to use that here to get the expected results
     )
     def test_topk_genotype_multiallelic(self, cfg, hg00096_sample, tmp_path):
         vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
@@ -195,3 +203,66 @@ chr1	1924223	.	G	GACCACCCCCCAGCTCACAGCCCACCCCCCCATCTCACCGCCCAGCCCCCCCATCTCACCAGC
         assert len(statistics) == 1, "There should be one row of statistics for the single variant"
         assert all(h > 0 for h in statistics.iloc[0]["haplotype_idxs"]), "The true haplotypes should be found, but not necessarily top-ranked"
         assert statistics.iloc[0]["diplotype_idx"] > 0, "The true diplotype should be found, but not top-ranked"
+
+@pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
+class TestTopkHaplotypeSamplingInHG00733:
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+    )
+    def test_downstream_small_del(self, cfg, hg00733_sample, tmp_path):
+        vcf_path = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.sv.hg38.vcf.gz"
+        if not os.path.exists(vcf_path):
+            pytest.skip("HG00733 VCF not found")
+
+        ref_kmer_counts_prefix = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique"
+        if not os.path.exists(f"{ref_kmer_counts_prefix}.kmc_pre"):
+            pytest.skip("Reference kmer counts not found")
+        ref_kmer_counts = KmerCounts(ref_kmer_counts_prefix)
+
+        graph, unique_kmers, haplotype_sampler = _create_graph_and_sampler(
+            cfg.reference,
+            vcf_path,
+            Range("chr1:789386-789577"),
+            k=cfg.kmer.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+        graph.dump()
+
+        # TODO: How to identify k-mers that are not unique when considering other regions of the genome? At least with respect to the reference genome?
+
+        # Kmer matches elsewhere in the genome
+        # kmer GGGAATGGAATGGAATGAAATGGAAAAGA (2): copy_count=1, expected=2                                                                                                                                                                                                                                            [1938/1938]
+        # kmer GGGATGGAATGGAACGGAACGGAACGCAG (1): copy_count=1, expected=1
+
+        filtered_kmer_path = result_path("chr1_789385_789577.HG00733.filtered_kmers")
+        if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
+            # Generate filtered k-mers if not already available (a slow step, so we cache the results)
+            if not hg00733_sample.kmc_prefix:
+                pytest.skip("KMC database for HG00733 not found")
+            filter_kmc_database(
+                hg00733_sample.kmc_prefix, unique_kmers, cfg.kmer.kmer_size, filtered_kmer_path, tmp_dir=tmp_path
+            )
+
+        haplotypes, diplotypes = _sample_diplotypes_from_counts(
+            haplotype_sampler,
+            unique_kmers,
+            filtered_kmer_path,
+            k=cfg.kmer.kmer_size,
+            kmer_coverage=hg00733_sample.kmer_coverage,
+            filter_kmers=False,
+        )
+        print(haplotypes, [d.haplotypes for d in diplotypes], [d.score for d in diplotypes])
+
+
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+    )
+    def test_topk_genotype(self, cfg, hg00733_sample, tmp_path):
+        statistics = genotypes_in_topk(
+            cfg,
+            "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.sv.hg38.vcf.gz",
+            hg00733_sample,
+            graph_shards=glob.glob("/storage/mlinderman/projects/sv/npsv3-experiments/genotyping/hgsvc3-hprc-2024-02-23.dipcall.passing.sv.hg38.sampling/+sample=HG00733/graphs-*.tar.gz"),
+            filtered_kmer_path="/storage/mlinderman/projects/sv/npsv3-experiments/genotyping/hgsvc3-hprc-2024-02-23.dipcall.passing.sv.hg38.sampling/+sample=HG00733/filtered_kmers"
+        )
+        print(statistics)

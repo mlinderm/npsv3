@@ -1,6 +1,9 @@
-kmer_size: 31
+kmer_size: 29  # Adapted from Sirén et al. 2024
 
 kmc_prefix: null
+
+# KMC database of non-unique k-mers in the reference genome (used to filter out non-unique k-mers from the sample).
+ref_non_unique_kmc_prefix: null 
 
 # Unique k-mer related parameters
 max_edges: 5

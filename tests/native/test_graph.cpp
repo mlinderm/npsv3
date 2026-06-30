@@ -500,3 +500,58 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
 
   ASSERT_THROW(graph.PathSequence("1"), std::out_of_range);
 };
+
+TEST_F(GraphConstructionTest, GraphSerializationRoundtrip) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph original(HG38FastaPath_, vcf.file_path_, region);
+
+  test::TempDir dir;
+  auto bin_path = (dir.path_ / "graph.bin").string();
+  original.Save(bin_path);
+
+  auto loaded = Graph::Load(bin_path);
+  ASSERT_NE(loaded, nullptr);
+
+  EXPECT_EQ(loaded->get_node_count(), original.get_node_count());
+  EXPECT_EQ(loaded->min_node_id(), original.min_node_id());
+  EXPECT_EQ(loaded->max_node_id(), original.max_node_id());
+
+  // Verify all nodes have matching presence, sequence, and outgoing edges.
+  for (odgi::nid_t nid = original.min_node_id(); nid <= original.max_node_id(); ++nid) {
+    ASSERT_EQ(original.has_node(nid), loaded->has_node(nid)) << "has_node mismatch at node " << nid;
+    if (!original.has_node(nid)) continue;
+
+    auto orig_h = original.get_handle(nid);
+    auto load_h = loaded->get_handle(nid);
+    EXPECT_EQ(original.get_sequence(orig_h), loaded->get_sequence(load_h)) << "sequence mismatch at node " << nid;
+
+    std::vector<handlegraph::handle_t> orig_succs, load_succs;
+    original.follow_edges(orig_h, false, [&](const handlegraph::handle_t& h) { orig_succs.push_back(h); return true; });
+    loaded->follow_edges(load_h,  false, [&](const handlegraph::handle_t& h) { load_succs.push_back(h);  return true; });
+    std::sort(orig_succs.begin(), orig_succs.end());
+    std::sort(load_succs.begin(), load_succs.end());
+    EXPECT_EQ(orig_succs, load_succs) << "successor edges mismatch at node " << nid;
+  }
+
+  // Verify paths are identical 
+  std::vector<handlegraph::path_handle_t> orig_paths, load_paths;
+  original.for_each_path_handle([&](const handlegraph::path_handle_t& h) { orig_paths.push_back(h); });
+  loaded->for_each_path_handle([&](const handlegraph::path_handle_t& h) { load_paths.push_back(h); });
+  std::sort(orig_paths.begin(), orig_paths.end());
+  std::sort(load_paths.begin(), load_paths.end());
+  EXPECT_EQ(orig_paths, load_paths) << "path handle mismatch";
+  
+  // Verify path node lists and sequences for the reference contig and each sample haplotype.
+  for (const auto& path : orig_paths) {
+    EXPECT_EQ(original.PathNodes(path), loaded->PathNodes(path)) << "node list mismatch for path " << original.get_path_name(path);
+    EXPECT_EQ(original.PathSequence(path), loaded->PathSequence(path)) << "sequence mismatch for path "  << original.get_path_name(path);
+  }
+}

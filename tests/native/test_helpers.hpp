@@ -4,9 +4,11 @@
 #include <filesystem>
 #include <memory>
 #include <algorithm>
+#include <fstream>
 
 #include <htslib/bgzf.h>
 #include <htslib/tbx.h>
+#include <htslib/faidx.h>
 
 #include <gtest/gtest.h>
 
@@ -62,10 +64,31 @@ public:
   fs::path file_path_;
 };
 
+class TestFastaFile {
+public:
+  explicit TestFastaFile(const std::string& contents) {
+    file_path_ = dir_ / "reference.fasta";
+    std::ofstream ofs(file_path_);
+    if (!ofs) {
+      throw std::runtime_error("failed to open fasta for writing: " + file_path_.native());
+    }
+    ofs << contents;
+    ofs.close();
+  
+    // Build index (.fai)
+    if (fai_build(file_path_.c_str()) != 0) {
+      throw std::runtime_error("failed to build fasta index for: " + file_path_.native());
+    }
+  }
+
+  TempDir dir_;
+  fs::path file_path_;
+};
+
 
 // Shared FASTA path constants for native tests.
-extern const std::vector<fs::path> kB37FastaPaths; // = { fs::path("/data/human_g1k_v37.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/human_g1k_v37.fasta") };
-extern const std::vector<fs::path> kHG38FastaPaths; // = { fs::path("/data/Homo_sapiens_assembly38.fasta"), fs::path("/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.fasta") };
+extern const std::vector<fs::path> kB37FastaPaths; 
+extern const std::vector<fs::path> kHG38FastaPaths;
 
 class GraphConstructionTest : public ::testing::Test {
  protected:

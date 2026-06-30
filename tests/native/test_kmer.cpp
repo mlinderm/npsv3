@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <odgi.hpp>
 #include <algorithms/kmer.hpp>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -17,6 +18,73 @@
 using namespace npsv3;
 using npsv3::test::GraphConstructionTest;
 namespace fs = std::filesystem;
+
+TEST(UniqueKmersTest, WithinNodeRepeat) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAAAAA)FASTA");
+  
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	5	.	A	AGATTACATTGATTACA	.	PASS	.	GT	0/1
+)VCF");
+  auto region = Range("chr1", 0, 10); // Range is 0-indexed, half-open
+  Graph graph(fasta.file_path_, vcf.file_path_, region);
+
+  UniqueKmersOverlay overlay(graph, 7, /*max_edges=*/5, /*exclude_universal=*/false);
+  EXPECT_EQ(std::count(overlay.sequences().begin(), overlay.sequences().end(), "GATTACA"), 0u) 
+    << "GATTACA is not graph unique because it appears at multiple offsets in the same node";
+
+  EXPECT_GT(std::count(overlay.sequences().begin(), overlay.sequences().end(), "AGATTAC"), 0u) 
+    << "AGATTAC is graph unique because it appears at multiple offsets in the same node";
+}
+
+TEST(UniqueKmerTest, SequentialOnSamePath) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAAAAA)FASTA");
+  
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	4	.	A	T	.	PASS	.	GT	0/1
+chr1	6	.	A	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 0, 10); // Range is 0-indexed, half-open
+  Graph graph(fasta.file_path_, vcf.file_path_, region);
+
+  UniqueKmersOverlay overlay(graph, /*k=*/2, /*max_edges=*/5, /*exclude_universal=*/false);
+  EXPECT_EQ(std::count(overlay.sequences().begin(), overlay.sequences().end(), "AT"), 0u) 
+    << "AT is not graph unique because it can appear twice the same path (both alt alleles)";
+}
+
+TEST(UniqueKmerTest, ParallelBranchesAreUnique) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAGGGGG)FASTA");
+  
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	5	.	A	AG	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 0, 10); // Range is 0-indexed, half-open
+  Graph graph(fasta.file_path_, vcf.file_path_, region);
+
+  UniqueKmersOverlay overlay(graph, /*k=*/4, /*max_edges=*/5, /*exclude_universal=*/false);
+  EXPECT_GT(std::count(overlay.sequences().begin(), overlay.sequences().end(), "AAGG"), 0u) 
+    << "AAGG is graph unique because it only appears on exclusive paths (REF and ALT)";
+
+  UniqueKmersOverlay overlay_without_universal(graph, /*k=*/4, /*max_edges=*/5, /*exclude_universal=*/true);
+  EXPECT_EQ(std::count(overlay_without_universal.sequences().begin(), overlay_without_universal.sequences().end(), "AAGG"), 0u) 
+    << "AAGG is not graph unique when universal kmers are excluded because it appears on both REF and ALT paths";
+}
 
 TEST_F(GraphConstructionTest, KmersFromSimpleDeletionSV) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
@@ -65,6 +133,42 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   ASSERT_EQ(kmer_counts["GATTCTA"], 2) << "Expected k-mer GATTCTA count of 2, got " << kmer_counts["GATTCTA"];
 }
 
+TEST_F(GraphConstructionTest, UniqueKmersExcludeUniversal) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
+
+  const size_t k = 7, max_edge = 5;
+
+  UniqueKmersOverlay all_unique_overlay(graph, k, max_edge, false /* exclude_universal */);
+  std::unordered_set<std::string> all_unique(all_unique_overlay.sequences().begin(), all_unique_overlay.sequences().end());
+
+  UniqueKmersOverlay non_universal_overlay(graph, k, max_edge, true /* exclude_universal */);
+  std::unordered_set<std::string> non_universal(non_universal_overlay.sequences().begin(), non_universal_overlay.sequences().end());
+
+  // The filtered set must be a strict subset of the unfiltered set.
+  ASSERT_LT(non_universal.size(), all_unique.size()) << "exclude_universal should remove at least one k-mer";
+  for (const auto& seq : non_universal) {
+    EXPECT_GT(all_unique.count(seq), 0u) << "k-mer '" << seq << "' in non_universal but not in all_unique";
+  }
+
+  // "TAAAATA" is exclusively on the REF allele node — it must survive the filter.
+  EXPECT_GT(non_universal.count("TAAAATA"), 0u) << "TAAAATA (REF-allele-only) should be retained";
+
+  // "TTGGATT" appears upstream of the deletion breakpoint on both haplotypes and is thus universal in this context.
+  EXPECT_EQ(non_universal.count("TTGGATT"), 0u) << "TTGGATT (backbone-only coverage) should be excluded";
+
+  // "GATTCTA" appears in both haplotypes and thus is universal in this context
+  EXPECT_EQ(non_universal.count("GATTCTA"), 0u) << "GATTCTA (backbone-only coverage) should be excluded";
+}
+
 TEST_F(GraphConstructionTest, KmersRespectsMaxEdges) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
@@ -97,174 +201,153 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   });
 }
 
-// TEST_F(GraphConstructionTest, UniqueKmersAreGraphUnique) {
-//   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
-// ##FILTER=<ID=PASS,Description="All filters passed">
-// ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-// ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-// #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
-// chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
-// )VCF");
-//   auto region = Range("chr1", 52277181, 52277219);
-//   Graph graph(HG38FastaPath_, vcf.file_path_, region);
+TEST_F(GraphConstructionTest, KmersStayWithinNodes) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277185	.	TT	C	.	PASS	.	GT	0/1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
 
-//   // Every k-mer returned by UniqueKmers must satisfy two invariants:
-//   //   1. All Kmers() occurrences of that sequence share at least one common node.
-//   //   2. Every k-mer with only a single Kmers() occurrence is included.
+  graph.Kmers(7 /* k */, 5 /* max_edges */,
+              [&](const std::string&, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
+                if (offset >= graph.get_length(handles[0])) {
+                  // Need exception to jump out of helper function
+                  throw std::runtime_error("Reported offset exceeds handle length");
+                }
+              });
+}
 
-//   const size_t k = 7, max_edge = 5;
-//   using Occurrence = std::vector<handlegraph::handle_t>;
+TEST_F(GraphConstructionTest, UniqueKmersMatchEnumeratedPaths) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277185	.	TT	C	.	PASS	.	GT	0/1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
 
-//   // Collect all Kmers occurrences grouped by sequence.
-//   std::unordered_map<std::string, std::vector<Occurrence>> all_occurrences;
-//   graph.Kmers(k, max_edge,
-//               [&](const std::string& seq, const std::vector<handlegraph::handle_t>& handles, uint64_t offset) {
-//                 all_occurrences[seq].emplace_back(handles);
-//               });
+  // Every k-mer returned by UniqueKmers must satisfy two invariants:
+  //   1. No two distinct physical start positions (first_handle, offset) of that k-mer
+  //      can co-appear on any single graph traversal (haplotype).
+  //   2. Every k-mer whose Kmers() occurrences all share the same physical start position
+  //      (i.e., the same graph location with different path continuations) must
+  //      be included.
 
-//   // Collect UniqueKmers output, checking there are no duplicates.
-//   std::unordered_set<std::string> unique_kmers;
-//   graph.UniqueKmers(k, max_edge, [&](const std::string& seq, const std::vector<handlegraph::handle_t>&, uint64_t) {
-//     EXPECT_EQ(unique_kmers.count(seq), 0u) << "UniqueKmers reported duplicate: " << seq;
-//     unique_kmers.insert(seq);
-//   });
-//   ASSERT_FALSE(unique_kmers.empty()) << "UniqueKmers should return at least one k-mer for this graph";
+  // All possible haplotype paths
+  std::vector<std::string> expected_haplotypes {
+    "TTG" "C" "GGATT" "CTATTGTTAGTAAAATAC" "CTATTGTTAG",
+    "TTG" "TT" "GGATT" "CTATTGTTAGTAAAATAC" "CTATTGTTAG",
+    "TTG" "C" "GGATT" "CTATTGTTAG",
+    "TTG" "TT" "GGATT" "CTATTGTTAG",
+  };
+  ASSERT_GT(expected_haplotypes.size(), 0u) << "Expected haplotypes should not be empty";
 
-//   // Invariant 1: Every UniqueKmer must appear in Kmers output and all its occurrences
-//   // must share a common node. This is weaker than the definition of graph-uniqueness, but
-//   // it's a necessary condition that is easier to check.
-//   for (const auto& seq : unique_kmers) {
-//     ASSERT_GT(all_occurrences.count(seq), 0u) << "UniqueKmer '" << seq << "' was not also generated by Kmers";
+  const size_t k = 7, max_edges = 5;
+
+  // We use std::map to ensure k-mers are sorted for comparison, since UniqueKmersOverlay returns them in sorted order`
+
+  // Compute k-mer counts for each haplotype from the fully-enumerated paths
+  std::vector<std::map<std::string, size_t>> haplotype_kmer_sets;
+  for (const auto& haplotype : expected_haplotypes) {
+    std::map<std::string, size_t> kmer_map;
+    for (size_t i = 0; i + k <= haplotype.size(); ++i) {
+      kmer_map[haplotype.substr(i, k)]++;
+    }
+    haplotype_kmer_sets.push_back(std::move(kmer_map));
+  }
+
+  // The unique k-mers (with universal kmers) are all singleton k-mers in each haplotype minus any non-singleton k-mers from any haplotpe.
+  std::map<std::string, size_t> unique_kmers_with_universal;
+  for (const auto& ks : haplotype_kmer_sets) {
+    for (const auto& [kmer, count] : ks) {
+      if (count == 1)
+        unique_kmers_with_universal[kmer] += 1;
+    }
+  }
+  for (const auto& ks : haplotype_kmer_sets) {
+    for (const auto& [kmer, count] : ks) {
+      if (count > 1)
+        unique_kmers_with_universal.erase(kmer);
+    }
+  }
+  
+  UniqueKmersOverlay all_unique_overlay(graph, k, max_edges, false /* exclude_universal */);
+  const auto & sequences_with_universal = all_unique_overlay.sequences();
     
-//     auto & occurrences = all_occurrences[seq];
-//     if (occurrences.size() <= 1) continue;  // k-mers with a single occurrence are trivially graph-unique
-    
-//     std::unordered_map<handlegraph::handle_t, int> handle_counts;
-//     for (const auto& occurrence : occurrences) {
-//       for (const auto& handle : occurrence) {
-//         handle_counts[handle]++;
-//       }
-//     }
-//     ASSERT_NE(std::find_if(handle_counts.begin(), handle_counts.end(),
-//                            [&](const auto& pair) { return pair.second == occurrences.size(); }),
-//               handle_counts.end())
-//         << "UniqueKmer '" << seq << "' has occurrences with no common node";
-//   }
+  ASSERT_EQ(sequences_with_universal.size(), unique_kmers_with_universal.size());
+  EXPECT_TRUE(std::equal(
+    sequences_with_universal.begin(), sequences_with_universal.end(), unique_kmers_with_universal.begin(), 
+    [](const std::string& a, const std::pair<const std::string, size_t>& b) {
+      return a == b.first;
+    }
+  )) << "UniqueKmersOverlay with universal k-mers does not match enumerated haplotype k-mers";
 
-//   // Invariant 2: Every Kmers k-mer with exactly one  occurrence must be included.
-//   for (const auto& [seq, occ] : all_occurrences) {
-//     if (occ.size() == 1) {
-//       EXPECT_GT(unique_kmers.count(seq), 0u) << "Single-occurrence k-mer '" << seq << "' is missing from UniqueKmers";
-//     }
-//   }
+  std::map<std::string, size_t> unique_kmers_without_universal;
+  for (const auto & [kmer, count] : unique_kmers_with_universal) {
+    // A k-mer is universal if it appears in every haplotype
+    if (count < haplotype_kmer_sets.size()) {
+      unique_kmers_without_universal[kmer] = count;
+    }
+  }
+  UniqueKmersOverlay all_unique_overlay_without_universal(graph, k, max_edges, true /* exclude_universal */);
+  const auto & sequences_without_universal = all_unique_overlay_without_universal.sequences();
 
-//   // "GATTCTA" appears twice in Kmers (once per haplotype path at the deletion
-//   // breakpoint) but both occurrences start in the same upstream node at the
-//   // same offset, and so should be unique.
-//   ASSERT_TRUE(all_occurrences["GATTCTA"].size() == 2 && unique_kmers.find("GATTCTA") != unique_kmers.end())
-//       << "Expected GATTCTA to be included in UniqueKmers";
+  ASSERT_EQ(sequences_without_universal.size(), unique_kmers_without_universal.size());
+  EXPECT_TRUE(std::equal(
+    sequences_without_universal.begin(), sequences_without_universal.end(), unique_kmers_without_universal.begin(), 
+    [](const std::string& a, const std::pair<const std::string, size_t>& b) {
+      return a == b.first;
+    }
+  )) << "UniqueKmersOverlay without universal k-mers does not match enumerated haplotype k-mers";
 
-//   // "CTATTGT" appears in both the deletion and downstream, so should not be unique.
-//   ASSERT_TRUE(all_occurrences["CTATTGT"].size() == 2 && unique_kmers.find("CTATTGT") == unique_kmers.end())
-//       << "Expected CTATTGT to not be included in UniqueKmers";
+  for (const auto& [kmer, count] : unique_kmers_without_universal) {
+    EXPECT_GT(unique_kmers_with_universal.count(kmer), 0) << "'Without universal' k-mers should be a subset of 'with universal' k-mers";
+  }
+}
 
-//   // "TAAAATA" appears only the REF allele node, so should be unique.
-//   ASSERT_TRUE(all_occurrences["TAAAATA"].size() == 1 && unique_kmers.find("TAAAATA") != unique_kmers.end())
-//       << "Expected TAAAATA to be included in UniqueKmers";
-// }
+TEST_F(GraphConstructionTest, UniqueKmersSerializationRoundtrip) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
 
-// TEST_F(GraphConstructionTest, UniqueKmersExcludeUniversal) {
-//   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
-// ##FILTER=<ID=PASS,Description="All filters passed">
-// ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
-// ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-// #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
-// chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
-// )VCF");
-//   auto region = Range("chr1", 52277181, 52277219);
-//   Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
 
-//   const size_t k = 7, max_edge = 5;
+  const size_t k = 7, max_edges = 5;
+  UniqueKmersOverlay original(graph, k, max_edges);
 
-//   std::unordered_set<std::string> all_unique, non_universal;
-//   graph.UniqueKmers(k, max_edge, [&](const std::string& seq, const std::vector<handlegraph::handle_t>&, uint64_t) {
-//     all_unique.insert(seq);
-//   });
-//   graph.UniqueKmers(k, max_edge, [&](const std::string& seq, const std::vector<handlegraph::handle_t>&, uint64_t) {
-//     non_universal.insert(seq);
-//   }, true /* exclude universal k-mers */);
+  test::TempDir dir;
+  auto bin_path = (dir.path_ / "ukmer.bin").string();
+  original.Save(bin_path);
 
-//   // The filtered set must be a strict subset of the unfiltered set.
-//   ASSERT_LT(non_universal.size(), all_unique.size()) << "exclude_universal should remove at least one k-mer";
-//   for (const auto& seq : non_universal) {
-//     EXPECT_GT(all_unique.count(seq), 0u) << "k-mer '" << seq << "' in non_universal but not in all_unique";
-//   }
+  // Load into a heap-allocated UniqueKmersOverlay via placement new.
+  // UniqueKmersOverlay holds a const reference so it is neither copyable nor movable;
+  // a custom-deleter unique_ptr manages the lifetime cleanly.
+  auto* raw = static_cast<UniqueKmersOverlay*>(::operator new(sizeof(UniqueKmersOverlay)));
+  UniqueKmersOverlay::Load(raw, graph, bin_path);
+  std::unique_ptr<UniqueKmersOverlay, void(*)(UniqueKmersOverlay*)> loaded_owner(
+      raw, [](UniqueKmersOverlay* p) { p->~UniqueKmersOverlay(); ::operator delete(p); });
+  UniqueKmersOverlay* loaded_ptr = loaded_owner.get();
 
-//   // "TAAAATA" is exclusively on the REF allele node — it must survive the filter.
-//   EXPECT_GT(non_universal.count("TAAAATA"), 0u) << "TAAAATA (REF-allele-only) should be retained";
+  EXPECT_EQ(loaded_ptr->size(), original.size());
+  EXPECT_EQ(loaded_ptr->sequences(), original.sequences());
 
-//   // "GATTCTA" appears in both haplotypes and thus is universal in this context
-//   EXPECT_EQ(non_universal.count("GATTCTA"), 0u) << "GATTCTA (backbone-only coverage) should be excluded";
-// }
-
-
-
-// // Helper: write a FASTA file and run kmc to produce a KMC database.
-// // Returns the database path prefix (without extension) or "" if kmc is absent.
-// static std::string BuildKmcDatabase(const fs::path& dir,
-//                                     const std::string& fasta_contents,
-//                                     int k, int min_count = 1) {
-//   const fs::path fasta = dir / "seqs.fa";
-//   const fs::path db_prefix = dir / "kmers";
-//   const fs::path tmp_dir = dir / "kmc_tmp";
-//   fs::create_directories(tmp_dir);
-
-//   { std::ofstream f(fasta); f << fasta_contents; }
-
-//   std::string cmd = fmt::format(
-//       "kmc -k{} -ci{} -fm -cs65535 -b {} {} {} >/dev/null 2>&1",
-//       k, min_count, fasta.string(), db_prefix.string(), tmp_dir.string());
-//   if (std::system(cmd.c_str()) != 0) {
-//     throw std::runtime_error("kmc command failed: " + cmd);
-//   }
-//   return db_prefix.string();
-// }
-
-// class KmerCountsTest : public ::testing::Test {
-//  protected:
-//   void SetUp() override {
-//     if (std::system("kmc --version >/dev/null 2>&1") != 0) {
-//       GTEST_SKIP() << "kmc binary not available";
-//     }
-//   }
-//   npsv3::test::TempDir dir_;
-// };
-
-// // Build a small database with known counts and verify ABSENT/HET/HOM classification.
-// TEST_F(KmerCountsTest, ClassifiesKnownCounts) {
-//   // We want a 7-mer that appears:
-//   //   once  → count 1 (ABSENT at 30x with default absent_fraction=0.1 → threshold=3)
-//   //   ~15x  → HETEROZYGOUS
-//   //   ~30x  → HOMOZYGOUS
-//   std::string fasta;
-//   fasta += ">absent\nAAAAAAA\n";
-//   for (int i = 0; i < 15; ++i) fasta += ">het_" + std::to_string(i) + "\nACGTACG\n";
-//   for (int i = 0; i < 30; ++i) fasta += ">hom_" + std::to_string(i) + "\nACGACGA\n";
-
-//   const int k = 7;
-//   auto db_path = BuildKmcDatabase(dir_.path_, fasta, k, /*min_count=*/1);
-
-//   // Provide coverage explicitly so we don't need auto-estimation.
-//   npsv3::KmerCounts::Params params;
-//   params.coverage = 30.0; // k-mer coverage
-
-//   npsv3::KmerCounts counts(db_path, params);
-//   EXPECT_DOUBLE_EQ(counts.coverage(), 30.0);
-
-//   // AAAAAAA: count=1 < 3 (0.1 * 30) → ABSENT
-//   EXPECT_EQ(counts.Classify("AAAAAAA"), npsv3::KmerZygosity::ABSENT);
-//   // ACGTACG: count=15 in [3, 21) → HETEROZYGOUS
-//   EXPECT_EQ(counts.Classify("ACGTACG"), npsv3::KmerZygosity::HETEROZYGOUS);
-//   // ACGACGA: count=30 [21, 75) → HOMOZYGOUS
-//   EXPECT_EQ(counts.Classify("ACGACGA"), npsv3::KmerZygosity::HOMOZYGOUS);
-// }
+  // Location handle and offset must match element-by-element.
+  const auto& orig_locations = original.locations();
+  const auto& loaded_locations = loaded_ptr->locations();
+  EXPECT_EQ(loaded_locations, orig_locations) << "Locations mismatch";
+}

@@ -62,8 +62,8 @@ find_package(HTSLib 1.17 REQUIRED)
 find_package(ODGI REQUIRED)
 find_package(KMC REQUIRED)
 
-# Find (or build) Boost 
-find_package(Boost 1.88 HINTS "${CMAKE_BINARY_DIR}/lib/boost")
+# Find (or build) Boost
+find_package(Boost 1.88 COMPONENTS serialization HINTS "${CMAKE_BINARY_DIR}/lib/boost")
 if (NOT Boost_FOUND)
   message(STATUS "Boost not found, downloading and building Boost...")
   ExternalProject_Add(
@@ -73,14 +73,14 @@ if (NOT Boost_FOUND)
     PREFIX "${CMAKE_BINARY_DIR}/lib/boost"
 		UPDATE_COMMAND ""
 		CONFIGURE_COMMAND ./bootstrap.sh --prefix=<INSTALL_DIR>
-		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 --with-scope install
+		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 --with-scope --with-serialization install
 		BUILD_IN_SOURCE true
 		INSTALL_COMMAND ""
 	)
   ExternalProject_Get_Property(Boost install_dir)
   set(Boost_FOUND true)
   set(Boost_INCLUDE_DIRS "${install_dir}/include")
-  
+
   # INTERFACE_INCLUDE_DIRECTORIES must be defined, so create the relevant directory if it doesn't exist
   # https://stackoverflow.com/questions/45516209/cmake-how-to-use-interface-include-directories-with-externalproject
   file(MAKE_DIRECTORY ${Boost_INCLUDE_DIRS})
@@ -88,6 +88,13 @@ if (NOT Boost_FOUND)
   add_library(Boost::boost INTERFACE IMPORTED)
   add_dependencies(Boost::boost Boost)
   target_include_directories(Boost::boost INTERFACE ${Boost_INCLUDE_DIRS})
+
+  add_library(Boost::serialization STATIC IMPORTED)
+  add_dependencies(Boost::serialization Boost)
+  set_target_properties(Boost::serialization PROPERTIES
+    IMPORTED_LOCATION "${install_dir}/lib/libboost_serialization.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIRS}"
+  )
 endif()
 
 include(FetchContent)
@@ -165,6 +172,7 @@ target_link_libraries(graph
   HTSLib::Static
   ODGI::ODGI
   Boost::boost
+  Boost::serialization
   fmt::fmt
   spdlog::spdlog
   KMC::Static

@@ -23,7 +23,7 @@ class AllPathGraphOverlay;
 class HaplotypeSamplerOverlay;
 class UniqueKmersOverlay;
 
-class Graph : public handlegraph::HandleGraph {
+class Graph : public handlegraph::PathHandleGraph {
  public:
   typedef std::vector<handlegraph::handle_t> HandleSeq;
   typedef std::vector<odgi::nid_t> NodeIdSeq;
@@ -47,33 +47,43 @@ class Graph : public handlegraph::HandleGraph {
   /** \name handlegraph interface */
   // @{
  public:
-  handlegraph::handle_t get_handle(const odgi::nid_t& node_id, bool is_reverse = false) const { return graph_.get_handle(node_id, is_reverse); }
-  odgi::nid_t get_id(const handlegraph::handle_t& handle) const { return graph_.get_id(handle); }
-  size_t get_length(const handlegraph::handle_t& handle) const;
-  std::string get_sequence(const handlegraph::handle_t& handle) const;
-  bool has_node(handlegraph::nid_t node_id) const { return graph_.has_node(node_id); }
-  bool get_is_reverse(const handlegraph::handle_t& handle) const { return graph_.get_is_reverse(handle); }
-  handlegraph::handle_t flip(const handlegraph::handle_t& handle) const { return graph_.flip(handle); }
+  handlegraph::handle_t get_handle(const odgi::nid_t& node_id, bool is_reverse = false) const override  { return graph_.get_handle(node_id, is_reverse); }
+  odgi::nid_t get_id(const handlegraph::handle_t& handle) const override  { return graph_.get_id(handle); }
+  size_t get_length(const handlegraph::handle_t& handle) const override ;
+  std::string get_sequence(const handlegraph::handle_t& handle) const override ;
+  bool has_node(handlegraph::nid_t node_id) const override  { return graph_.has_node(node_id); }
+  bool get_is_reverse(const handlegraph::handle_t& handle) const override  { return graph_.get_is_reverse(handle); }
+  handlegraph::handle_t flip(const handlegraph::handle_t& handle) const override  { return graph_.flip(handle); }
 
-  size_t get_node_count() const { return graph_.get_node_count(); }
-  odgi::nid_t min_node_id() const { return graph_.min_node_id(); }
-  odgi::nid_t max_node_id() const { return graph_.max_node_id(); }
+  size_t get_node_count() const override  { return graph_.get_node_count(); }
+  odgi::nid_t min_node_id() const override  { return graph_.min_node_id(); }
+  odgi::nid_t max_node_id() const override  { return graph_.max_node_id(); }
 
-  bool has_edge(const handlegraph::handle_t& left, const handlegraph::handle_t& right) const { return graph_.has_edge(left, right); }
+  bool has_edge(const handlegraph::handle_t& left, const handlegraph::handle_t& right) const override  { return graph_.has_edge(left, right); }
 
-  bool has_path(const std::string& path_name) const { return graph_.has_path(path_name); }
-  handlegraph::path_handle_t get_path_handle(const std::string& path_name) const;
-  std::string get_path_name(const handlegraph::path_handle_t& path_handle) const { return graph_.get_path_name(path_handle); }
-  handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const { return graph_.path_back(path); }
-  handlegraph::step_handle_t path_front_end(const handlegraph::path_handle_t& path_handle) const { return graph_.path_front_end(path_handle); }
-  bool is_empty(const handlegraph::path_handle_t& path_handle) const { return graph_.is_empty(path_handle); }
-  void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }
-
-  handlegraph::step_handle_t get_previous_step(const handlegraph::step_handle_t& step_handle) const { return graph_.get_previous_step(step_handle); }
+  size_t get_path_count() const override  { return graph_.get_path_count(); }
+  bool has_path(const std::string& path_name) const override  { return graph_.has_path(path_name); }
+  handlegraph::path_handle_t get_path_handle(const std::string& path_name) const override;
+  std::string get_path_name(const handlegraph::path_handle_t& path_handle) const override { return graph_.get_path_name(path_handle); }
+  bool get_is_circular(const handlegraph::path_handle_t& path_handle) const override { return graph_.get_is_circular(path_handle); }
+  size_t get_step_count(const handlegraph::path_handle_t& path_handle) const override { return graph_.get_step_count(path_handle); }
+  size_t get_step_count(const handlegraph::handle_t& handle) const override { return graph_.get_step_count(handle); }
+  handlegraph::handle_t get_handle_of_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.get_handle_of_step(step_handle); }
+  handlegraph::path_handle_t get_path_handle_of_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.get_path_handle_of_step(step_handle); }
+  handlegraph::step_handle_t path_begin(const handlegraph::path_handle_t& path_handle) const override { return graph_.path_begin(path_handle); }
+  handlegraph::step_handle_t path_end(const handlegraph::path_handle_t& path_handle) const override { return graph_.path_end(path_handle); }  
+  handlegraph::step_handle_t path_back(const handlegraph::path_handle_t& path) const override { return graph_.path_back(path); }
+  handlegraph::step_handle_t path_front_end(const handlegraph::path_handle_t& path_handle) const override { return graph_.path_front_end(path_handle); }
+  bool has_next_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.has_next_step(step_handle); }
+  bool has_previous_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.has_previous_step(step_handle); }
+  handlegraph::step_handle_t get_next_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.get_next_step(step_handle); }    
+  handlegraph::step_handle_t get_previous_step(const handlegraph::step_handle_t& step_handle) const override { return graph_.get_previous_step(step_handle); }
 
   odgi::graph_t::path_metadata_t& get_path_metadata(const handlegraph::path_handle_t& path) { return graph_.get_path_metadata(path); }
 
   void destroy_step(const handlegraph::step_handle_t& step_handle) { return graph_.destroy_step(step_handle); }
+  bool is_empty(const handlegraph::path_handle_t& path_handle) const { return graph_.is_empty(path_handle); }
+  void destroy_path(const handlegraph::path_handle_t& path) { return graph_.destroy_path(path); }  
 
  protected:
   bool follow_edges_impl(const handlegraph::handle_t& handle, bool go_left, const std::function<bool(const handlegraph::handle_t&)>& iteratee) const override {
@@ -83,6 +93,15 @@ class Graph : public handlegraph::HandleGraph {
   bool for_each_handle_impl(const std::function<bool(const handlegraph::handle_t&)>& iteratee, bool parallel = false) const override {
     return graph_.for_each_handle(iteratee, parallel);
   }
+
+  bool for_each_path_handle_impl(const std::function<bool(const handlegraph::path_handle_t&)>& iteratee) const override {
+    return graph_.for_each_path_handle(iteratee);
+  }
+ 
+  bool for_each_step_on_handle_impl(const handlegraph::handle_t& handle, const std::function<bool(const handlegraph::step_handle_t&)>& iteratee) const override {
+    return graph_.for_each_step_on_handle(handle, iteratee);
+  }
+
   // @}
 
  public:
@@ -140,11 +159,26 @@ class Graph : public handlegraph::HandleGraph {
    */
   void PopulateNodeAndPathMasks(const std::string& inference_vcf, const Range& region, size_t min_size, NodeIdSet& node_mask, PathIdSet& path_mask) const;
 
-  /** @brief Write the graph in GFA format to an output stream
-   * 
-   * @param out Output stream to write the GFA format to
+  /**
+   * @brief Compute forward reachability for all nodes
+   *
+   * Returns a vector indexed by node ID where entry [u] is the set of node IDs
+   * reachable from u following forward edges, including u itself.
    */
+  std::vector<NodeIdSet> ForwardReachability() const;
+
+  /** @brief Write the graph in GFA format to an output stream */
   void ToGFA(std::ostream&);
+
+  /** @brief Serialize the graph to an output stream */
+  void Save(std::ostream&) const;
+  /** @brief Serialize the graph to a binary file */
+  void Save(const std::string&) const;
+
+  /** @brief Deserialize a graph previously written by Save from a stream */
+  static std::unique_ptr<Graph> Load(std::istream&);
+  /** @brief Deserialize a graph from a file previously written by Save */
+  static std::unique_ptr<Graph> Load(const std::string&);
 
   friend AllPathGraphOverlay;
   friend HaplotypeSamplerOverlay;
@@ -153,6 +187,9 @@ class Graph : public handlegraph::HandleGraph {
   friend detail::Haplotype;
 
  private:
+  Graph() = default;  // Used by Load()
+
+  Range region_;
   odgi::graph_t graph_;
   std::vector<PathIdSet> node_variant_paths_;
   std::vector<size_t> variant_path_starts_;

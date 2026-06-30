@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <array>
 #include <vector>
 
 #include <boost/dynamic_bitset.hpp>
+#include <boost/core/span.hpp>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -9,12 +11,31 @@
 namespace npsv3 {
 
 /**
- * @brief Overlay that greedily samples up to n haplotypes from the graph using
+ * @brief Overlay that greedily samples haplotypes from the graph using
  *        graph-unique k-mer zygosity scores (Sirén et al. approach).
  */
 class HaplotypeSamplerOverlay {
  public:
   using Haplotype = Graph::NodeIdSeq;
+  using KmerNodeIdSeq = std::vector<odgi::nid_t>;
+  using KmerIdSet = boost::dynamic_bitset<>;
+
+  // Transparent comparator: enables heterogeneous lookup in PathKmerMap using
+  // boost::span or std::array keys without constructing a KmerNodeIdSeq.
+  struct NodeIdSeqLess {
+    using is_transparent = void;
+    template<typename L, typename R>
+    bool operator()(const L& lhs, const R& rhs) const {
+      return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
+    }
+  };
+
+  struct PathKmerEntry {
+    KmerIdSet kmer_set_;
+    Graph::PathIdSet intermediate_paths_;
+    explicit PathKmerEntry(size_t kmer_count = 0) : kmer_set_(kmer_count) {}
+  };
+  using PathKmerMap = std::map<KmerNodeIdSeq, PathKmerEntry, NodeIdSeqLess>;
   
   struct Diplotype {
     size_t h1, h2; ///< Haplotype indices
@@ -31,11 +52,23 @@ class HaplotypeSamplerOverlay {
     Params() {};
   };
 
+
   /**
-   * @param graph        The variant graph (node IDs must be in topological order)
+   * @brief Helper constructor for building sampler overlay directly from k-mer sequences and locations 
+   * 
+   * @param graph The variant graph (node IDs must be in topological order)
+   * @param sequences K-mer sequences (must be in the same order as @p locations)
+   * @param locations K-mer locations on the graph (must be in the same order as @p sequences)
+   * @param params Scoring parameters (optional)
+   */
+  HaplotypeSamplerOverlay(const Graph& graph, const std::vector<std::string>& sequences,
+                          const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params);
+
+  /**
+   * @param graph The variant graph (node IDs must be in topological order)
    * @param unique_kmers Pre-computed graph-unique k-mer map (from Graph::UniqueKmers())
-   * @param counts       KmerCounts instance used to classify k-mer sequences
-   * @param params       Scoring parameters (optional)
+   * @param counts KmerClassify instance used to classify k-mer sequences
+   * @param params Scoring parameters (optional)
    */
   explicit HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers, const Params& params = {});
 
@@ -51,62 +84,48 @@ class HaplotypeSamplerOverlay {
                           size_t min_size = 50,
                           const Params& params = {});
 
-  /// Initialize (or reset) scores prior to sampling based on supplied k-mer counts without reconstructing the entire overlay.
-  void InitializeScores(const KmerCounts& counts);
+  /// Initialize (or reset) scores prior to sampling based on k-mer @p counts without reconstructing the overlay.
+  void InitializeScores(const KmerClassify& counts);
 
-  /// Greedily select up to n haplotypes; returns one NodeIdSeq per haplotype.
-  std::vector<Haplotype> SampleHaplotypes(size_t n);
-
-  /// Return the up to n unique highest-scoring distinct paths through the graph using the current k-mer scores.
+  /// Return up to @p n unique highest-scoring distinct paths through the graph using the current k-mer scores.
   std::vector<Haplotype> FindBestPaths(size_t n) const;
 
-  /// Return the top n highest-scoring diplotypes from all pairs of the given
-  /// candidate haplotypes, sorted by descending score.
+  /// Return the top @p n haplotypes, sorted by descending score, sampled greedily from the graph using k-mer coverage.
+  std::vector<Haplotype> SampleHaplotypes(size_t n);
+
+  /// Return the top @p n highest-scoring diplotypes from all pairs of the @p candidate haplotypes, sorted by descending score.
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n = 1) const;
 
-  /// Number of unique non-universal k-mers collected during construction.
+  /// Number of unique k-mers used in sampling
   size_t NumKmers() const { return kmers_.size(); }
 
-  /// True if any k-mers are entirely within a single node.
-  bool HasNodeKmers() const { return !node_kmers_.empty(); }
+  /// Return the set of k-mers that lie on @p path.
+  KmerIdSet KmersOnPath(const Graph::NodeIdSeq& path) const;
 
-  /// True if any k-mers span multiple nodes (recorded as explict edges).
-  bool HasEdgeKmers() const { return !edge_kmers_.empty(); }
+  const PathKmerMap& PathKmers() const { return path_kmers_; }
 
  private:
-  struct KmerInfo {
+  struct KmerScore {
     KmerZygosity zygosity;
     double score;
-  };
-
-  struct Edge {
-    odgi::nid_t from;
-    odgi::nid_t to;
-
-    bool operator<(const Edge& other) const noexcept{
-      return std::tie(from, to) < std::tie(other.from, other.to);
-    }
-  };
-
-  struct EdgeInfo {
-    std::vector<odgi::nid_t> intermediate_nodes;  ///< [h1 ... h_{n-1}]
-    std::vector<size_t> kmers; ///< All k-mer indices credited on traversal
   };
 
   const Graph& graph_;
   Params params_;
 
-  Graph::NodeIdSet inference_node_mask_; ///< Variant nodes whose allele coverage is tracked in covered_paths
-  Graph::PathIdSet inference_path_mask_; ///< Path-ID bits for tracked alleles (masks node_variant_paths_ lookups)
+  Graph::NodeIdSet inference_node_mask_; ///< Nodes that differentiate inference alleles
+  Graph::PathIdSet inference_path_mask_; ///< Paths for inference alleles
   bool apply_path_filter_ = false; ///< When true, skip paths with no covered inference alleles (set by inference-VCF constructor)
 
   std::vector<std::string> kmer_sequences_; ///< k-mer sequences
-  std::vector<KmerInfo> kmers_; ///< k-mer zygosity and score information, parallel to kmer_sequences_
-  std::unordered_map<odgi::nid_t, std::vector<size_t>> node_kmers_; ///< nid to k-mer indices
-  std::map<Edge, std::vector<EdgeInfo>> edge_kmers_; ///< edge (from,to) to edge info (w/ intermediate nodes and k-mer indices)
+  std::vector<KmerScore> kmers_; ///< k-mer zygosity and score information (parallel to kmer_sequences_)
   
-  /// Return a bitset of length kmers_.size() indicating which k-mers lie on the given path.
-  boost::dynamic_bitset<> KmersOnPath(const Graph::NodeIdSeq& path) const;
+  /** 
+   * Map from path (sequence of nids) to k-mer indices. We leverage sorted order to efficiently query for path segments
+    * that have associated k-mers. This could potentially be replaced with a trie, if it becomes a performance bottleneck.
+   */
+  PathKmerMap path_kmers_; ///< path (sequence of nids) to k-mer indices
+  static_assert(!std::is_same<typename PathKmerMap::key_compare, void>::value, "HaplotypeSamplerOverlay requires PathKmerMap to be ordered");
 
   /// Update the scores of k-mers having sampled @p path
   void UpdateScores(const Graph::NodeIdSeq& path);

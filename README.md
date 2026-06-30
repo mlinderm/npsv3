@@ -74,7 +74,7 @@ at which point you can run the tests with `pytest <pytest args...>`, e.g., `pyte
 
 If the Python tests depend on changes in the C++ extension, reinstall the package with
 ```
-uv pip install --no-build-isolation -ve .
+uv pip install --no-build-isolation -e .
 ```
 
 There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.12, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.

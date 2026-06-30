@@ -3,9 +3,14 @@
 #include <algorithms/topological_sort.hpp>
 #include <algorithms/kmer.hpp>
 #include <fmt/format.h>
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
 #include <boost/core/span.hpp>
 #include <boost/dynamic_bitset.hpp>
+#include <boost/dynamic_bitset/serialization.hpp>
+#include <boost/serialization/vector.hpp>
 #include <spdlog/spdlog.h>
+#include <fstream>
 #include <limits>
 #include <unordered_set>
 
@@ -211,21 +216,21 @@ class ReferenceNodes {
 
 }  // namespace
 
-Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic) {
+Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic) : region_(region) {
   auto vcf_file = VariantFileReader::Open(vcf_path);
 
   // For phases 1 & 2 don't load genotypes, just the variant alleles, to reduce memory usage when storing all variants in the region.
   {  // Scope for vector of variants
-    ReferenceNodes ref_nodes(graph_, reference_fasta_path, region);
+    ReferenceNodes ref_nodes(graph_, reference_fasta_path, region_);
     size_t num_variant_paths = 0;  // Track number of variant allele paths that will be defined
     std::vector<VariantFileReader::VariantPtr> variants;
     {  // Scope of collecting reference breakpoints/
       // 1. Collect unique variant breakpoints to construct reference nodes
-      std::vector<Pos> ref_breakpoints = {region.start(), region.end()}, zero_width_breakpoints;
-      vcf_file->SetRegion(region);
+      std::vector<Pos> ref_breakpoints = {region_.start(), region_.end()}, zero_width_breakpoints;
+      vcf_file->SetRegion(region_);
       while (auto variant = vcf_file->NextVariant()) {
         auto ref_region = variant->ReferenceRegion();
-        if (ref_region.start() <= region.start() || ref_region.end() >= region.end()) {
+        if (ref_region.start() <= region_.start() || ref_region.end() >= region_.end()) {
           continue; // Skip variants that only partially overlap the graph region
         }
         if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
@@ -234,12 +239,12 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
 
         num_variant_paths++;
         for (int i = 1; i < variant->num_alleles(); i++) {
-          auto region = variant->AlleleReferenceRegion(i);
-          if (region) {
-            ref_breakpoints.push_back(region->start());
-            ref_breakpoints.push_back(region->end());
-            if (region->length() == 0) {
-              zero_width_breakpoints.push_back(region->start());
+          auto alt_region = variant->AlleleReferenceRegion(i);
+          if (alt_region) {
+            ref_breakpoints.push_back(alt_region->start());
+            ref_breakpoints.push_back(alt_region->end());
+            if (alt_region->length() == 0) {
+              zero_width_breakpoints.push_back(alt_region->start());
             }
             num_variant_paths++;
           }
@@ -256,7 +261,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
         ref_nodes.CreateRefNode(*next_zw, *next_zw);
         ++next_zw;
       }
-      for (auto i = 0; i < ref_breakpoints.size() - 1; i++) {
+      for (size_t i = 0; i + 1 < ref_breakpoints.size(); i++) {
         ref_nodes.CreateRefNode(ref_breakpoints[i], ref_breakpoints[i + 1]);
         // Insert any zero-width regions (for insertions). There can only be one for each breakpoint interval.
         if (next_zw != zero_width_breakpoints.end() && *next_zw <= ref_breakpoints[i + 1]) {
@@ -266,7 +271,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       }
 
       // Add path for the reference contig
-      auto ref_path = ref_nodes.AddRefPath();
+      [[maybe_unused]] auto ref_path = ref_nodes.AddRefPath();
       assert(graph_.get_path_count() == 1 && handlegraph::as_integer(ref_path) == 1);  // So far only the reference path (index 1), should exist
     }
 
@@ -350,7 +355,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     auto order = odgi::algorithms::lazier_topological_order(&graph_);
     graph_.apply_ordering(order, true /* compact IDs */);
     node_variant_paths_.resize(node_variant_paths.size());
-    for (int i = 0; i < order.size(); i++) {
+    for (size_t i = 0; i < order.size(); i++) {
       // When compacting IDs, the new nodes will start at index 1
       node_variant_paths_[i+1] = std::move(node_variant_paths[graph_.get_id(order[i])]);
     }
@@ -358,19 +363,19 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
   }
 
   // 5. Add genotype paths
-  auto ref_nodes = PathNodes(region.contig()); // All samples share the same reference path
+  auto ref_nodes = PathNodes(region_.contig()); // All samples share the same reference path
   assert(std::is_sorted(std::begin(ref_nodes), std::end(ref_nodes)));
   
   std::vector<detail::Polytype> polytypes;
   for (const auto& sample : vcf_file->Samples()) {
-    polytypes.emplace_back(2 /* ploidy */, *this, ref_nodes, sample, region.contig());
+    polytypes.emplace_back(2 /* ploidy */, *this, ref_nodes, sample, region_.contig());
   }
 
   std::optional<Range> prev_range;  // Region of previous variant(s)
-  vcf_file->SetRegion(region);
+  vcf_file->SetRegion(region_);
   while (auto variant = vcf_file->NextVariant(BCF_UN_ALL)) {
     auto ref_region = variant->ReferenceRegion();
-    if (ref_region.start() <= region.start() || ref_region.end() >= region.end()) {
+    if (ref_region.start() <= region_.start() || ref_region.end() >= region_.end()) {
       continue; // Skip variants that only partially overlap the graph region
     }
 
@@ -441,7 +446,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       ref_allele_indices = std::make_pair(start_idx, start_idx + ref_allele_nodes.size());
     }
 
-    for (int i=0; i < polytypes.size(); i++) {
+    for (size_t i=0; i < polytypes.size(); i++) {
       polytypes[i].AddGenotype(*variant, allele_paths, ref_allele_indices, genotypes[i], star_allele_index);
     }
   }
@@ -551,6 +556,23 @@ std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {
     });
   }
   return std::vector<std::string>(samples.begin(), samples.end());
+}
+
+std::vector<Graph::NodeIdSet> Graph::ForwardReachability() const {
+  auto max_id = graph_.max_node_id();
+  auto min_id = graph_.min_node_id();
+  std::vector<NodeIdSet> reachable(max_id + 1, NodeIdSet(max_id + 1));
+  for (auto id = min_id; id <= max_id; ++id) {
+    if (graph_.has_node(id)) reachable[id].set(id);
+  }
+  for (auto id = max_id; id >= min_id; --id) {
+    if (!graph_.has_node(id)) continue;
+    graph_.follow_edges(graph_.get_handle(id), false /* forward */, [&](const handlegraph::handle_t& succ) {
+      reachable[id] |= reachable[graph_.get_id(succ)];
+      return true;
+    });
+  }
+  return reachable;
 }
 
 namespace {
@@ -727,8 +749,34 @@ void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range&
   }
 }
 
-void Graph::ToGFA(std::ostream& ostream) {
-  graph_.to_gfa(ostream);
+void Graph::ToGFA(std::ostream& ostream) { graph_.to_gfa(ostream); }
+
+void Graph::Save(std::ostream& out) const {
+  graph_.serialize(out);
+  boost::archive::binary_oarchive oa(out);
+  oa << node_variant_paths_;
+  oa << variant_path_starts_;
+}
+
+void Graph::Save(const std::string& path) const {
+  std::ofstream out(path, std::ios::binary);
+  if (!out) throw std::runtime_error("Cannot open graph file for writing: " + path);
+  Save(out);
+}
+
+std::unique_ptr<Graph> Graph::Load(std::istream& in) {
+  auto g = std::unique_ptr<Graph>(new Graph());
+  g->graph_.deserialize(in);
+  boost::archive::binary_iarchive ia(in);
+  ia >> g->node_variant_paths_;
+  ia >> g->variant_path_starts_;
+  return g;
+}
+
+std::unique_ptr<Graph> Graph::Load(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("Cannot open graph file: " + path);
+  return Load(in);
 }
 
 namespace {
@@ -742,7 +790,7 @@ struct KmerDFSState {
 void KmersDFS(
     const handlegraph::HandleGraph& graph, size_t k, size_t edge_max,
     const std::function<void(const std::string&, const std::vector<handlegraph::handle_t>&, uint64_t)>& callback,
-    KmerDFSState& state, size_t buffer_offset = 0) {
+    KmerDFSState& state, size_t buffer_offset, size_t max_start_offset) {
   auto init_buffer_size = state.buffer_.size();
 
   // We should only call this function using a buffer that is not yet long enough to generate a full k-mer, i.e.
@@ -758,16 +806,17 @@ void KmersDFS(
     state.buffer_.append(graph.get_sequence(next_handle), 0 /* start pos */, k-1);
     state.handles_.push_back(next_handle);
 
-    // Generate all the k-mers that can be formed by extending the current buffer with the sequence of this node.
+    // Generate k-mers that can be formed by extending the buffer, but only those starting within handles_[0]
+    // (positions < max_start_offset). k-mers starting in later handles will be generated when Graph::Kmers
+    // processes those handles directly.
     size_t offset = buffer_offset;
-    for (; (offset  +  k) <= state.buffer_.size(); ++offset) {
+    for (; offset < max_start_offset && (offset + k) <= state.buffer_.size(); ++offset) {
       callback(state.buffer_.substr(offset, k), state.handles_, state.starting_handle_offset_ + offset);
     }
 
-    // If this node was not long enough to exhaut all possible prefixes, recurse into the next node to try to generate any remaining
-    // k-mers that started in the original node.
-    if ((state.buffer_.size() - init_buffer_size) < (k - 1)) {
-      KmersDFS(graph, k, edge_max, callback, state, offset);
+    // If there are still unprocessed start positions within handles_[0], recurse to gather more characters.
+    if (offset < max_start_offset) {
+      KmersDFS(graph, k, edge_max, callback, state, offset, max_start_offset);
     }
 
     // Reset handles and buffer after completing this node and its children
@@ -795,7 +844,7 @@ void Graph::Kmers(size_t k, size_t edge_max, const std::function<void(const std:
     state.handles_ = {handle};
     state.starting_handle_offset_ = handle_offset;
     state.buffer_ = seq.substr(handle_offset, k - 1);
-    KmersDFS(*this, k, edge_max, callback, state);
+    KmersDFS(*this, k, edge_max, callback, state, 0, state.buffer_.size());
 
     return true; // continue for_each_handle
   }, false /* parallel */);
@@ -870,7 +919,7 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
   Variant::Genotype::AlleleIndices indices(genotype.allele_indices());
   bool added_genotype = false;
   do {
-    int h = 0;
+    size_t h = 0;
     try {
       for (; h < genotype.num_alleles(); h++) {
         if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
@@ -882,14 +931,14 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
       break; // Successfully added alleles, finalize haplotypes and terminate permutation loop
     } catch (const NonRefAlleleOverlappingError&) {
       // Inconsistent haplotypes, undo any actions taken so far
-      for (int i=0; i <= h; i++) {
+      for (size_t i=0; i <= h; i++) {
         haplotypes_[i].UndoActions();
       }
     } 
   } while (permute_alleles && std::next_permutation(std::begin(indices), std::begin(indices) + genotype.num_alleles()));
   
   if (!added_genotype) {
-    for (int h = 0; h < genotype.num_alleles(); h++) {
+    for (size_t h = 0; h < genotype.num_alleles(); h++) {
       if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
         continue; // Skip missing alleles or '*' alleles
       }

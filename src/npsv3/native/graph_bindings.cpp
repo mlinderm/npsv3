@@ -1,4 +1,5 @@
 #include <sstream>
+#include <streambuf>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -9,6 +10,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/operators.h>
+#include <fmt/format.h>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -16,6 +18,15 @@
 
 namespace nb = nanobind;
 using namespace nb::literals;
+
+// Read-only streambuf that wraps an existing byte buffer without copying.
+// The caller must ensure the buffer outlives any istream using this buf.
+struct MemReadBuf : std::streambuf {
+  MemReadBuf(const char* begin, size_t size) {
+    char* p = const_cast<char*>(begin);
+    setg(p, p, p + size);
+  }
+};
 
 class VariantFileReaderIterator {
   public:
@@ -42,15 +53,41 @@ NB_MODULE(_native_graph, m) {
 
   nb::class_<npsv3::UniqueKmersOverlay>(m, "UniqueKmersOverlay")
     // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together
-    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, size_t k, size_t max_edges, bool exclude_universal, bool canonicalize) {
-      new (self) npsv3::UniqueKmersOverlay(graph, k, max_edges, exclude_universal, canonicalize);
-    }, nb::keep_alive<1, 2>(), "graph"_a, "k"_a, "max_edges"_a = 1000, "exclude_universal"_a = true, "canonicalize"_a = false)
+    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, size_t k, size_t max_edges, bool exclude_universal, bool canonicalize, const npsv3::KmerCounts* ref_kmer_counts) {
+      new (self) npsv3::UniqueKmersOverlay(graph, k, max_edges, exclude_universal, canonicalize, ref_kmer_counts);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "k"_a, "max_edges"_a = 1000, "exclude_universal"_a = true, "canonicalize"_a = false, "ref_kmer_counts"_a = nullptr)
+    // Deserialisation overload: UniqueKmersOverlay(graph, path) loads from a binary file
+    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, const std::string& path) {
+      npsv3::UniqueKmersOverlay::Load(self, graph, path);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "path"_a)
+    // Deserialisation overload: UniqueKmersOverlay(graph, data) loads from bytes without copying
+    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, nb::bytes data) {
+      MemReadBuf buf(data.c_str(), data.size());
+      std::istream is(&buf);
+      npsv3::UniqueKmersOverlay::Load(self, graph, is);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
     .def("__len__", &npsv3::UniqueKmersOverlay::size)
-    .def("save_fasta", &npsv3::UniqueKmersOverlay::SaveFasta, "fasta_path"_a);;
+    .def_prop_ro("sequences", &npsv3::UniqueKmersOverlay::sequences)
+    .def("save_fasta", &npsv3::UniqueKmersOverlay::SaveFasta, "fasta_path"_a)
+    .def("save", nb::overload_cast<const std::string&>(&npsv3::UniqueKmersOverlay::Save, nb::const_), "path"_a)
+    .def("save_bytes", [](const npsv3::UniqueKmersOverlay& overlay) {
+      std::ostringstream oss(std::ios::binary);
+      overlay.Save(oss);
+      auto s = std::move(oss).str();
+      return nb::bytes(s.data(), s.size());
+    });
 
   nb::class_<npsv3::KmerCounts>(m, "KmerCounts")
-    .def("__init__", [](npsv3::KmerCounts* self, const std::string& db_path, double coverage) {
-      new (self) npsv3::KmerCounts(db_path, coverage);
+    .def("__init__", [](npsv3::KmerCounts* self, const std::string& db_path) {
+      new (self) npsv3::KmerCounts(db_path);
+    }, "db_path"_a)
+    .def("count", [](const npsv3::KmerCounts& self, const std::string& kmer) {
+      return self.Count(kmer);
+    }, "kmer"_a);
+
+  nb::class_<npsv3::KmerClassify>(m, "KmerClassify")
+    .def("__init__", [](npsv3::KmerClassify* self, const std::string& db_path, double coverage) {
+      new (self) npsv3::KmerClassify(db_path, coverage);
     }, "db_path"_a, "coverage"_a);
 
   nb::class_<npsv3::HaplotypeSamplerOverlay::Diplotype>(m, "Diplotype")
@@ -77,6 +114,16 @@ NB_MODULE(_native_graph, m) {
     .def("__init__", [](npsv3::Range* r, const char* contig, npsv3::Pos start, npsv3::Pos end) {
       new (r) npsv3::Range(contig, start, end);
     })
+    // Construct from a 1-indexed fully closed region string "contig:start-end"
+    .def("__init__", [](npsv3::Range* r, const char* region) {
+      hts_pos_t beg, end;
+      const char* colon = hts_parse_reg64(region, &beg, &end);
+      if (colon == nullptr) {
+        throw std::invalid_argument(fmt::format("Invalid region string: {}", region));
+      }
+      npsv3::ContigName contig(region, colon);
+      new (r) npsv3::Range(contig, static_cast<npsv3::Pos>(beg), static_cast<npsv3::Pos>(end));
+    }, "region"_a)
     .def_prop_ro("contig", [](const npsv3::Range& r) { return r.contig().get(); })
     .def_prop_ro("start", &npsv3::Range::start)
     .def_prop_ro("end", &npsv3::Range::end)
@@ -86,10 +133,12 @@ NB_MODULE(_native_graph, m) {
     .def("union_with", &npsv3::Range::UnionWith)
     .def("overlaps", &npsv3::Range::Overlaps)
     .def(nb::self == nb::self)
+    .def_prop_ro("slug", [](const npsv3::Range& r) {
+      return fmt::format("{}_{}_{}", r.contig(), r.start(), r.end());
+    })
     .def("__str__", [](const npsv3::Range& r) {
-      std::ostringstream oss;
-      oss << r;
-      return oss.str();
+      // Convert to 1-based closed interval for display, which is more conventional for genomic coordinates
+      return fmt::format("{}:{}-{}", r.contig(), r.start()+1, r.end());
     });
 
   nb::class_<npsv3::Variant>(m, "Variant")
@@ -136,7 +185,7 @@ NB_MODULE(_native_graph, m) {
     .def("__exit__", [](npsv3::VariantFileReader& reader, [[maybe_unused]] nb::handle exc_type, [[maybe_unused]] nb::handle exc_value, [[maybe_unused]] nb::handle traceback) {
       reader.Close();
       return false; // Don't suppress exceptions
-    })
+    }, "exc_type"_a = nb::none(), "exc_value"_a = nb::none(), "traceback"_a = nb::none())
     .def("fetch", [](npsv3::VariantFileReader& reader) {
       reader.SetRegion();
       return VariantFileReaderIterator(reader);
@@ -164,6 +213,19 @@ NB_MODULE(_native_graph, m) {
 
   nb::class_<npsv3::Graph>(m, "Graph")
     .def(nb::init<const std::string&, const std::string&, const npsv3::Range&>())
+    .def("save", nb::overload_cast<const std::string&>(&npsv3::Graph::Save, nb::const_), "path"_a)
+    .def("save_bytes", [](const npsv3::Graph& graph) {
+      std::ostringstream oss(std::ios::binary);
+      graph.Save(oss);
+      auto s = std::move(oss).str();
+      return nb::bytes(s.data(), s.size());
+    })
+    .def_static("load", [](const std::string& path) { return npsv3::Graph::Load(path); }, "path"_a)
+    .def_static("load_bytes", [](nb::bytes data) {
+      MemReadBuf buf(data.c_str(), data.size());
+      std::istream is(&buf);
+      return npsv3::Graph::Load(is);
+    }, "data"_a)
     .def("node_count", &npsv3::Graph::get_node_count)
     .def("has_path", &npsv3::Graph::has_path)
     .def("path_nodes", nb::overload_cast<const std::string&>(&npsv3::Graph::PathNodes, nb::const_))

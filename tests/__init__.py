@@ -1,10 +1,4 @@
-# SPDX-FileCopyrightText: 2023-present Michael Linderman <mlinderman@middlebury.edu>
-#
-# SPDX-License-Identifier: MIT
 import os
-from typing import Tuple
-
-from omegaconf import OmegaConf
 
 from npsv3.util.config import setup_resolvers
 

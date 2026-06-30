@@ -228,9 +228,8 @@ def _compute_coverage_with_indexcov(read_path: str, fasta_path: str) -> dict:
             weights = table.align_len / np.sum(table.align_len)
             return np.sum(weights * table.norm_covg)
 
-        norm_coverage_by_chrom = windows_table.groupby("chrom").apply(norm_coverage_group).to_dict()
+        return windows_table.groupby("chrom").apply(norm_coverage_group).to_dict()
 
-        return norm_coverage_by_chrom
 
 
 def _kmc_db_kmer_size(prefix: str) -> int | None:
@@ -267,7 +266,7 @@ def _find_or_create_kmc_db(
     reference_path: str,
     kmer_size: int = 31,
     canonicalize: bool = False,
-    min_count: int = 1,
+    min_count: int = 2,
     tmp_dir: str | None = None,
     threads: int = 1,
     max_memory: int = 12,
@@ -279,7 +278,7 @@ def _find_or_create_kmc_db(
         output_prefix: Output path prefix for the KMC database (without extension).
         reference_path: Reference FASTA used to decode CRAM. Required for CRAM input.
         kmer_size: K-mer length. Defaults to 31.
-        min_count: Minimum k-mer count to retain. Defaults to 1.
+        min_count: Minimum k-mer count to retain. Defaults to 2 (ignore singletons).
         threads: Number of threads for both samtools and KMC. Defaults to 1.
         max_memory: Maximum memory in GB for KMC. Defaults to 12.
 
@@ -328,13 +327,14 @@ def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
         histogram: Mapping of count -> frequency, with singletons (count=1) already excluded.
 
     Returns:
-        float: Estimated haploid coverage.
+        int: Estimated haploid coverage.
 
     Raises:
-        ValueError: If the coverage cannot be determined from the histogram shape.
+        ValueError: If the input histogram is invalid.
     """
     if histogram.empty:
-        raise ValueError("K-mer count histogram is empty; cannot auto-estimate coverage")
+        msg = "K-mer count histogram is empty; cannot auto-estimate coverage."
+        raise ValueError(msg)
 
     mode_count = int(histogram.idxmax())
     mode_freq = histogram[mode_count]
@@ -342,7 +342,6 @@ def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
     # Weighted median: smallest count where cumulative frequency >= 50% of total
     median_idx = histogram.cumsum().searchsorted(histogram.sum() // 2, side="left")
     median_count = int(histogram.index[int(median_idx)])  # Need int conversion to silence type errors
-
     # From Sirén et al. §2.1:
     # Let N be the most common count and m the median count. If N ≥ m, we assume that most k-mers that
     # are present in the sample are homozygous and use N as the estimate of k-mer coverage.
@@ -350,8 +349,8 @@ def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
         return mode_count
 
     # Otherwise we consider the case that most present k-mers are heterozygous. Let
-    # N′ = argmax_{1.7N≤n≤2.3N}f(n) be the secondary peak near 2N. If N′ ≥ m and f(N′) ≥ 0.5f(N ),
-    # we assume that N′ is the most common count of homozygous k-mers and use it as the estimate.
+    # N' = argmax_{1.7N≤n≤2.3N}f(n) be the secondary peak near 2N. If N' ≥ m and f(N') ≥ 0.5f(N ),
+    # we assume that N' is the most common count of homozygous k-mers and use it as the estimate.
     search_idxs = (histogram.index >= 1.7 * mode_count) & (histogram.index <= 2.3 * mode_count)
     window = histogram[search_idxs]
     if not window.empty:
@@ -359,9 +358,10 @@ def _estimate_coverage_from_histogram(histogram: "pd.Series[int]") -> int:
         if prime_count >= median_count and histogram[prime_count] >= 0.5 * mode_freq:
             return prime_count
 
-    raise ValueError(
-        "Cannot auto-estimate coverage from k-mer count distribution; please supply kmer_coverage explicitly"
-    )
+    # Fallback to median as an unreliable estimate:
+    # https://github.com/vgteam/vg/blob/655077d69f4aaeb96f12ea25568e596ba9622e0a/src/recombinator.cpp#L1683
+    logging.warning("Failed to estimate k-mer coverage, instead setting to median coverage.")
+    return median_count
 
 
 def _estimate_kmer_coverage(kmc_prefix: str, threads: int = 1) -> float:
@@ -378,8 +378,9 @@ def _estimate_kmer_coverage(kmc_prefix: str, threads: int = 1) -> float:
     with tempfile.NamedTemporaryFile(suffix=".hist", delete=False) as hist_file:
         hist_path = hist_file.name
     try:
+        # Use -ci2 to ignore singleton k-mers
         subprocess.check_call(
-            f"kmc_tools -t{threads} -hp transform {quote(kmc_prefix)} histogram {quote(hist_path)}",
+            f"kmc_tools -t{threads} -hp transform {quote(kmc_prefix)} -ci2 histogram {quote(hist_path)}",
             shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -401,7 +402,7 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
 
     Returns:
         dict: Dictionary containing the computed stats.
-    """    
+    """
 
     # Generate stats for the entire read file using goleft covstats
     logging.info("Computing coverage and insert size statistics with goleft")
@@ -445,20 +446,57 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
         )
         stats["kmc_prefix"] = kmc_prefix
         logging.info("Estimating k-mer coverage from KMC database")
-        stats["kmer_coverage"] = _estimate_kmer_coverage(kmc_prefix, threads=cfg.threads)
+        try:
+            stats["kmer_coverage"] = _estimate_kmer_coverage(kmc_prefix, threads=cfg.threads)
+        except ValueError:
+            logging.warning("Failed to estimate k-mer coverage, instead setting to mean coverage.")
+            stats["kmer_coverage"] = int(stats["mean_coverage"])
 
     return stats
 
+def _kmc_build_and_intersect(
+    fasta_path: str | os.PathLike[str],
+    genome_db_prefix: str | os.PathLike[str],
+    k: int,
+    output_db_prefix: str | os.PathLike[str],
+    work_dir: str,
+    canonicalize: bool = False,
+    threads: int = 1,
+    max_memory: int = 12,
+) -> None:
+    """Build a KMC database from fasta_path and intersect it with genome_db_prefix."""
+    graph_db = os.path.join(work_dir, "graph_kmers")
+    kmc_tmp = os.path.join(work_dir, "graph_kmers_tmp")
+    os.makedirs(kmc_tmp)
+
+    subprocess.check_call(
+        f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci1 -cs255 -fa {quote(str(fasta_path))} {quote(graph_db)} {quote(kmc_tmp)}",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    parent = os.path.dirname(output_db_prefix)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    subprocess.check_call(
+        f"kmc_tools -t{threads} -hp simple {quote(str(genome_db_prefix))} {quote(str(graph_db))} intersect {quote(str(output_db_prefix))} -ocleft",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def filter_kmc_database(
-    genome_db_prefix: str|os.PathLike[str],
+    genome_db_prefix: str | os.PathLike[str],
     unique_kmers,
     k: int,
-    output_db_prefix: str|os.PathLike[str],
+    output_db_prefix: str | os.PathLike[str],
     canonicalize: bool = False,
     tmp_dir: str | None = None,
     threads: int = 1,
     max_memory: int = 12,
-) -> str|os.PathLike[str]:
+) -> str | os.PathLike[str]:
     """Create a KMC database containing only the subset of genome_db_prefix with unique k-mers from the graph
 
     Args:
@@ -473,29 +511,74 @@ def filter_kmc_database(
         str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
     """
     with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
-
-        # Write graph unique k-mer sequences as FASTA (one entry per k-mer).
         fasta_path = os.path.join(work_dir, "graph_kmers.fa")
         unique_kmers.save_fasta(fasta_path)
+        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
+                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
+    return output_db_prefix
 
-        # Build a small KMC database from the FASTA.
-        graph_db = os.path.join(work_dir, "graph_kmers")
-        kmc_tmp = os.path.join(work_dir, "graph_kmers_tmp")
-        os.makedirs(kmc_tmp)
 
-        subprocess.check_call(
-            f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci0 -cs65535 -fa {quote(fasta_path)} {quote(graph_db)} {quote(kmc_tmp)}",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+def filter_kmc_database_from_fasta(
+    genome_db_prefix: str | os.PathLike[str],
+    fasta_path: str | os.PathLike[str],
+    k: int,
+    output_db_prefix: str | os.PathLike[str],
+    canonicalize: bool = False,
+    tmp_dir: str | None = None,
+    threads: int = 1,
+    max_memory: int = 12,
+) -> str | os.PathLike[str]:
+    """Create a KMC database by intersecting genome_db_prefix with k-mers in an existing FASTA file.
 
-        # Intersect with the genome database, keeping database counts
-        os.makedirs(os.path.dirname(output_db_prefix), exist_ok=True)
-        subprocess.check_call(
-            f"kmc_tools -t{threads} -hp simple {quote(str(genome_db_prefix))} {quote(str(graph_db))} intersect {quote(str(output_db_prefix))} -ocleft",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    Compared to filter_kmc_database, the FASTA has already been written by the caller — useful
+    when k-mers from multiple regions have been collected incrementally during a first pass.
+
+    Args:
+        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
+        fasta_path: Path to a FASTA file containing the k-mer sequences to filter by.
+        k: K-mer length.
+        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
+        tmp_dir: Directory for temporary files, Python default directory if None.
+        threads: Number of threads for KMC tools. Defaults to 1.
+        max_memory: Maximum memory to use for KMC tools. Defaults to 12.
+    Returns:
+        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
+    """
+    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
+        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
+                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
+    return output_db_prefix
+
+
+def filter_kmc_database_for_regions(
+    genome_db_prefix: str | os.PathLike[str],
+    unique_kmers_list,
+    k: int,
+    output_db_prefix: str | os.PathLike[str],
+    canonicalize: bool = False,
+    tmp_dir: str | None = None,
+    threads: int = 1,
+    max_memory: int = 12,
+) -> str | os.PathLike[str]:
+    """Create a KMC database from the union of unique k-mers across multiple regions in a single pass.
+
+    Args:
+        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
+        unique_kmers_list: Sequence of UniqueKmersOverlay objects, one per region.
+        k: K-mer length.
+        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
+        tmp_dir: Directory for temporary files, Python default directory if None.
+        threads: Number of threads for KMC tools. Defaults to 1.
+        max_memory: Maximum memory to use for KMC tools. Defaults to 12.
+    Returns:
+        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
+    """
+    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
+        fasta_path = os.path.join(work_dir, "graph_kmers.fa")
+        with open(fasta_path, "w") as f:
+            for region_idx, uk in enumerate(unique_kmers_list):
+                for kmer_idx, seq in enumerate(uk.sequences):
+                    f.write(f">r{region_idx}_{kmer_idx}\n{seq}\n")
+        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
+                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
     return output_db_prefix

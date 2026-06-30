@@ -1,9 +1,13 @@
+import os
+
 import hydra
 import pytest
 import ray
 
 from npsv3.util.config import setup_resolvers
 from npsv3.util.sample import Sample
+
+from . import _first_existing
 
 
 @pytest.fixture(scope="session")
@@ -75,14 +79,22 @@ def na12878_sample():
 
 @pytest.fixture
 def hg00733_sample():
-    return Sample(
+    sample = Sample(
         "HG00733",
         mean_coverage=31.41,
         mean_insert_size=454.57,
         std_insert_size=106.63,
         sequencer="HSXn",
         read_length=150,
+        kmer_coverage=14,
     )
+    kmc_prefix_path = _first_existing(
+        "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00733.final.kmc.kmc_pre",
+    )
+    if kmc_prefix_path is not None:
+        sample.kmc_prefix, *_ = os.path.splitext(kmc_prefix_path)
+    return sample
+
 
 @pytest.fixture
 def hg00731_sample():

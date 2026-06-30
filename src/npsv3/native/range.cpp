@@ -25,10 +25,6 @@ void Range::UnionWith(const Range& other) {
   if (other.end_ > end_) end_ = other.end_;
 }
 
-std::ostream& operator<<(std::ostream& os, const Range& range) {
-  os << range.contig() << "[" << range.start() << ", " << range.end() << ")";
-  return os;
-}
 }  // namespace npsv3
 
 auto fmt::formatter<npsv3::ContigName>::format(npsv3::ContigName c, format_context& ctx) const

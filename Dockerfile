@@ -96,9 +96,9 @@ ENV CMAKE_GENERATOR="Unix Makefiles" \
   PYTHONPATH="/usr/local/lib:${PYTHON_PATH}" \
   PATH="/root/.local/bin:$PATH" \
   PIP_INDEX_URL=https://pytorch.org \
-  UV_INDEX_URL=https://pytorch.org \
+  UV_EXTRA_INDEX_URL=https://pytorch.org \
   PIP_EXTRA_INDEX_URL=https://pypi.org/simple/ \
-  UV_EXTRA_INDEX_URL=https://pypi.org/simple/ \
+  UV_INDEX_URL=https://pypi.org/simple/ \
   HATCH_TEST_ENV=hatch-test.py${PYTHON_VERSION}
 
 RUN case ${TARGETARCH} in \
