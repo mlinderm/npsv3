@@ -1,0 +1,40 @@
+Job ID: 69574
+Node: node002
+Starting: 07/07/26 10:44:18
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar
+n = 500
+
+Starting prediction:
+Image 50 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 42.0%
+Image 100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 48.0%
+Image 150 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 50.67%
+Image 200 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 50.5%
+Image 250 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 51.2%
+Image 300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 51.33%
+Image 350 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 52.86%
+Image 400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 53.25%
+Image 450 | Real label: 15 Predicted label: 8 Num sim images: 16 Percent correct: 53.33%
+Image 500 | Real label: 26 Predicted label: 8 Num sim images: 36 Percent correct: 52.4%
+
+Time to run: 49.34367322921753 seconds
+Accuracy: 52.400000000000006%
+zeros: 61.0
+ones: 161.0
+twos: 101.0
+threes: 177.0
+
+
+Images: Image Number | Image Label | Predicted Label | Region
+318 | 9 | 10 | chr13_113876559_113876592
+289 | 5 | 0 | chr13_38383509_38383509
+455 | 3 | 2 | chr17_605560_605560
+8 | 6 | 2 | chr1_8276874_8276902
+379 | 2 | 3 | chr15_56669997_56669997
+203 | 1 | 3 | chr11_87438810_87438810
+10 | 1 | 3 | chr1_16050023_16050023
+324 | 3 | 2 | chr14_28068026_28068118
+201 | 5 | 6 | chr11_79496743_79496743
+127 | 1 | 3 | chr10_95448267_95448267
+Ending: 07/07/26 10:45:34

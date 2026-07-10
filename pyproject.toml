@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "npsv3"
-dynamic = ["version"]
+version = "0.0.1"
 description = ''
 readme = "README.md"
 requires-python = ">=3.12"

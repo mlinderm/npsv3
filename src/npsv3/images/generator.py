@@ -150,6 +150,15 @@ class ImageGenerator:
         right_padding = max(to_pad // 2, self._cfg.pileup.variant_padding)
         return region.expand(left_padding, right_padding)
 
+    def image_region_variable(self, region) -> Range:
+        # May need something to prevent padding when larger than the maximum image width
+        # Pads the image by at least 96 pixels and rounds up to the nearest value divisible by 16
+        to_pad = 2 * self._cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1))
+        # print("rounded padding:", (16 - (((region.length-1) % 16) + 1)))
+        # print("region length:", region.length)
+        # print("to pad:",to_pad)
+        return region.expand((to_pad + 1) // 2, to_pad // 2)
+
     def render(self, image_tensor, **kwargs) -> Image:
         assert len(image_tensor.shape) == 3
         return self._flatten_image(image_tensor, **kwargs)
@@ -159,10 +168,10 @@ class ImageGenerator:
         image_array = image[:, :, self._cfg.pileup.image_channels]
 
         # Create consistent image size
-        if compress and image_array.shape != (self._cfg.pileup.image_height, self._cfg.pileup.image_width, len(self._cfg.pileup.image_channels)):
+        if compress and image_array.shape != (self._cfg.pileup.image_height, self._cfg.pileup.max_image_width, len(self._cfg.pileup.image_channels)):
             # Need to convert from HWC to CHW (and back again)
             in_tensor = torch.from_numpy(image_array).permute(2, 0, 1)
-            out_tensor = transforms.functional.resize(in_tensor, [self._cfg.pileup.image_height, self._cfg.pileup.image_width])
+            out_tensor = transforms.functional.resize(in_tensor, [self._cfg.pileup.image_height, self._cfg.pileup.max_image_width])
             image_array = out_tensor.permute(1, 2, 0).numpy()
 
         return AnnotatedArray(

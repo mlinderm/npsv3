@@ -8,6 +8,9 @@ graph_flank: 1000
 fetch_flank: 1000
 realigner_flank: 1000
 
+max_image_width: ${pileup.image_width}
+compress: true
+
 insert_bases: false
 
 aligned_base_pixel: 255

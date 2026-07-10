@@ -1,0 +1,33 @@
+Job ID: 70635
+Node: node002
+Starting: 07/10/26 11:26:34
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.eval-images/HG00733/generator=coverage,pileup=unphased_variable,simulation.replicates=1/images-{0000..0015}.tar
+n = 100
+
+Starting prediction:
+Image 50 | Image width: 208 | Real label: 5 Predicted label: 6 Num sim images: 9 Percent correct: 50.0%
+Image 100 | Image width: 288 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 49.0%
+
+Time to run: 9.831228256225586 seconds
+Accuracy: 49.0%
+zeros: 15.0
+ones: 28.0
+twos: 21.0
+threes: 36.0
+
+
+Images: Index | Image Label | Predicted Label | Region
+2 | 1 | 3 | 8a481d8d9dd195d279b3e5eb2b3b7764d65e8c78
+4 | 5 | 2 | 24805c3a4da141d7cdad7e74a053a43bdfc9106f
+9 | 3 | 2 | 063baf323e65c6eb56a27d91eb2dfd432edc7e93
+10 | 3 | 2 | fb21f604dbf9e70abe650ce8122dc5ca39261ed2
+11 | 3 | 1 | ef1589f8370f2612e638bdd1d669b078298e7ab2
+12 | 5 | 3 | 4692aa4c0df8734cb1e8a44e0f1dc888643c8046
+18 | 1 | 3 | f48d1175b5160888d9b467f29eebfc52837650f8
+19 | 2 | 0 | 8b2f5b587a99017252aa8c8111a1ea34f1c9dc6d
+20 | 1 | 0 | 584dba8b1081f27687945578a31d31389e32134d
+21 | 5 | 4 | 4fd1375323bbdb06f3ebd2e62e559d5762de4c09
+22 | 3 | 1 | 28f8bd951ece101b1a3a7c24650705f93c9d4f9d
+Ending: 07/10/26 11:26:58

@@ -1,0 +1,280 @@
+Job ID: 65816
+Node: node002
+Starting: 06/25/26 09:35:44
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar
+k = 30000
+
+Starting prediction:
+Image 100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 29.0%
+Image 200 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 32.0%
+Image 300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.33%
+Image 400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 32.5%
+Image 500 | Real label: 26 Predicted label: 8 Num sim images: 36 Percent correct: 32.4%
+Image 600 | Real label: 22 Predicted label: 8 Num sim images: 36 Percent correct: 31.0%
+Image 700 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 32.43%
+Image 800 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 33.38%
+Image 900 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 33.22%
+Image 1000 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.3%
+Image 1100 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.36%
+Image 1200 | Real label: 5 Predicted label: 5 Num sim images: 9 Percent correct: 34.75%
+Image 1300 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.31%
+Image 1400 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.36%
+Image 1500 | Real label: 7 Predicted label: 2 Num sim images: 9 Percent correct: 34.33%
+Image 1600 | Real label: 7 Predicted label: 5 Num sim images: 9 Percent correct: 34.38%
+Image 1700 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.65%
+Image 1800 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.61%
+Image 1900 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.16%
+Image 2000 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 34.0%
+Image 2100 | Real label: 26 Predicted label: 14 Num sim images: 36 Percent correct: 34.33%
+Image 2200 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.23%
+Image 2300 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.22%
+Image 2400 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.29%
+Image 2500 | Real label: 5 Predicted label: 2 Num sim images: 9 Percent correct: 34.56%
+Image 2600 | Real label: 7 Predicted label: 1 Num sim images: 9 Percent correct: 34.81%
+Image 2700 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.63%
+Image 2800 | Real label: 16 Predicted label: 26 Num sim images: 36 Percent correct: 34.57%
+Image 2900 | Real label: 1 Predicted label: 3 Num sim images: 4 Percent correct: 34.86%
+Image 3000 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.87%
+Image 3100 | Real label: 7 Predicted label: 4 Num sim images: 9 Percent correct: 34.87%
+Image 3200 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 34.75%
+Image 3300 | Real label: 7 Predicted label: 4 Num sim images: 9 Percent correct: 34.91%
+Image 3400 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.76%
+Image 3500 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.74%
+Image 3600 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.75%
+Image 3700 | Real label: 3 Predicted label: 8 Num sim images: 16 Percent correct: 34.7%
+Image 3800 | Real label: 8 Predicted label: 12 Num sim images: 16 Percent correct: 34.71%
+Image 3900 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.87%
+Image 4000 | Real label: 3 Predicted label: 0 Num sim images: 4 Percent correct: 34.62%
+Image 4100 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 34.9%
+Image 4200 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.76%
+Image 4300 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.74%
+Image 4400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.68%
+Image 4500 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.69%
+Image 4600 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.7%
+Image 4700 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.81%
+Image 4800 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.79%
+Image 4900 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.84%
+Image 5000 | Real label: 7 Predicted label: 3 Num sim images: 9 Percent correct: 34.78%
+Image 5100 | Real label: 1 Predicted label: 3 Num sim images: 4 Percent correct: 34.88%
+Image 5200 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.9%
+Image 5300 | Real label: 5 Predicted label: 2 Num sim images: 9 Percent correct: 35.0%
+Image 5400 | Real label: 5 Predicted label: 7 Num sim images: 9 Percent correct: 35.04%
+Image 5500 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.98%
+Image 5600 | Real label: 12 Predicted label: 0 Num sim images: 16 Percent correct: 34.98%
+Image 5700 | Real label: 7 Predicted label: 4 Num sim images: 9 Percent correct: 35.02%
+Image 5800 | Real label: 7 Predicted label: 0 Num sim images: 9 Percent correct: 34.91%
+Image 5900 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.9%
+Image 6000 | Real label: 7 Predicted label: 3 Num sim images: 9 Percent correct: 34.87%
+Image 6100 | Real label: 1 Predicted label: 3 Num sim images: 4 Percent correct: 35.03%
+Image 6200 | Real label: 5 Predicted label: 8 Num sim images: 9 Percent correct: 35.03%
+Image 6300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 35.05%
+Image 6400 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 35.05%
+Image 6500 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 35.05%
+Image 6600 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.98%
+Image 6700 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 35.04%
+Image 6800 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 35.09%
+Image 6900 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 35.14%
+Image 7000 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 35.07%
+Image 7100 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 35.07%
+Image 7200 | Real label: 5 Predicted label: 4 Num sim images: 9 Percent correct: 35.1%
+Image 7300 | Real label: 9 Predicted label: 8 Num sim images: 16 Percent correct: 34.95%
+Image 7400 | Real label: 7 Predicted label: 5 Num sim images: 9 Percent correct: 34.97%
+Image 7500 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 35.05%
+Image 7600 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 35.18%
+Image 7700 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 35.21%
+Image 7800 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 35.1%
+Image 7900 | Real label: 7 Predicted label: 6 Num sim images: 9 Percent correct: 35.01%
+Image 8000 | Real label: 7 Predicted label: 6 Num sim images: 9 Percent correct: 34.99%
+Image 8100 | Real label: 6 Predicted label: 4 Num sim images: 16 Percent correct: 35.0%
+Image 8200 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 35.04%
+Image 8300 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.98%
+Image 8400 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 35.04%
+Image 8500 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.98%
+Image 8600 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.87%
+Image 8700 | Real label: 22 Predicted label: 22 Num sim images: 25 Percent correct: 34.87%
+Image 8800 | Real label: 7 Predicted label: 7 Num sim images: 9 Percent correct: 34.89%
+Image 8900 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.79%
+Image 9000 | Real label: 7 Predicted label: 2 Num sim images: 9 Percent correct: 34.83%
+Image 9100 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.75%
+Image 9200 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.74%
+Image 9300 | Real label: 7 Predicted label: 6 Num sim images: 9 Percent correct: 34.74%
+Image 9400 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.73%
+Image 9500 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.72%
+Image 9600 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.67%
+Image 9700 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.58%
+Image 9800 | Real label: 1 Predicted label: 3 Num sim images: 4 Percent correct: 34.58%
+Image 9900 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.56%
+Image 10000 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.55%
+Image 10100 | Real label: 7 Predicted label: 3 Num sim images: 9 Percent correct: 34.51%
+Image 10200 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.51%
+Image 10300 | Real label: 7 Predicted label: 6 Num sim images: 9 Percent correct: 34.52%
+Image 10400 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.5%
+Image 10500 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.57%
+Image 10600 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.55%
+Image 10700 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.49%
+Image 10800 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.46%
+Image 10900 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.41%
+Image 11000 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.42%
+Image 11100 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.4%
+Image 11200 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.43%
+Image 11300 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.47%
+Image 11400 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.53%
+Image 11500 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.55%
+Image 11600 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.5%
+Image 11700 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.5%
+Image 11800 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.53%
+Image 11900 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.57%
+Image 12000 | Real label: 5 Predicted label: 2 Num sim images: 9 Percent correct: 34.54%
+Image 12100 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 34.51%
+Image 12200 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.54%
+Image 12300 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.55%
+Image 12400 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.57%
+Image 12500 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.56%
+Image 12600 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 34.56%
+Image 12700 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.57%
+Image 12800 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.59%
+Image 12900 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.58%
+Image 13000 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.65%
+Image 13100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.68%
+Image 13200 | Real label: 7 Predicted label: 7 Num sim images: 9 Percent correct: 34.68%
+Image 13300 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.66%
+Image 13400 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.72%
+Image 13500 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.77%
+Image 13600 | Real label: 6 Predicted label: 1 Num sim images: 16 Percent correct: 34.71%
+Image 13700 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.71%
+Image 13800 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.68%
+Image 13900 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.67%
+Image 14000 | Real label: 7 Predicted label: 2 Num sim images: 9 Percent correct: 34.63%
+Image 14100 | Real label: 7 Predicted label: 7 Num sim images: 9 Percent correct: 34.64%
+Image 14200 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.62%
+Image 14300 | Real label: 9 Predicted label: 2 Num sim images: 16 Percent correct: 34.66%
+Image 14400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.64%
+Image 14500 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.66%
+Image 14600 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.68%
+Image 14700 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.74%
+Image 14800 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.72%
+Image 14900 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.75%
+Image 15000 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.77%
+Image 15100 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.74%
+Image 15200 | Real label: 32 Predicted label: 11 Num sim images: 36 Percent correct: 34.7%
+Image 15300 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.71%
+Image 15400 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.75%
+Image 15500 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.7%
+Image 15600 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.67%
+Image 15700 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.64%
+Image 15800 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.63%
+Image 15900 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.61%
+Image 16000 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.64%
+Image 16100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.66%
+Image 16200 | Real label: 5 Predicted label: 4 Num sim images: 9 Percent correct: 34.69%
+Image 16300 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.71%
+Image 16400 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.68%
+Image 16500 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.66%
+Image 16600 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.69%
+Image 16700 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.72%
+Image 16800 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.75%
+Image 16900 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.73%
+Image 17000 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.8%
+Image 17100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.81%
+Image 17200 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.75%
+Image 17300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.74%
+Image 17400 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.74%
+Image 17500 | Real label: 16 Predicted label: 35 Num sim images: 36 Percent correct: 34.72%
+Image 17600 | Real label: 3 Predicted label: 0 Num sim images: 4 Percent correct: 34.69%
+Image 17700 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.68%
+Image 17800 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.69%
+Image 17900 | Real label: 13 Predicted label: 12 Num sim images: 36 Percent correct: 34.7%
+Image 18000 | Real label: 5 Predicted label: 8 Num sim images: 9 Percent correct: 34.72%
+Image 18100 | Real label: 1 Predicted label: 3 Num sim images: 4 Percent correct: 34.71%
+Image 18200 | Real label: 3 Predicted label: 0 Num sim images: 4 Percent correct: 34.71%
+Image 18300 | Real label: 16 Predicted label: 11 Num sim images: 36 Percent correct: 34.73%
+Image 18400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.7%
+Image 18500 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.67%
+Image 18600 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 34.67%
+Image 18700 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 34.68%
+Image 18800 | Real label: 7 Predicted label: 5 Num sim images: 9 Percent correct: 34.66%
+Image 18900 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.69%
+Image 19000 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 34.72%
+Image 19100 | Real label: 9 Predicted label: 14 Num sim images: 16 Percent correct: 34.68%
+Image 19200 | Real label: 2 Predicted label: 0 Num sim images: 4 Percent correct: 34.71%
+Image 19300 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.73%
+Image 19400 | Real label: 7 Predicted label: 5 Num sim images: 9 Percent correct: 34.7%
+Image 19500 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 34.66%
+Image 19600 | Real label: 5 Predicted label: 4 Num sim images: 9 Percent correct: 34.68%
+Image 19700 | Real label: 7 Predicted label: 1 Num sim images: 9 Percent correct: 34.64%
+Image 19800 | Real label: 1 Predicted label: 2 Num sim images: 4 Percent correct: 34.64%
+Image 19900 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 34.68%
+Image 20000 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 34.66%
+Image 20100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 34.65%
+Image 20200 | Real label: 6 Predicted label: 1 Num sim images: 16 Percent correct: 34.64%
+Image 20300 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 34.64%
+
+Time to run: 1909.3753564357758 seconds
+Accuracy: 34.6248402006097%
+Random predictions: [4.5341715812683105, 3.755723237991333, 4.301400184631348, 4.156635284423828, 4.259402751922607, 3.6878573894500732, 6.396417140960693, 4.15725564956665, 4.513833999633789, 4.469971179962158]
+
+Accuracy by label:
+0 accuracy: 0.017703132092601
+1 accuracy: 0.363016446048937
+2 accuracy: 0.3590810061398297
+3 accuracy: 0.6024368231046932
+4 accuracy: 0.0
+5 accuracy: 0.47604790419161674
+6 accuracy: 0.05069124423963134
+7 accuracy: 0.4508670520231214
+8 accuracy: 0.001652892561983471
+9 accuracy: 0.3375
+10 accuracy: 0.0
+11 accuracy: 0.0
+12 accuracy: 0.10606060606060606
+13 accuracy: 0.0
+14 accuracy: 0.0
+15 accuracy: 0.12195121951219512
+16 accuracy: 0.29411764705882354
+17 accuracy: 0.0
+18 accuracy: 0.0
+19 accuracy: 0.0
+20 accuracy: 0.0
+21 accuracy: 0.0
+22 accuracy: 0.14285714285714285
+23 accuracy: 0.18181818181818182
+24 accuracy: 0.0
+25 accuracy: 0.0
+26 accuracy: 0.3888888888888889
+27 accuracy: 0.0
+28 accuracy: 0.0
+29 accuracy: 0.0
+30 accuracy: 0.0
+31 accuracy: 0.0
+32 accuracy: 0.1
+33 accuracy: 0.0
+34 accuracy: 0.0
+35 accuracy: 0.0
+38 accuracy: 0.0
+40 accuracy: 0.0
+45 accuracy: 0.0
+47 accuracy: 0.0
+48 accuracy: 0.0
+54 accuracy: 0.0
+55 accuracy: 0.0
+61 accuracy: 0.0
+66 accuracy: 0.0
+68 accuracy: 0.0
+73 accuracy: 0.0
+76 accuracy: 0.0
+80 accuracy: 0.0
+
+Random incorrect images: Image Number | Image Label | Predicted Label | Region
+6204 | 7 | 5 | chr5_22873698_22873698
+6967 | 5 | 4 | chr16_20041127_20041128
+8292 | 2 | 3 | chr18_10911127_10911127
+10121 | 2 | 3 | chr7_64357844_64357844
+14506 | 3 | 2 | chr2_29005631_29005700
+19525 | 1 | 2 | chr18_9035840_9035840
+9923 | 2 | 3 | chr5_8026903_8027209
+4791 | 1 | 0 | chr22_50075170_50075170
+3490 | 5 | 8 | chr4_20931872_20932217
+11885 | 1 | 0 | chr14_23972934_23972934
+Ending: 06/25/26 10:15:14

@@ -1,0 +1,31 @@
+Job ID: 65859
+Node: node020
+Starting: 06/25/26 15:31:05
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar
+k = 500
+
+Starting prediction:
+Image 50 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 90.0%
+Image 100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 88.0%
+Image 150 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 89.33%
+Image 200 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 88.5%
+Image 250 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 88.8%
+Image 300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 88.0%
+Image 350 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 89.14%
+Image 400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 89.75%
+Image 450 | Real label: 15 Predicted label: 8 Num sim images: 16 Percent correct: 89.11%
+Image 500 | Real label: 26 Predicted label: 8 Num sim images: 36 Percent correct: 87.8%
+
+Time to run: 34.19997429847717 seconds
+Accuracy: 87.8%
+              Real 0  Real >0
+Predicted 0      1.0      1.0
+Predicted >0    60.0    438.0
+k largest distances: []
+
+Accuracy by label:
+
+Images: Image Number | Image Label | Predicted Label | Region | Key
+Ending: 06/25/26 15:31:49

@@ -31,6 +31,15 @@ else()
   set(DEV_MODULE Development.Module)
 endif()
 
+# When building in an active Conda environment, prioritize libraries from the Conda
+# environment at build time (via CMAKE_PREFIX_PATH) and runtime (via RPATH), including
+# for transitive dependencies.
+if (DEFINED ENV{CONDA_PREFIX})
+  set(CMAKE_BUILD_RPATH "$ENV{CONDA_PREFIX}/lib")
+  set(CMAKE_INSTALL_RPATH "$ENV{CONDA_PREFIX}/lib")
+  list(PREPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
+endif()
+
 find_package(Python 3.8 REQUIRED COMPONENTS Interpreter ${DEV_MODULE} OPTIONAL_COMPONENTS Development.SABIModule)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

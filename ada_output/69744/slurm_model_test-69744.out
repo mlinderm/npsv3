@@ -1,0 +1,23 @@
+Job ID: 69744
+Node: node002
+Starting: 07/07/26 14:48:20
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar
+n = 50
+
+Starting prediction:
+Image 10 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 40.0%
+Image 20 | Real label: 16 Predicted label: 27 Num sim images: 36 Percent correct: 50.0%
+Image 30 | Real label: 7 Predicted label: 5 Num sim images: 9 Percent correct: 53.33%
+Image 40 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 57.5%
+Image 50 | Real label: 5 Predicted label: 6 Num sim images: 9 Percent correct: 58.0%
+
+Time to run: 7.6049888134002686 seconds
+Accuracy: 57.99999999999999%
+zeros: 4.0
+ones: 13.0
+twos: 16.0
+threes: 17.0
+
+Ending: 07/07/26 14:48:42

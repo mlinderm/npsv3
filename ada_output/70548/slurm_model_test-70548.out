@@ -1,0 +1,50 @@
+Job ID: 70548
+Node: node002
+Starting: 07/09/26 15:33:00
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.eval-images/HG00733/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-{0000..0015}.tar
+n = 1000
+
+Starting prediction:
+Image 50 | Image width: 288 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 70.0%
+Image 100 | Image width: 288 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 66.0%
+Image 150 | Image width: 288 | Real label: 3 Predicted label: 0 Num sim images: 4 Percent correct: 61.33%
+Image 200 | Image width: 288 | Real label: 7 Predicted label: 2 Num sim images: 9 Percent correct: 58.5%
+Image 250 | Image width: 288 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 60.8%
+Image 300 | Image width: 288 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 58.33%
+Image 350 | Image width: 288 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 59.43%
+Image 400 | Image width: 288 | Real label: 2 Predicted label: 3 Num sim images: 4 Percent correct: 59.0%
+Image 450 | Image width: 288 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 59.11%
+Image 500 | Image width: 288 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 58.8%
+Image 550 | Image width: 288 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 57.82%
+Image 600 | Image width: 288 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 57.5%
+Image 650 | Image width: 288 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 58.15%
+Image 700 | Image width: 288 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 57.71%
+Image 750 | Image width: 288 | Real label: 5 Predicted label: 1 Num sim images: 9 Percent correct: 57.33%
+Image 800 | Image width: 288 | Real label: 5 Predicted label: 0 Num sim images: 9 Percent correct: 56.38%
+Image 850 | Image width: 288 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 56.0%
+Image 900 | Image width: 288 | Real label: 3 Predicted label: 2 Num sim images: 4 Percent correct: 55.78%
+Image 950 | Image width: 288 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 56.63%
+Image 1000 | Image width: 288 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 57.0%
+
+Time to run: 69.91095471382141 seconds
+Accuracy: 56.99999999999999%
+zeros: 143.0
+ones: 348.0
+twos: 222.0
+threes: 287.0
+
+
+Images: Image Number | Image Label | Predicted Label | Region
+116 | 7 | 2 | bf0da2847ee68f5e9e163693abaa15fdb03d3529
+805 | 3 | 2 | 4a45be39b637e5af19e1a6b2ee3cdd416c4d6627
+277 | 7 | 3 | 17914b010d77f7505f1e990fe7ff599f9ca1d6ca
+342 | 5 | 0 | 62b5f475d61ee8155035e5b52e80d60d9d76f7fa
+901 | 5 | 3 | 972b5fd801122b56c375dcaef5fe9dc3768a2f89
+773 | 2 | 0 | 9cf314f02ac7ba04b22ece3ff548a8c523b31b9e
+376 | 3 | 2 | 8bfe9b50c8706e771aa0dbc3c1fc38d5a0d70556
+392 | 5 | 6 | 7893afb2d893607286b81dcdcebbd3074a7741cf
+154 | 1 | 0 | 1ce7f9c17ffa8f5f1ca465bf5ac800651bd793d5
+32 | 1 | 0 | 229b2544f9750f4ac153494dc038c1721189c742
+Ending: 07/09/26 15:34:38

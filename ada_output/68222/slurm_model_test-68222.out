@@ -1,0 +1,51 @@
+Job ID: 68222
+Node: node002
+Starting: 06/26/26 14:47:38
+Using device: cuda
+Model: facebook/dinov3-vits16plus-pretrain-lvd1689m
+Dataset: /storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar
+n = 500
+
+Starting prediction:
+Image 50 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 42.0%
+Image 100 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 48.0%
+Image 150 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 50.67%
+Image 200 | Real label: 3 Predicted label: 3 Num sim images: 4 Percent correct: 50.5%
+Image 250 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 51.2%
+Image 300 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 51.33%
+Image 350 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 52.86%
+Image 400 | Real label: 2 Predicted label: 1 Num sim images: 4 Percent correct: 53.25%
+Image 450 | Real label: 15 Predicted label: 8 Num sim images: 16 Percent correct: 53.33%
+Image 500 | Real label: 26 Predicted label: 8 Num sim images: 36 Percent correct: 52.4%
+
+Time to run: 51.85621738433838 seconds
+Accuracy: 52.400000000000006%
+zeros: 61.0
+ones: 161.0
+twos: 101.0
+threes: 177.0
+
+k largest distances: [(14.322, 422), (12.167, 362), (11.606, 171), (8.863, 461), (8.773, 318), (8.751, 15), (8.591, 405), (8.492, 4), (8.452, 446), (7.162, 198), (7.042, 228), (6.85, 259), (6.685, 313), (6.615, 247), (6.481, 74), (6.43, 364), (6.421, 359), (6.363, 266), (6.219, 363), (6.09, 411)]
+
+Images: Image Number | Image Label | Predicted Label | Region | Key
+421 | 1 | 0 | chr16_38001079_38003120 | 14.322248458862305
+361 | 7 | 6 | chr15_17373583_17373583 | 12.16650676727295
+170 | 3 | 1 | chr11_3290735_3336552 | 11.605798721313477
+460 | 5 | 0 | chr17_1035495_1035495 | 8.863283157348633
+317 | 26 | 5 | chr13_112282099_112282138 | 8.772770881652832
+14 | 5 | 0 | chr1_22754841_22754841 | 8.75065803527832
+404 | 5 | 0 | chr16_397716_397716 | 8.59074878692627
+3 | 9 | 0 | chr1_1428000_1428009 | 8.492456436157227
+445 | 5 | 0 | chr16_88888557_88888557 | 8.45152473449707
+197 | 3 | 0 | chr11_71150121_71150121 | 7.162092208862305
+227 | 15 | 2 | chr12_1574377_1574451 | 7.041774749755859
+258 | 2 | 3 | chr12_118757695_118757695 | 6.849764823913574
+312 | 5 | 1 | chr13_108458573_108458573 | 6.685427188873291
+246 | 3 | 2 | chr12_84090705_84091021 | 6.6149516105651855
+73 | 3 | 0 | chr1_234308625_234308625 | 6.481179714202881
+363 | 3 | 1 | chr15_23440076_23440076 | 6.430390357971191
+358 | 3 | 2 | chr14_105459754_105459872 | 6.420865535736084
+265 | 2 | 3 | chr12_127018079_127018307 | 6.3630900382995605
+362 | 3 | 0 | chr15_22768743_22768848 | 6.218599319458008
+410 | 6 | 0 | chr16_1102800_1102801 | 6.090395450592041
+Ending: 06/26/26 14:49:10

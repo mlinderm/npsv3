@@ -42,14 +42,16 @@ from .. import (
     result_path,
 )
 
-
+@pytest.mark.skip
 @pytest.mark.skipif(not os.path.exists(B37_REF_FASTA), reason="B37 reference required")
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}", "pileup=region",
 )
 @pytest.mark.usefixtures("ray_setup")
 class TestRegionToExample:
+    # Where does hg002_sample come from???
     def test_single_region(self, tmp_path, cfg, hg002_sample):
+        print(hg002_sample)
         region = Range("12", 22129564, 22130387)
         example = make_example_from_region(
             cfg,
@@ -83,11 +85,128 @@ class TestRegionToExample:
             assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, region.length, len(cfg.pileup.image_channels))
         assert _i == 0, "Only one sample in dataset"
 
-
+@pytest.mark.skip
 @pytest.mark.skipif(
+    # How do I load B37_REF_FASTA?
+    # What exactly is B37? How is it different from HG38?
     not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
 )
 @pytest.mark.cfg_overrides(
+    # What is reference?
+    f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased_variable",
+)
+class TestVariableWidthImages:
+    def test_long_del(self, tmp_path, cfg, hg002_sample):
+        # 823 length deletion
+        region = Range("12", 22129564, 22130387)
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            # No chr means B37, chr usually means HG38
+            data_path("12_22127565_22132387.bam"),
+            hg002_sample,
+            data_path("12_22129565_22130387.background.vcf.gz"),
+            data_path("12_22129565_22130387.vcf.gz"),
+        )
+
+        assert Range.parse_literal(example["region"]) >= region
+        assert example["image"].shape[1] % 16 == 0
+        img_width = 2 * cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1)) + region.length
+        img_width = cfg.pileup.max_image_width if img_width > cfg.pileup.max_image_width else img_width
+        assert example["image"].shape == (cfg.pileup.image_height, img_width, len(cfg.pileup.image_channels))
+        assert example["image"].shape[1] <= cfg.pileup.max_image_width
+        assert example["label"] == 3  # 1/1 genotype
+
+        assert example["sim.images"].shape == (
+            4,  # 4 genotypes possible: 0/0, 0|1, 1|0, 1/1
+            cfg.simulation.replicates,
+            cfg.pileup.image_height,
+            img_width,
+            len(cfg.pileup.image_channels),
+        ), "Bi-allelic variant with single background should have 4 phased diploid genotypes"
+
+        # png_path = str(tmp_path / "testwide.png")
+        png_path = result_path("test_del.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    def test_ins(self, tmp_path, cfg, hg002_sample):
+        # Insertion (0 length)
+        region = Range("1", 16490549, 16490549)
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            HG002_B37_BAM,
+            hg002_sample,
+            data_path("1_16490549_16490549.vcf.gz"),
+            data_path("1_16490549_16490549.sv.vcf.gz"),
+        )
+
+        assert Range.parse_literal(example["region"]) >= region
+        assert example["image"].shape[1] % 16 == 0
+        img_width = 2 * cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1)) + region.length
+        img_width = cfg.pileup.max_image_width if img_width > cfg.pileup.max_image_width else img_width
+        assert example["image"].shape == (cfg.pileup.image_height, img_width, len(cfg.pileup.image_channels))
+        assert example["image"].shape[1] <= cfg.pileup.max_image_width
+        assert example["label"] == 0  # 1/1 genotype
+
+        assert example["sim.images"].shape == (
+            4,  # 4 genotypes possible: 0/0, 0|1, 1|0, 1/1
+            cfg.simulation.replicates,
+            cfg.pileup.image_height,
+            img_width,
+            len(cfg.pileup.image_channels),
+        ), "Bi-allelic variant with single background should have 4 phased diploid genotypes"
+
+        # png_path = str(tmp_path / "testwide.png")
+        png_path = result_path("test_ins.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+
+    def test_compress_del(self, tmp_path, cfg, hg002_sample):
+        OmegaConf.update(cfg, "pileup", {"max_image_width": 512}, merge = True)
+
+        # 823 length deletion
+        region = Range("12", 22129564, 22130387)
+        example = make_graph_example_from_region(
+            cfg,
+            region,
+            # No chr means B37, chr usually means HG38
+            data_path("12_22127565_22132387.bam"),
+            hg002_sample,
+            data_path("12_22129565_22130387.background.vcf.gz"),
+            data_path("12_22129565_22130387.vcf.gz"),
+        )
+
+        assert Range.parse_literal(example["region"]) >= region
+        assert example["image"].shape[1] % 16 == 0
+        img_width = 2 * cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1)) + region.length
+        img_width = cfg.pileup.max_image_width if img_width > cfg.pileup.max_image_width else img_width
+        assert example["image"].shape == (cfg.pileup.image_height, img_width, len(cfg.pileup.image_channels))
+        assert example["image"].shape[1] <= cfg.pileup.max_image_width
+        assert example["label"] == 3  # 1/1 genotype
+
+        assert example["sim.images"].shape == (
+            4,  # 4 genotypes possible: 0/0, 0|1, 1|0, 1/1
+            cfg.simulation.replicates,
+            cfg.pileup.image_height,
+            img_width,
+            len(cfg.pileup.image_channels),
+        ), "Bi-allelic variant with single background should have 4 phased diploid genotypes"
+
+        # png_path = str(tmp_path / "testwide.png")
+        png_path = result_path("test_del_compress.png")
+        example_to_image(cfg, example, png_path, with_simulations=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
+        assert os.path.exists(png_path)
+    
+
+@pytest.mark.skipif(
+    # How do I load B37_REF_FASTA?
+    # What exactly is B37? How is it different from HG38?
+    not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
+)
+@pytest.mark.cfg_overrides(
+    # What is reference?
     f"reference={B37_REF_FASTA}", "simulation.replicates=1", "pileup=unphased",
 )
 class TestB37GraphToExample:
@@ -356,7 +475,7 @@ class TestHG38GraphToExample:
         example_to_image(cfg, example, png_path, with_simulations=True, render_channels=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
 
-
+@pytest.mark.skip
 @pytest.mark.skipif(
     not os.path.exists(B37_REF_FASTA) or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required"
 )

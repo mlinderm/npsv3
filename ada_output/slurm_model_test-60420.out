@@ -1,0 +1,25 @@
+Job ID: 60420
+Node: node002
+Starting: 06/18/26 14:33:47
+
+Job on node002 starting
+
+Using device: cuda
+facebook/dinov3-vits16plus-pretrain-lvd1689m
+k = 100
+Image 1 | Real label: 7 Predicted label: 1 Num sim images: 9 Percent correct: 100.0%
+Image 11 | Real label: 7 Predicted label: 7 Num sim images: 9 Percent correct: 100.0%
+Image 21 | Real label: 3 Predicted label: 1 Num sim images: 4 Percent correct: 90.48%
+Image 31 | Real label: 5 Predicted label: 3 Num sim images: 9 Percent correct: 87.1%
+Image 41 | Real label: 1 Predicted label: 1 Num sim images: 4 Percent correct: 87.8%
+Image 51 | Real label: 1 Predicted label: 0 Num sim images: 4 Percent correct: 88.24%
+Image 61 | Real label: 2 Predicted label: 2 Num sim images: 4 Percent correct: 88.52%
+Image 71 | Real label: 5 Predicted label: 6 Num sim images: 9 Percent correct: 90.14%
+Image 81 | Real label: 3 Predicted label: 13 Num sim images: 16 Percent correct: 88.89%
+Image 91 | Real label: 5 Predicted label: 5 Num sim images: 9 Percent correct: 89.01%
+Accuracy: 0.9
+[(9.333, 22), (8.486, 98), (6.891, 54), (6.664, 25), (6.65, 18), (6.309, 5), (6.037, 20), (6.029, 97), (5.995, 96), (5.91, 42), (5.594, 21), (5.588, 32), (5.449, 24), (5.4, 16), (5.388, 75), (5.382, 81), (5.362, 43), (5.114, 72), (5.057, 80), (5.01, 57), (4.975, 17), (4.954, 26), (4.948, 38), (4.817, 46), (4.698, 85), (4.651, 82), (4.644, 66), (4.58, 23), (4.552, 47), (4.538, 1), (4.514, 52), (4.506, 28), (4.4, 70), (4.371, 50), (4.346, 56), (4.312, 79), (4.311, 69), (4.275, 3), (4.271, 88), (4.245, 8), (4.225, 12), (4.219, 4), (4.215, 0), (4.159, 63), (4.158, 99), (4.136, 36), (4.109, 94), (4.1, 39), (4.046, 67), (4.024, 91), (4.013, 74), (4.007, 62), (3.981, 90), (3.961, 41), (3.956, 33), (3.952, 9), (3.94, 64), (3.927, 61), (3.904, 15), (3.898, 86), (3.85, 89), (3.809, 60), (3.783, 19), (3.765, 59), (3.764, 2), (3.757, 71), (3.681, 76), (3.669, 10), (3.634, 73), (3.619, 30), (3.611, 58), (3.587, 95), (3.539, 40), (3.504, 48), (3.449, 84), (3.448, 51), (3.441, 29), (3.43, 35), (3.405, 7), (3.388, 68), (3.387, 27), (3.35, 44), (3.301, 87), (3.301, 65), (3.237, 78), (3.116, 83), (3.051, 93), (3.015, 11), (2.896, 92), (2.879, 13), (2.862, 14), (2.817, 77), (2.815, 31), (2.785, 6), (2.708, 49), (2.634, 37), (2.618, 55), (2.605, 34), (2.435, 45), (2.106, 53)]
+              Real 0  Real >0
+Predicted 0        0       10
+Predicted >0       0       90
+Ending: 06/18/26 14:34:23

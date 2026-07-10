@@ -138,7 +138,7 @@ def make_graph_example_from_region(
     assert graph.is_bubble_path(region.contig), f"Graph must form bubble for reference background for region {region}"
 
     # Set up image flanks to minimize compression
-    example_region = generator.image_region(region)
+    example_region = generator.image_region(region) if cfg.pileup.compress else generator.image_region_variable(region)
 
     with tempfile.TemporaryDirectory() as tempdir:
         # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
@@ -184,13 +184,18 @@ def make_graph_example_from_region(
                 cfg.reference, sample, local_read_path, background_vcf, graph.region, tempdir
             )
 
+        # What if adding padding to the image causes it to be compressed? Should we then not pad the image to preserve 1 pixel to 1 base? For example if a variant is 500 bp in length, padding it will increase it to 692, thus compression will be required for a max image width of 512.
+        do_compress = cfg.pileup.compress
+        if region.length > cfg.pileup.max_image_width:
+            do_compress = True
+
         image_tensor = generator.generate(
             local_read_path,
             sample,
             example_region,
             realigner=realigner,
             ref_seq=ref_seq,
-            compress=True,
+            compress=do_compress,
         )
 
     example = {"region": str(example_region), "image": image_tensor}
@@ -310,7 +315,8 @@ def make_graph_example_from_region(
                     example_region,
                     realigner=realigner,
                     ref_seq=ref_seq,
-                    compress=True,
+                    # Unsure if this actually needs to be changed to the config or can remain as "True"
+                    compress=do_compress,
                 )
                 repl_encoded_images.append(synth_image_tensor)
 
@@ -402,6 +408,7 @@ class GraphWriter(ExampleActor):
                 example = make_graph_example_from_region(self.cfg, region, *self.args, **self.kwargs)
             sample = {
                 "__key__": region.slug,
+                # TODO: Write region.txt as well
                 "image.npy.gz": example["image"],
             }
             if "label" in example:
