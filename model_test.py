@@ -2,6 +2,7 @@ import webdataset as wds
 from PIL import Image
 from IPython.display import display
 import sys
+import os
 import time
 import random
 import numpy as np
@@ -16,7 +17,8 @@ import pandas as pd
 
 from huggingface_hub import login
 
-# token goes here
+# TODO: Figure out how to get this token as an environmental variable
+token = os.getenv("HF_TOKEN")
 login(token=token)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -211,7 +213,7 @@ def display_images(sample_list, label_list):
 
 # Not an amazing dataset... Should probably try to find a better one
 # images_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/hg002v1.1.dipcall.passing.sv.hg38.images/generator=coverage,pileup=unphased,simulation.replicates=1/images-{0000..0015}.tar"
-images_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.eval-images/HG00733/generator=coverage,pileup=unphased_variable,simulation.replicates=1/images-{0000..0015}.tar"
+images_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.eval-images/NA19240/generator=coverage,pileup=unphased_variable,simulation.replicates=1/images-{0000..0015}.tar"
 dataset = wds.WebDataset(images_path, shardshuffle=False).decode()
 model_name = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
 processor = AutoImageProcessor.from_pretrained(model_name)
@@ -223,7 +225,7 @@ print(f"Model: {model_name}")
 print(f"Dataset: {images_path}")
 
 # Maximum number of images that will be predicted
-n = 100
+n = 100000
 # Targeted number of incorrect images displayed after evaluation
 k = 10
 # Defines how many variants will be classified before another is printed
@@ -231,8 +233,10 @@ printerval = 50
 # Allows the model to start evaluation at a later index
 start_index = 0
 print(f"n = {n}")
-
+# Keeps track of the number of correct predictions
 total_correct = 0
+# The index at which entries in k_predicted_incorrect will be replaced
+repl_idx = random.randint(1, k)
 
 # Creates matrix that will be added to confusion matrix. x is predicted and y is real, so (0, 1) means predicted 0 but was 1
 confusion_matrix = np.zeros((2,2))
@@ -261,12 +265,15 @@ for i, sample in enumerate(dataset):
     if correct != 1:
         if len(k_predicted_incorrect) <= k:
             k_predicted_incorrect.append((i, sample))
-        # elif certain probability
+        # If certain chance (which I would like to be k/num_incorrect) then replace an entry in the set of k incorrect predicted images
+        elif random.randint(1, 1000) == 1:
             # replace a random entry in the list with a new one
+            k_predicted_incorrect[repl_idx%k] = (i, sample)
+            repl_idx += 1
 
     '''
-    Keeping track of all predicted incorrect, each incorrect sample has a 1/(num_incorrect*k) chance of being chosen.
-    We could instead keep track of k predicted incorrect but replace them with a 1/(num_incorrect*k) chance.
+    Keeping track of all predicted incorrect, each incorrect sample has a k/num_incorrect chance of being chosen.
+    We could instead keep track of k predicted incorrect but replace them with a k/num_incorrect chance.
     The issue with this approach is it requires us to know the number of incorrect samples ahead of time.
     We could predict this number by multiplying the current accuracy by the number of samples, but the number of samples is not necessarily known either
     I don't think it is possible to know the number of samples in a tar file without counting them manually
