@@ -11,8 +11,7 @@
 namespace npsv3 {
 
 /**
- * @brief Overlay that greedily samples haplotypes from the graph using
- *        graph-unique k-mer zygosity scores (Sirén et al. approach).
+ * Overlay that greedily samples haplotypes from the graph using graph-unique k-mer zygosity scores (adapted from Sirén et al.)
  */
 class HaplotypeSamplerOverlay {
  public:
@@ -20,7 +19,7 @@ class HaplotypeSamplerOverlay {
   using KmerNodeIdSeq = std::vector<odgi::nid_t>;
   using KmerIdSet = boost::dynamic_bitset<>;
 
-  // Transparent comparator: enables heterogeneous lookup in PathKmerMap using
+  // Transparent comparator to enable heterogeneous lookup in PathKmerMap using
   // boost::span or std::array keys without constructing a KmerNodeIdSeq.
   struct NodeIdSeqLess {
     using is_transparent = void;
@@ -54,8 +53,6 @@ class HaplotypeSamplerOverlay {
 
 
   /**
-   * @brief Helper constructor for building sampler overlay directly from k-mer sequences and locations 
-   * 
    * @param graph The variant graph (node IDs must be in topological order)
    * @param sequences K-mer sequences (must be in the same order as @p locations)
    * @param locations K-mer locations on the graph (must be in the same order as @p sequences)
@@ -73,10 +70,10 @@ class HaplotypeSamplerOverlay {
   explicit HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers, const Params& params = {});
 
   /**
-   * @brief Construct with inference-VCF path filtering active.
+   * Construct with inference-VCF path filtering active.
    *
-   * Paths returned by FindBestPaths will be restricted to those that differ at
-   * variants in @p inference_vcf whose allele length change is >= @p min_size.
+   * Sampled path will be restricted to those that differ at variants in @p inference_vcf whose
+   * allele length change is >= @p min_size.
    */
   HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
                           const std::string& inference_vcf,
@@ -96,6 +93,10 @@ class HaplotypeSamplerOverlay {
   /// Return the top @p n highest-scoring diplotypes from all pairs of the @p candidate haplotypes, sorted by descending score.
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n = 1) const;
 
+  /// Return the variant_id-allele pairs a @p haplotype traversed by a haplotype or is corresponding @p covered_paths set
+  std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Haplotype& haplotype) const;
+  std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Graph::PathIdSet& covered_paths) const;
+
   /// Number of unique k-mers used in sampling
   size_t NumKmers() const { return kmers_.size(); }
 
@@ -105,10 +106,31 @@ class HaplotypeSamplerOverlay {
   const PathKmerMap& PathKmers() const { return path_kmers_; }
 
  private:
+ 
   struct KmerScore {
     KmerZygosity zygosity;
     double score;
   };
+
+  struct Backpointer {
+    double score;
+    odgi::nid_t pred_node;
+    PathKmerMap::const_iterator edge_it;
+    size_t pred_path_idx;
+    Graph::PathIdSet covered_paths;
+  };
+
+  using BestPathState = std::vector<std::vector<Backpointer>>;
+  using PathWithCoverage = std::pair<Haplotype, Graph::PathIdSet>;
+
+  /// Compute BestPathState backpointers for up to @p n paths for the current scores
+  BestPathState PropagateBestPathState(size_t n) const;
+
+  /// Backtrack using BestPathState to return complete path with its covered_paths set
+  PathWithCoverage BacktrackPath(const BestPathState& path_state, size_t back_idx) const;
+
+  /// Update the scores of k-mers having sampled @p path
+  void UpdateScores(const Graph::NodeIdSeq& path);
 
   const Graph& graph_;
   Params params_;
@@ -127,8 +149,6 @@ class HaplotypeSamplerOverlay {
   PathKmerMap path_kmers_; ///< path (sequence of nids) to k-mer indices
   static_assert(!std::is_same<typename PathKmerMap::key_compare, void>::value, "HaplotypeSamplerOverlay requires PathKmerMap to be ordered");
 
-  /// Update the scores of k-mers having sampled @p path
-  void UpdateScores(const Graph::NodeIdSeq& path);
 };
 
 }

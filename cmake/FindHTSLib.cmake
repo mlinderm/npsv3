@@ -21,7 +21,11 @@ if (PkgConfig_FOUND)
 endif()
 
 set(HTSLib_CONFIGURE_OPTIONS "")
-set(HTSLib_DEPENDENCIES ZLIB::ZLIB OpenSSL::Crypto)
+# OpenSSL::SSL isn't used by HTSLib directly, but CURL::libcurl (below) links
+# against it transitively. RPATH only covers a binary's *direct* dependencies so
+# make OpenSSL:SSL a direct dependency to prevent runtime version-symbol mismatch
+# for transitive dependencies.
+set(HTSLib_DEPENDENCIES ZLIB::ZLIB OpenSSL::Crypto OpenSSL::SSL)
 if (NOT BZip2_FOUND)
     set(HTSLib_CONFIGURE_OPTIONS "${HTSLib_CONFIGURE_OPTIONS} --disable-bz2")
 else()

@@ -232,7 +232,7 @@ def _compute_coverage_with_indexcov(read_path: str, fasta_path: str) -> dict:
 
 
 
-def _kmc_db_kmer_size(prefix: str) -> int | None:
+def _kmc_db_kmer_size(prefix: str | os.PathLike[str]) -> int | None:
     """Return the k-mer size stored in an existing KMC database, or None if unreadable."""
     pre_path = f"{prefix}.kmc_pre"
     suf_path = f"{prefix}.kmc_suf"
@@ -264,6 +264,7 @@ def _find_or_create_kmc_db(
     read_path: str,
     output_prefix: str,
     reference_path: str,
+    *,
     kmer_size: int = 31,
     canonicalize: bool = False,
     min_count: int = 2,
@@ -455,22 +456,30 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
     return stats
 
 def _kmc_build_and_intersect(
-    fasta_path: str | os.PathLike[str],
+    fasta_path: str | os.PathLike[str] | list[str | os.PathLike[str]],
     genome_db_prefix: str | os.PathLike[str],
     k: int,
     output_db_prefix: str | os.PathLike[str],
     work_dir: str,
+    *,
     canonicalize: bool = False,
     threads: int = 1,
     max_memory: int = 12,
 ) -> None:
     """Build a KMC database from fasta_path and intersect it with genome_db_prefix."""
     graph_db = os.path.join(work_dir, "graph_kmers")
+
     kmc_tmp = os.path.join(work_dir, "graph_kmers_tmp")
     os.makedirs(kmc_tmp)
 
+    kmc_input_list = os.path.join(work_dir, "graph_kmers_input.txt")
+    with open(kmc_input_list, "w") as f:
+        for path in (fasta_path if isinstance(fasta_path, list) else [fasta_path]):
+            f.write(str(path))
+            f.write("\n")
+
     subprocess.check_call(
-        f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci1 -cs255 -fa {quote(str(fasta_path))} {quote(graph_db)} {quote(kmc_tmp)}",
+        f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci1 -cs255 -fa @{quote(str(kmc_input_list))} {quote(graph_db)} {quote(kmc_tmp)}",
         shell=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -489,9 +498,10 @@ def _kmc_build_and_intersect(
 
 def filter_kmc_database(
     genome_db_prefix: str | os.PathLike[str],
-    unique_kmers,
+    unique_kmers: "UniqueKmersOverlay",
     k: int,
     output_db_prefix: str | os.PathLike[str],
+    *,
     canonicalize: bool = False,
     tmp_dir: str | None = None,
     threads: int = 1,
@@ -510,6 +520,9 @@ def filter_kmc_database(
     Returns:
         str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
     """
+    if (genome_db_k := _kmc_db_kmer_size(genome_db_prefix)) != k:
+        msg = f"Genome k-mer database has k={genome_db_k} but expected k={k}"
+        raise ValueError(msg)
     with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
         fasta_path = os.path.join(work_dir, "graph_kmers.fa")
         unique_kmers.save_fasta(fasta_path)
@@ -520,9 +533,10 @@ def filter_kmc_database(
 
 def filter_kmc_database_from_fasta(
     genome_db_prefix: str | os.PathLike[str],
-    fasta_path: str | os.PathLike[str],
+    fasta_path: str | os.PathLike[str] | list[str | os.PathLike[str]],
     k: int,
     output_db_prefix: str | os.PathLike[str],
+    *,
     canonicalize: bool = False,
     tmp_dir: str | None = None,
     threads: int = 1,

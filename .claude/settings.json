@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -R 'HaplotypeSamplerPathKmerDataStructure' --output-on-failure)",
+      "Bash(gdb -q -batch -ex 'break haplotype.cpp:335 if std::distance\\(path_it, path_mismatch_it\\) > 1' -ex 'run --gtest_filter=GraphConstructionTest.HaplotypeSamplerPathKmerDataStructure' -ex 'print *path_it' -ex 'print match_key' -ex 'print *path_mismatch_it' -ex continue -ex 'print *path_it' -ex 'print match_key' -ex 'print *path_mismatch_it' -ex continue --args build/cp312-abi3-linux_x86_64/graph_test)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('src/npsv3/graphs/genotype.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -m py_compile src/npsv3/graphs/genotype.py)",
+      "Bash(readelf -d /home/mlinderman/research/npsv3-native/build/cp312-abi3-linux_x86_64/_native_graph.abi3.so)",
+      "Bash(readelf -d /home/mlinderman/research/npsv3-native/build/cp312-abi3-linux_x86_64/lib/htslib/lib/libhts.so)",
+      "Bash(ldd /home/mlinderman/research/npsv3-native/build/cp312-abi3-linux_x86_64/lib/htslib/lib/libhts.so)",
+      "Bash(readelf -d /home/mlinderman/.conda/envs/npsv3-native/lib/python3.12/lib-dynload/_ssl.cpython-312-x86_64-linux-gnu.so)",
+      "Bash(ldconfig -p)",
+      "Bash(readelf -d /home/mlinderman/.cache/uv/builds-v0/.tmpcFrmpF/bin/python)",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(LD_PRELOAD=/home/mlinderman/modules/jemalloc/5.3.0/install/lib/libjemalloc.so python3 -c ' *)",
+      "Bash(conda list *)",
+      "Bash(LD_PRELOAD=/home/mlinderman/modules/jemalloc/5.3.0/install/lib/libjemalloc.so python3 -c \"import npsv3._native_graph as m; print\\('OK', m\\)\")",
+      "Bash(readelf -d build/cp312-abi3-linux_x86_64/CMakeFiles/graph_test.dir/../../graph_test)",
+      "Bash(readelf -V /usr/lib64/libcurl.so)",
+      "Bash(objdump -T /usr/lib64/libcurl.so)",
+      "Bash(readelf -V /home/mlinderman/.conda/envs/npsv3-native/lib/libcrypto.so.3)",
+      "Bash(rm -rf build/cp312-abi3-linux_x86_64/CMakeCache.txt build/cp312-abi3-linux_x86_64/CMakeFiles)",
+      "Bash(LD_PRELOAD=/home/mlinderman/modules/jemalloc/5.3.0/install/lib/libjemalloc.so uv pip install -e .)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(readelf -d build/cp312-abi3-linux_x86_64/graph_test)",
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -j4)",
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64)",
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -R GenotypeTest.ParsesGenotypeAndPhasing --output-on-failure)",
+      "Bash(find / -iname \"kmc_file.h\")",
+      "Bash(find / -iname \"kmc_file.cpp\")",
+      "Bash(find / -iname \"*kmc_api*\" -type d)",
+      "Bash(find / -iname \"kmc*.h\")",
+      "Bash(git check-ignore *)",
+      "Bash(python3 -c ' *)",
+      "Bash(kmc --help)",
+      "Bash(grep -n \"^namespace {$\\\\|^}  // namespace$\\\\|^KmerCounts::\\\\|^bool KmerCounts::\\\\|^uint32_t KmerCounts::\\\\|^KmerCounts::MappedFile\" /home/mlinderman/research/npsv3-native/src/npsv3/native/kmer.cpp)",
+      "Bash(python3 -m py_compile src/npsv3/graphs/genotype.py tests/graphs/test_genotype.py)",
+      "Bash(conda run *)",
+      "Bash(bcftools query *)",
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -R 'ParsesGenotypeAndPhasing' --output-on-failure)"
+    ]
+  }
+}

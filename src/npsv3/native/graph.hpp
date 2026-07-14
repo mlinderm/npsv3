@@ -107,7 +107,7 @@ class Graph : public handlegraph::PathHandleGraph {
  public:
 
   /// Return standardized name for an alternate allele path
-  std::string AltPathName(const Variant::VariantId& variant_id, int allele, const std::string& path_prefix = "alt") const; 
+  std::string AltPathName(const Variant::VariantId& variant_id, int allele, const std::string& path_prefix = "alt") const;
 
   HandleSeq PathHandles(const handlegraph::path_handle_t& path_handle) const;
   HandleSeq PathHandles(const std::string& path_name) const;

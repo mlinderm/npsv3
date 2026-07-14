@@ -62,6 +62,15 @@ docker run --rm --entrypoint /bin/bash \
 
 NPSV3 is configured a [Hatch project](https://hatch.pypa.io/latest/) that uses [scikit-build-core](https://github.com/scikit-build/scikit-build-core) as the build backed and [uv](https://docs.astral.sh/uv/) as the installer.
 
+### Using PDB with ray remote functions
+
+Run the tests with the "legacy" Ray debugger, e.g.
+```
+RAY_DEBUG=legacy pytest
+```
+
+Then from another instance of the hatch test environment, `ray debug` to connect.
+
 ### Building and testing the native extension
 
 The C++ extension build is implemented with scikit-build-core. The hatch test environment is automatically setup for easy rebuilding when making changes to the C++ extension (i.e., it builds the project without build isolation). 

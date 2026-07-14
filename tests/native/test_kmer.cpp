@@ -3,6 +3,7 @@
 #include <odgi.hpp>
 #include <algorithms/kmer.hpp>
 #include <queue>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -350,4 +351,78 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   const auto& orig_locations = original.locations();
   const auto& loaded_locations = loaded_ptr->locations();
   EXPECT_EQ(loaded_locations, orig_locations) << "Locations mismatch";
+}
+
+// Deterministic pseudo-random ACGT sequence of the given length.
+static std::string RandomSequence(size_t length, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<int> base(0, 3);
+  static const char kBases[] = "ACGT";
+  std::string seq(length, 'A');
+  for (auto& c : seq) c = kBases[base(rng)];
+  return seq;
+}
+
+TEST(MMapKMCFileTest, MatchesUpstreamCKMCFile) {
+  test::TempDir dir;
+  const uint32_t k = 25;
+
+  // A repeated/overlapping sequence, so the resulting database has both count == 1 and
+  // count > 1 k-mers, and is large enough to produce a real (KMC2, signature-binned) database
+  // rather than a degenerate one.
+  std::string seq = RandomSequence(2000, /*seed=*/42);
+  seq += seq.substr(0, 500);  // Repeat a prefix to create some count > 1 k-mers
+
+  auto fasta_path = (dir / "kmers.fa").string();
+  {
+    std::ofstream fasta(fasta_path);
+    fasta << ">1\n" << seq << "\n";
+  }
+
+  auto kmc_prefix = (dir / "kmers").string();
+  std::string cmd = fmt::format("kmc -t1 -k{} -ci1 -fa {} {} {} > /dev/null 2>&1", k, fasta_path, kmc_prefix,
+                                 dir.path_.string());
+  ASSERT_EQ(std::system(cmd.c_str()), 0) << "kmc command failed: " << cmd;
+
+  // The upstream reader (CKMCFile::OpenForRA, unmodified) reads *.kmc_suf entirely into a
+  // private heap buffer; MMapKMCFile overrides only that step to mmap it read-only instead.
+  // Both must therefore report identical results for every query.
+  CKMCFile upstream;
+  ASSERT_TRUE(upstream.OpenForRA(kmc_prefix)) << "Failed to open upstream CKMCFile";
+
+  npsv3::detail::MMapKMCFile mmapped;
+  ASSERT_TRUE(mmapped.OpenForRA(kmc_prefix)) << "Failed to open MMapKMCFile";
+
+  ASSERT_EQ(upstream.KmerLength(), mmapped.KmerLength());
+  ASSERT_EQ(upstream.KmerCount(), mmapped.KmerCount());
+
+  // Query every k-mer actually present in the sequence, plus several that should be absent.
+  std::unordered_set<std::string> query_kmers;
+  for (size_t i = 0; i + k <= seq.size(); ++i) {
+    query_kmers.insert(seq.substr(i, k));
+  }
+  const size_t present_count = query_kmers.size();
+  ASSERT_GT(present_count, 100u) << "Test setup should produce a nontrivial number of distinct k-mers";
+  for (uint32_t seed = 1000; seed < 1020; ++seed) {
+    query_kmers.insert(RandomSequence(k, seed));  // May coincidentally already be present; still a valid comparison.
+  }
+
+  for (const auto& kmer_str : query_kmers) {
+    CKmerAPI kmer(k);
+    ASSERT_TRUE(kmer.from_string(kmer_str));
+    
+    uint64_t upstream_count = 0;
+    const bool upstream_found = upstream.CheckKmer(kmer, upstream_count);
+
+    uint64_t mmapped_count = 0;
+    const bool mmapped_found = mmapped.CheckKmer(kmer, mmapped_count);
+
+    ASSERT_EQ(upstream_found, mmapped_found) << "Found mismatch for k-mer " << kmer_str;
+    if (upstream_found) {
+      ASSERT_EQ(upstream_count, mmapped_count) << "Count mismatch for k-mer " << kmer_str;
+    }
+  }
+
+  upstream.Close();
+  mmapped.Close();
 }

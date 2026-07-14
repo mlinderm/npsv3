@@ -207,6 +207,38 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
   }
 }
 
+TEST_F(GraphConstructionTest, HaplotypeSamplerDecodeHaplotypeReportsCoveredAlleles) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+chr1	52277185	.	TT	C	.	PASS	.	GT	0/1
+chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1
+)VCF");
+
+  auto region = Range("chr1", 52277181, 52277219);
+  Graph graph(HG38FastaPath_, vcf.file_path_, region);
+  graph.ToGFA(std::cout);
+  
+  const size_t k = 7, max_edges = 5;
+  UniqueKmersOverlay unique_kmers(graph, k, max_edges);
+  // ConstantKmerClassify counts;
+
+  // Without inference-VCF filtering, decoding is unmasked: every variant the path traverses is reported.
+  HaplotypeSamplerOverlay unfiltered(graph, unique_kmers);
+  EXPECT_EQ(unfiltered.DecodeHaplotype(graph.PathNodes("chr1")), (std::vector<std::pair<std::string, size_t>>{
+    {"3d867efa809c4987b04ebad884982f7788b364c8", 0}, {"70e6adb077463a6f66e692cdb11f2ca4540ff066", 0}
+  }));
+
+  // With inference-VCF filtering (min_size=5), only the large variant's alleles are ever reported: the
+  // small variant's nodes fall outside the inference node mask entirely.
+  HaplotypeSamplerOverlay filtered(graph, unique_kmers, vcf.file_path_, region, /*min_size=*/5);
+  EXPECT_EQ(filtered.DecodeHaplotype(graph.PathNodes("chr1")), (std::vector<std::pair<std::string, size_t>>{
+    {"70e6adb077463a6f66e692cdb11f2ca4540ff066", 0}
+  }));
+}
+
 TEST_F(GraphConstructionTest, HaplotypeSamplerSamplesDiplotypesWithHomozygousRefWhenAllHomozygousKmers) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
@@ -373,5 +405,47 @@ TEST_F(KmersOnPathTest, HaplotypeSamplerFallsBackToCommonPrefix) {
   };
   auto on_alt = sampler.KmersOnPath(alt_nodes);
   EXPECT_EQ(on_alt, HaplotypeSamplerOverlay::KmerIdSet(std::string("01"))) << "Alternative path should have k-mers {A}";
- 
+
+}
+
+// Regression test: KmersOnPath must not assume that the common prefix shared between the query
+// path and its lexicographic-predecessor key in path_kmers_ is itself a path_kmers_ entry.
+TEST_F(KmersOnPathTest, HaplotypeSamplerFallsBackToCommonPrefixNotInMap) {
+  std::vector<std::string> sequences = {"E"};
+  std::vector<std::vector<UniqueKmersOverlay::KmerLocation>> locations = {
+    {MakeLoc({h_prefix_, h_alt_})},  // k-mer 0 (E): prefix->alt 2-node edge only
+  };
+  // After construction path_kmers_ contains only:
+  //   [prefix,alt] → {E}
+  HaplotypeSamplerOverlay sampler(graph_, sequences, locations, {});
+
+  // Reference path [prefix,ref,suffix] diverges from the stored [prefix,alt] key at index 1, and
+  // [prefix] alone is not a path_kmers_ entry, so it shares no k-mers with the alt-only k-mer.
+  Graph::NodeIdSeq ref_nodes = {
+    graph_.get_id(h_prefix_), graph_.get_id(h_ref_), graph_.get_id(h_suffix_)
+  };
+  auto on_ref = sampler.KmersOnPath(ref_nodes);
+  EXPECT_EQ(on_ref, HaplotypeSamplerOverlay::KmerIdSet(std::string("0"))) << "Reference path should have no k-mers";
+}
+
+// Regression test: a shorter, genuinely-matching key must not be shadowed by a longer,
+// off-path key that happens to be closer (lexicographically) to the query.
+TEST_F(KmersOnPathTest, HaplotypeSamplerFindsShorterPrefixMaskedByOffPathEdgeKey) {
+  std::vector<std::string> sequences = {"A", "E"};
+  std::vector<std::vector<UniqueKmersOverlay::KmerLocation>> locations = {
+    {MakeLoc({h_prefix_})},          // k-mer 0 (A): prefix only
+    {MakeLoc({h_prefix_, h_alt_})},  // k-mer 1 (E): prefix->alt 2-node edge
+  };
+  // After construction path_kmers_ contains:
+  //   [prefix]       → {A}
+  //   [prefix,alt]   → {E,A} (A absorbed into the edge key)
+  HaplotypeSamplerOverlay sampler(graph_, sequences, locations, {});
+
+  // Reference path [prefix,ref,suffix] genuinely passes through [prefix], so it should be
+  // credited with A, but not E (which is confined to the alt branch).
+  Graph::NodeIdSeq ref_nodes = {
+    graph_.get_id(h_prefix_), graph_.get_id(h_ref_), graph_.get_id(h_suffix_)
+  };
+  auto on_ref = sampler.KmersOnPath(ref_nodes);
+  EXPECT_EQ(on_ref, HaplotypeSamplerOverlay::KmerIdSet(std::string("01"))) << "Reference path should have k-mer {A} only";
 }

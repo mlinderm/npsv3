@@ -8,6 +8,7 @@
 #include <boost/core/span.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/dynamic_bitset/serialization.hpp>
+#include <boost/serialization/string.hpp>
 #include <boost/serialization/vector.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -22,7 +23,7 @@ Construct a pangenome graph from a VCF in a specific region, with paths for each
 
 The resulting graph contains dedicated nodes with '*' sequence for zero-length alleles, e.g.,
 the alternate alleles for a DEL variant and the reference allele for an INS variant. These nodes facilitate
-all paths that traverse a set of variant alleles.
+identifying all paths that traverse a set of variant alleles.
 */
 
 
@@ -62,8 +63,35 @@ bool PathsInSingleVariant(const Graph::PathIdSet& paths1, const Graph::PathIdSet
 }
 
 /**
+ * @brief Return the [start, end) index range into @p ref_nodes spanned by @p ref_allele_nodes
+ */
+Graph::NodeIdRange ComputeAlleleSpan(const Graph::NodeIdSeq& ref_allele_nodes, const Graph::NodeIdSeq& ref_nodes) {
+  assert(!ref_allele_nodes.empty());
+
+  auto it = std::lower_bound(std::begin(ref_nodes), std::end(ref_nodes), ref_allele_nodes[0]);
+  assert(std::distance(it, std::end(ref_nodes)) >= static_cast<std::ptrdiff_t>(ref_allele_nodes.size()) &&
+         std::equal(std::begin(ref_allele_nodes), std::end(ref_allele_nodes), it));
+
+  auto start_idx = std::distance(std::begin(ref_nodes), it);
+  return std::make_pair(start_idx, start_idx + ref_allele_nodes.size());
+}
+
+/**
+ * @brief Return @p alt_allele_nodes trimmed to remove suffix shared with @p ref_allele_nodes
+ */
+Graph::NodeIdSeq TrimSharedSuffix(const Graph::NodeIdSeq& alt_allele_nodes,
+                                  boost::span<const odgi::nid_t> ref_allele_nodes) {
+  auto [alt_suffix_it, ref_suffix_it] = std::mismatch(
+      alt_allele_nodes.rbegin(), alt_allele_nodes.rend(),
+      ref_allele_nodes.rbegin(), ref_allele_nodes.rend());
+  auto alt_right_padding = std::distance(alt_allele_nodes.rbegin(), alt_suffix_it);
+  assert(alt_right_padding == std::distance(ref_allele_nodes.rbegin(), ref_suffix_it));
+
+  return Graph::NodeIdSeq(alt_allele_nodes.begin(), alt_allele_nodes.end() - alt_right_padding);
+}
+
+/**
  * @brief Helper class for construct graph from VCF by identifying reference regions
- * 
  */
 class ReferenceNodes {
  public:
@@ -434,18 +462,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     }
     
     // Extract the index range of reference nodes for the REF allele, since that is constant for all samples
-    NodeIdRange ref_allele_indices;
-    {
-      auto ref_allele_nodes = PathNodes(allele_paths[0]);
-      assert(!ref_allele_nodes.empty());
-
-      auto it = std::lower_bound(std::begin(ref_nodes), std::end(ref_nodes), ref_allele_nodes[0]);
-      assert(std::distance(it, std::end(ref_nodes)) >= ref_allele_nodes.size() && std::equal(std::begin(ref_allele_nodes), std::end(ref_allele_nodes), it));
-      
-      auto start_idx = std::distance(std::begin(ref_nodes), it);
-      ref_allele_indices = std::make_pair(start_idx, start_idx + ref_allele_nodes.size());
-    }
-
+    NodeIdRange ref_allele_indices = ComputeAlleleSpan(PathNodes(allele_paths[0]), ref_nodes);
     for (size_t i=0; i < polytypes.size(); i++) {
       polytypes[i].AddGenotype(*variant, allele_paths, ref_allele_indices, genotypes[i], star_allele_index);
     }
@@ -756,6 +773,7 @@ void Graph::Save(std::ostream& out) const {
   boost::archive::binary_oarchive oa(out);
   oa << node_variant_paths_;
   oa << variant_path_starts_;
+  oa << region_.contig().get() << region_.start() << region_.end();
 }
 
 void Graph::Save(const std::string& path) const {
@@ -770,6 +788,12 @@ std::unique_ptr<Graph> Graph::Load(std::istream& in) {
   boost::archive::binary_iarchive ia(in);
   ia >> g->node_variant_paths_;
   ia >> g->variant_path_starts_;
+
+  std::string contig;
+  Pos start, end;
+  ia >> contig >> start >> end;
+  g->region_ = Range(contig, start, end);
+
   return g;
 }
 
@@ -1024,19 +1048,13 @@ void Haplotype::AddGenotypeAllele(const Variant& variant, const Graph::NodeIdRan
     // Insert the ALT allele handles, not including any suffix shared with the REF allele
     auto alt_allele_nodes = graph_.PathNodes(allele_path);
     auto ref_allele_nodes = boost::span<const odgi::nid_t>(ref_nodes_).subspan(ref_allele_indices.first, ref_allele_indices.second - ref_allele_indices.first);
-    auto [alt_suffix_it, _ref_suffix_it] = std::mismatch(
-      alt_allele_nodes.rbegin(), 
-      alt_allele_nodes.rend(),
-      ref_allele_nodes.rbegin(),
-      ref_allele_nodes.rend()
-    );
-    auto alt_right_padding = std::distance(alt_allele_nodes.rbegin(), alt_suffix_it);
-    assert(alt_right_padding == std::distance(ref_allele_nodes.rbegin(), _ref_suffix_it));
-    for (int i=0; i < alt_allele_nodes.size() - alt_right_padding; i++) {
-      graph_t().append_step(current_segment_handle_, graph_.get_handle(alt_allele_nodes[i]));
+    auto novel_nodes = TrimSharedSuffix(alt_allele_nodes, ref_allele_nodes);
+    for (auto node : novel_nodes) {
+      graph_t().append_step(current_segment_handle_, graph_.get_handle(node));
     }
-    
+
     // Update next reference index
+    auto alt_right_padding = alt_allele_nodes.size() - novel_nodes.size();
     next_ref_index_ = ref_allele_indices.second - alt_right_padding;
   }
 }

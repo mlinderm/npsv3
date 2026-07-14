@@ -189,24 +189,16 @@ def main(cfg: DictConfig) -> None:
             output,
         )
     elif cfg.command == "genotype_topk":
-        from npsv3.graphs.genotype import genotypes_in_topk, serialize_graph_and_unique_kmers
+        from npsv3.graphs.genotype import genotypes_in_topk
         from npsv3.util.sample import Sample
 
         _make_paths_absolute(cfg, ["reference", "stats_path", "input"])
+        # If no output file is specified, create a fixed file in the Hydra output directory
+        output = "topk_statistics.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
         sample = Sample.from_json(cfg.stats_path)
-
-        # serialize_graph_and_unique_kmers(
-        #     cfg,
-        #     cfg.input,
-        #     sample,
-        #     output_dir=os.getcwd(),
-        #     filter_kmers=True,
-        # )
-        statistics = genotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True) # Use kmc tools to filter k-mers
-        print(statistics)
-
-        #  output = "top_k_stats.json" if OmegaConf.is_missing(cfg, "output") else \
-        #     hydra.utils.to_absolute_path(cfg.output)
+        statistics = genotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True, progress_bar=True)
+        statistics.to_pickle(output)
 
     else:
         msg = f"Command {cfg.command} not implemented"

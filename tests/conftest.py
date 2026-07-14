@@ -89,7 +89,7 @@ def hg00733_sample():
         kmer_coverage=14,
     )
     kmc_prefix_path = _first_existing(
-        "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00733.final.kmc.kmc_pre",
+        "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00733.final.k31.kmc_pre",
     )
     if kmc_prefix_path is not None:
         sample.kmc_prefix, *_ = os.path.splitext(kmc_prefix_path)

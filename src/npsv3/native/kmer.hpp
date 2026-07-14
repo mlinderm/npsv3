@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -66,6 +68,33 @@ class UniqueKmersOverlay {
 enum class KmerZygosity { ABSENT, HETEROZYGOUS, HOMOZYGOUS, FREQUENT };
 
 
+namespace detail {
+
+/**
+ * @brief A CKMCFile whose random-access mode memory-maps *.kmc_suf read-only instead of
+ * reading it into a private heap buffer to minimize aggregate memory usage with multiple
+ * instances.
+ */
+class MMapKMCFile : public CKMCFile {
+ public:
+  MMapKMCFile() = default;
+  ~MMapKMCFile();
+
+  MMapKMCFile(const MMapKMCFile&) = delete;
+  MMapKMCFile& operator=(const MMapKMCFile&) = delete;
+
+  bool OpenForRA(const std::string& file_name);
+  bool Close();
+
+ private:
+  void UnmapSufix();
+
+  void* sufix_mmap_base_ = nullptr;
+  size_t sufix_mmap_size_ = 0;
+};
+
+} // namespace detail
+
 /**
  * @brief Report k-mer count from a pre-built KMC database using random access.
  */
@@ -74,10 +103,12 @@ class KmerCounts {
   explicit KmerCounts(const std::string& db_path);
   ~KmerCounts();
 
-  uint32_t Count(const std::string& kmer) const;
+  uint32_t k() const { return kmc_file_.KmerLength(); }
+
+  uint64_t Count(const std::string& kmer) const;
 
  private:
-  mutable CKMCFile kmc_file_;
+  mutable detail::MMapKMCFile kmc_file_;
 };
 
 

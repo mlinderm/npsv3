@@ -1,11 +1,14 @@
 #include "kmer.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <numeric>
 #include <fstream>
 #include <map>
 #include <stdexcept>
 #include <utility>
+
+#include <sys/mman.h>
 
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
@@ -135,6 +138,10 @@ bool UniqueKmersOverlay::KmerLocation::operator==(const KmerLocation& other) con
 }
 
 UniqueKmersOverlay::UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_edges, bool exclude_universal, bool canonicalize, const KmerCounts* ref_kmer_counts) : graph_(graph), k_(k) {
+  if (ref_kmer_counts && ref_kmer_counts->k() != k) {
+    throw std::invalid_argument(fmt::format("Reference k-mer counts database has k={} but requested k={}", ref_kmer_counts->k(), k));
+  }
+
   // Precompute the forward reachability of all nodes in the graph to determine whether two k-mer occurrences 
   // can co-occur on the same graph traversal.
   auto reachable = graph_.ForwardReachability();
@@ -363,6 +370,62 @@ void KmerClassify::ClassifySorted(const std::vector<std::string>& sequences, con
   }
 }
 
+namespace detail {
+
+void MMapKMCFile::UnmapSufix() {
+  if (sufix_mmap_base_ && sufix_mmap_base_ != MAP_FAILED) {
+    munmap(sufix_mmap_base_, sufix_mmap_size_);
+    sufix_mmap_base_ = nullptr;
+    sufix_file_buf = nullptr;  // Prevent CKMCFile::Close()/~CKMCFile() from delete[]-ing mapped memory.
+  }
+}
+
+MMapKMCFile::~MMapKMCFile() {
+  UnmapSufix();
+}
+
+bool MMapKMCFile::Close() {
+  UnmapSufix();
+  return CKMCFile::Close();
+}
+
+bool MMapKMCFile::OpenForRA(const std::string& file_name) {
+  if (file_pre || file_suf)
+    return false;
+
+  // Unchanged from CKMCFile::OpenForRA to load the prefix LUT onto the heap as usual. The LUT's
+  // size is comparatively small; only the suffix array below is mapped.
+  uint64 size;
+  if (!OpenASingleFile(file_name + ".kmc_pre", file_pre, size, (char*)"KMCP"))
+    return false;
+  if (!ReadParamsFrom_prefix_file_buf(size, opened_for_RA))
+    return false;
+
+  // OpenASingleFile leaves `size` as the payload size (file size minus the leading and
+  // trailing 4-byte markers) and the file position right after the leading marker. Map the
+  // whole file (mmap's offset argument must be page-aligned, so we can't map starting at byte
+  // 4 directly) and point sufix_file_buf at byte 4 within it, matching where CKMCFile's own
+  // fread would have started reading.
+  if (!OpenASingleFile(file_name + ".kmc_suf", file_suf, size, (char*)"KMCS"))
+    return false;
+  sufix_mmap_size_ = size + 8;
+  sufix_mmap_base_ = mmap(nullptr, sufix_mmap_size_, PROT_READ, MAP_PRIVATE, fileno(file_suf), 0);
+  if (sufix_mmap_base_ == MAP_FAILED) {
+    return false;
+  }
+  sufix_file_buf = static_cast<uchar*>(sufix_mmap_base_) + 4;
+
+  fclose(file_suf);
+  file_suf = nullptr;
+
+  is_opened = opened_for_RA;
+  prefix_index = 0;
+  sufix_number = 0;
+  return true;
+}
+
+} // namespace detail
+
 KmerCounts::KmerCounts(const std::string& db_path) {
   if (!kmc_file_.OpenForRA(db_path)) {
     throw std::runtime_error(fmt::format("Cannot open KMC database for random access: {}", db_path));
@@ -373,13 +436,12 @@ KmerCounts::~KmerCounts() {
   kmc_file_.Close();
 }
 
-uint32_t KmerCounts::Count(const std::string& kmer) const {
+uint64_t KmerCounts::Count(const std::string& kmer) const {
+  // CKMCFile::CheckKmer(CKmerAPI&, uint64&) leaves `count` unset (uninitialized) when the k-mer
+  // is not found. Return 0 in that case.
   CKmerAPI kmer_api(kmc_file_.KmerLength());
-  uint32_t count = 0;
-  if (kmer_api.from_string(kmer)) {
-    kmc_file_.CheckKmer(kmer_api, count);
-  }
-  return count;
+  uint64_t count = 0;
+  return (kmer_api.from_string(kmer) && kmc_file_.CheckKmer(kmer_api, count)) ? count : 0;
 }
 
 }  // namespace npsv3

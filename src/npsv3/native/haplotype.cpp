@@ -142,28 +142,37 @@ namespace {
 }
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
-  if (n == 0) return {};
+  auto path_state = PropagateBestPathState(n);
+  const auto & best_paths = path_state.back();
+  
+  std::vector<Haplotype> result;
+  result.reserve(best_paths.size());
+  for (size_t back_idx = 0; back_idx < best_paths.size(); ++back_idx) {
+    if (apply_path_filter_ && best_paths[back_idx].covered_paths.none()) {
+      continue; // Skip paths that do not cover any inference paths when filtering is active
+    }
+    result.push_back(std::move(BacktrackPath(path_state, back_idx).first));
+  }
+  return result;
+}
 
+HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(size_t n) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
-  const size_t covered_paths_size = graph_.node_variant_paths_[min_id].size(); // All nodes should have the same size of path sets
+  const size_t covered_paths_size = graph_.node_variant_paths_[min_id].size(); // All nodes should have the same size path sets
+
+  // dp[v - min_id] holds up to n backpointer entries for distinct paths from min_id to v.
+  // pred_path_idx indexes into dp[pred_node - min_id], which is frozen before propagation
+  // so the indices remain stable.
+  BestPathState dp(max_id - min_id + 1);
+  if (n == 0) {
+    return dp;
+  }
 
   // Minimum possible score is if none of the k-mers are present in the haplotype, i.e., pH(x) = −1
   double min_score = std::accumulate(kmers_.begin(), kmers_.end(), 0.0, [](double acc, const KmerScore& kmer) {
     return acc - kmer.score;
   });
-
-  // dp[v - min_id] holds up to n backpointer entries for distinct paths from min_id to v.
-  // pred_path_idx indexes into dp[pred_node - min_id], which is frozen before propagation
-  // so the indices remain stable.
-  struct Backpointer {
-    double score;
-    odgi::nid_t pred_node;
-    PathKmerMap::const_iterator edge_it;
-    size_t pred_path_idx;
-    Graph::PathIdSet covered_paths;
-  };
-  std::vector<std::vector<Backpointer>> dp(max_id - min_id + 1);
 
   // Seed the source node.
   dp[0].push_back({ 
@@ -266,65 +275,39 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBes
   auto& final_backtrack = dp[max_id - min_id];
   SortAndTrimBacktrack(final_backtrack, n);
 
-  // Backtrack from max_id to min_id for each of the (up to n) best paths.
-  std::vector<Haplotype> result;
-  result.reserve(final_backtrack.size());
-  for (size_t back_idx = 0; back_idx < final_backtrack.size(); ++back_idx) {
-    // When inference filtering is active, skip paths that don't traverse any inference nodes/paths.
-    if (apply_path_filter_ && final_backtrack[back_idx].covered_paths.none()) {
-      continue;
-    }
-
-    Haplotype path;
-    odgi::nid_t current_node = max_id;
-    size_t current_back_idx = back_idx;
-
-    while (current_node != min_id) {
-      path.push_back(current_node);
-      const auto& backpointer = dp[current_node - min_id][current_back_idx];
-      if (backpointer.edge_it != path_kmers_.end()) {
-        // Populate the intermediate nodes of the explicit edge in reverse order
-        const auto & edge_path = backpointer.edge_it->first; 
-        assert(edge_path.front() == backpointer.pred_node && edge_path.back() == current_node);
-        std::reverse_copy(edge_path.begin() + 1, edge_path.end() - 1, std::back_inserter(path));
-      }
-      current_back_idx = backpointer.pred_path_idx; assert(current_back_idx < n);
-      current_node = backpointer.pred_node; assert(current_node >= min_id && current_node <= max_id);
-    }
-    path.push_back(current_node); // Include source node
-
-    std::reverse(path.begin(), path.end());
-    result.push_back(std::move(path));
-  }
-  return result;
+  return dp;
 }
 
 HaplotypeSamplerOverlay::KmerIdSet HaplotypeSamplerOverlay::KmersOnPath(const Haplotype& path) const {
   KmerIdSet on_path(kmers_.size());
+  // Try all nodes in the path as potential k-mer starts. regardless of matches, i.e., in [1,3,4,6,7]
+  // make sure to match [1,3,4] and [3,4,6]
   for (auto path_it = path.begin(), path_end = path.end(); path_it != path_end; ++path_it) {
-    auto prefix = boost::span<const KmerNodeIdSeq::value_type>(&(*path_it), std::distance(path_it, path_end));
-    
-    // Find the longest matching prefix which occurs just previous of the upper bound
-    // since the map is sorted.
-    auto match_it = path_kmers_.upper_bound(prefix);
-    if (match_it == path_kmers_.begin()) {
-      continue; // No prefix match found at all so advance to the next node in the path
-    }
-    match_it = std::prev(match_it);
+    // Find the longest key in path_kmers_ that is a genuine prefix of the remaining path
+    // [path_it, search_end), exploiting that path_kmers_ is in sorted order. If there is no possible match,
+    // but not for the entire key in path_kmers_, shrink the search to common prefix and retry. That way longer 
+    // but mismatching keys do not shadow shorter valid prefixes.
+    auto search_end = path_end;
+    while (path_it != search_end) {
+      auto query = boost::span<const KmerNodeIdSeq::value_type>(&(*path_it), std::distance(path_it, search_end));
+      auto match_it = path_kmers_.upper_bound(query);
+      if (match_it == path_kmers_.begin()) {
+        // No prefix match found, so advance to the next node in the path
+        break; 
+      }
+      match_it = std::prev(match_it);
 
-    const auto & match_key = match_it->first;
-    auto [path_mismatch_it, key_mismatch_it] = std::mismatch(path_it, path_end, match_key.begin(), match_key.end());
-    if (key_mismatch_it == match_key.begin()) {
-      continue; // No matching prefix found so advance to the next node in the path
-    } else if (key_mismatch_it != match_key.end()) {
-      // Requery with the longest matching prefix, which occurs at the point of divergence within the original query.
-      auto trimmed = prefix.subspan(0, std::distance(path_it, path_mismatch_it));
-      match_it = path_kmers_.find(trimmed);
-      assert(match_it != path_kmers_.end());
+      const auto & match_key = match_it->first;
+      auto [path_mismatch_it, key_mismatch_it] = std::mismatch(path_it, search_end, match_key.begin(), match_key.end());
+      if (key_mismatch_it == match_key.end()) {
+        // match_key is a genuine prefix of the remaining path, add the corresponding k-mers and advance to the next node in the path
+        on_path |= match_it->second.kmer_set_;
+        break;
+      }
+
+      // match_key diverges partway through, retry query with the common prefix.
+      search_end = path_mismatch_it;
     }
-      
-    // Update on_path from the k-mers in the longest matching key
-    on_path |= match_it->second.kmer_set_;
   }
   return on_path;
 }
@@ -347,29 +330,107 @@ void HaplotypeSamplerOverlay::UpdateScores(const Haplotype& path) {
   }
 }
 
+HaplotypeSamplerOverlay::PathWithCoverage HaplotypeSamplerOverlay::BacktrackPath(const BestPathState& path_state, size_t back_idx) const {
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+
+  Haplotype path;
+  odgi::nid_t current_node = max_id;
+  size_t current_back_idx = back_idx;
+
+  path.push_back(current_node);
+  while (current_node != min_id) {
+    const auto& backpointer = path_state[current_node - min_id].at(current_back_idx);
+    if (backpointer.edge_it != path_kmers_.end()) {
+      // Populate the intermediate nodes of the explicit edge in reverse order
+      const auto & edge_path = backpointer.edge_it->first;
+      assert(edge_path.front() == backpointer.pred_node && edge_path.back() == current_node);
+      std::reverse_copy(edge_path.begin() + 1, edge_path.end() - 1, std::back_inserter(path));
+    }
+    current_back_idx = backpointer.pred_path_idx;
+    current_node = backpointer.pred_node; assert(current_node >= min_id && current_node <= max_id);
+    path.push_back(current_node);
+  }
+
+  std::reverse(path.begin(), path.end());
+  return std::make_pair(std::move(path), path_state[max_id - min_id][back_idx].covered_paths);
+}
+
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
-  std::vector<Haplotype> results;
-  results.reserve(n);
+  std::vector<PathWithCoverage> samples;
+  samples.reserve(n);
 
-  for (size_t i = 0; i < n; ++i) {
-    // Request one more path than already selected: by pigeonhole, the best
-    // unselected path (if any) must appear within the top (|selected|+1).
-    auto paths = FindBestPaths(results.size() + 1);
+  while (samples.size() < n) {
+    // Request more paths than already selected. Since we could select a path with no covered paths, we sample the 
+    // top (|selected|+2) paths to ensure we can find a new distinct path that covers at least one inference path.
+    auto path_state = PropagateBestPathState(samples.size() + 2);
+    const auto & candidates = path_state.back();
 
-    // Find the first path not already in results.
-    const Haplotype* new_path = nullptr;
-    for (const auto& path : paths) {
-      if (std::find(results.begin(), results.end(), path) == results.end()) {
-        new_path = &path;
+    size_t back_idx = candidates.size();
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      const auto& candidate = candidates[i];
+      if (apply_path_filter_ && candidate.covered_paths.none()) {
+        continue; // Skip paths that do not cover any inference paths when filtering is active
+      }
+      auto matching_sample = std::find_if(samples.begin(), samples.end(), [&](const PathWithCoverage& result) {
+        return candidate.covered_paths == result.second;
+      });
+      if (matching_sample == samples.end()) {
+        back_idx = i;  // Found a new candidate that is not already in samples
         break;
       }
     }
-    if (!new_path) break;  // no more distinct paths in the graph
+    if (back_idx == candidates.size()) {
+      // We did not find any new distinct paths, so stop sampling
+      break;
+    }
 
-    results.push_back(*new_path);
-    UpdateScores(results.back());
+    // Extract and save the path of interest and its covered path set
+    samples.push_back(std::move(BacktrackPath(path_state, back_idx)));
+    UpdateScores(samples.back().first);
+  }
+
+  // Extract just the paths from the sampled results
+  std::vector<Haplotype> results;
+  results.reserve(samples.size());
+  for (auto& [path, covered_paths] : samples) {
+    results.push_back(std::move(path));
   }
   return results;
+}
+
+std::vector<std::pair<std::string, size_t>> HaplotypeSamplerOverlay::DecodeHaplotype(const Haplotype& haplotype) const {
+  if (haplotype.empty()) {
+    return {};
+  }
+
+  // Re-derive the same covered_paths bitset PropagateBestPathState accumulates during sampling (a simple linear
+  // union, since we already have the complete path rather than needing to search for it).
+  const size_t covered_paths_size = graph_.node_variant_paths_[haplotype.front()].size(); // All nodes should have the same size path sets
+  Graph::PathIdSet covered_paths(covered_paths_size);
+  for (auto node_id : haplotype) {
+    if (!apply_path_filter_) {
+      covered_paths |= graph_.node_variant_paths_[node_id];
+    } else if (inference_node_mask_.test(node_id)) {
+      covered_paths |= (graph_.node_variant_paths_[node_id] & inference_path_mask_);
+    }
+  }
+  return DecodeHaplotype(covered_paths);
+}
+
+std::vector<std::pair<std::string, size_t>> HaplotypeSamplerOverlay::DecodeHaplotype(const Graph::PathIdSet& covered_paths) const {
+  std::vector<std::pair<std::string, size_t>> result;
+  for (auto path_idx = covered_paths.find_first(); path_idx != Graph::PathIdSet::npos;
+       path_idx = covered_paths.find_next(path_idx)) {
+    // Path names have the form "_alt_{variant_id}_{allele}" (see Graph::AltPathName); variant_id is a fixed-format
+    // hex digest with no underscores, so the last two underscore-delimited fields are unambiguous.
+    const auto path_name = graph_.get_path_name(handlegraph::as_path_handle(path_idx));
+    auto allele_sep = path_name.rfind('_');
+    auto variant_sep = path_name.rfind('_', allele_sep - 1);
+    result.emplace_back(path_name.substr(variant_sep + 1, allele_sep - variant_sep - 1),
+                         std::stoi(path_name.substr(allele_sep + 1)));
+  }
+  return result;
 }
 
 std::vector<HaplotypeSamplerOverlay::Diplotype> HaplotypeSamplerOverlay::SampleDiplotypes(

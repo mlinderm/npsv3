@@ -2,8 +2,10 @@
 #include <streambuf>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -27,6 +29,23 @@ struct MemReadBuf : std::streambuf {
     setg(p, p, p + size);
   }
 };
+
+// // Serializes `obj` via its `Save(ostream&)` method and returns the result as a numpy uint8
+// // array. Unlike `nb::bytes` (which always copies into a new, separately-allocated Python
+// // object), the array is a zero-copy view over the serialized buffer: a capsule ties the
+// // buffer's lifetime to the array so no C++-to-Python copy is required.
+// template <typename T>
+// static nb::ndarray<nb::numpy, uint8_t, nb::ndim<1>> SaveAsNdarray(const T& obj) {
+//   std::ostringstream oss(std::ios::binary);
+//   obj.Save(oss);
+//   auto buf = std::make_unique<std::string>(std::move(oss).str());
+//   size_t size = buf->size();
+//   auto* data = reinterpret_cast<uint8_t*>(buf->data());
+//   nb::capsule owner(buf.release(), [](void* p) noexcept {
+//     delete static_cast<std::string*>(p);
+//   });
+//   return nb::ndarray<nb::numpy, uint8_t, nb::ndim<1>>(data, {size}, owner);
+// }
 
 class VariantFileReaderIterator {
   public:
@@ -75,7 +94,11 @@ NB_MODULE(_native_graph, m) {
       overlay.Save(oss);
       auto s = std::move(oss).str();
       return nb::bytes(s.data(), s.size());
-    });
+    })
+    // .def("save_ndarray", [](const npsv3::UniqueKmersOverlay& overlay) {
+    //   return SaveAsNdarray(overlay);
+    // })
+    ;
 
   nb::class_<npsv3::KmerCounts>(m, "KmerCounts")
     .def("__init__", [](npsv3::KmerCounts* self, const std::string& db_path) {
@@ -107,6 +130,7 @@ NB_MODULE(_native_graph, m) {
     .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
     .def("sample_diplotypes", &npsv3::HaplotypeSamplerOverlay::SampleDiplotypes, "candidates"_a, "n"_a)
+    .def("decode_haplotype", nb::overload_cast<const npsv3::HaplotypeSamplerOverlay::Haplotype&>(&npsv3::HaplotypeSamplerOverlay::DecodeHaplotype, nb::const_), "haplotype"_a)
     .def("num_kmers", &npsv3::HaplotypeSamplerOverlay::NumKmers);
 
   nb::class_<npsv3::Range>(m, "Range")
@@ -220,6 +244,9 @@ NB_MODULE(_native_graph, m) {
       auto s = std::move(oss).str();
       return nb::bytes(s.data(), s.size());
     })
+    // .def("save_ndarray", [](const npsv3::Graph& graph) {
+    //   return SaveAsNdarray(graph);
+    // })
     .def_static("load", [](const std::string& path) { return npsv3::Graph::Load(path); }, "path"_a)
     .def_static("load_bytes", [](nb::bytes data) {
       MemReadBuf buf(data.c_str(), data.size());
