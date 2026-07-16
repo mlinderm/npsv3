@@ -9,9 +9,14 @@ dist
 .coverage
 html/*
 __pycache__
+.venv
 .mypy_cache
 .pytest_cache
 .ruff_cache
+.vscode
+Testing
+.claude
+CLAUDE.md
 
 # Compiled Documentation
 docs/_build

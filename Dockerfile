@@ -55,8 +55,9 @@ RUN git clone https://github.com/boostorg/boost.git -b boost-1.89.0 /opt/boost -
   && git submodule update --depth 1 -q --init libs/hash2 && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" hash2 \
   && git submodule update --depth 1 -q --init libs/scope && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" scope \
   && git submodule update --depth 1 -q --init libs/dynamic_bitset && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" dynamic_bitset \
+  && git submodule update --depth 1 -q --init libs/serialization && python3 tools/boostdep/depinst/depinst.py -X test -g "--depth 1" serialization \
   && ./bootstrap.sh --prefix=/usr/local \
-  && ./b2 \
+  && ./b2 -d0 link=static cxxflags="-fPIC" cflags="-fPIC" --with-flyweight --with-hash2 --with-scope --with-serialization \
   && ./b2 install
 
 # Install vg, samblaster and goleft executables
@@ -89,17 +90,23 @@ RUN git clone --depth 1 --recursive --branch node_del https://github.com/mlinder
   && cp /opt/odgi/bin/odgi /usr/local/bin \
   && cp /opt/odgi/lib/odgi.*.so /usr/local/lib  
 
-# Force "Unix Makefiles" instead of Ninja due to issues with ExternalProject_Add download and build
+# Key environment variables for building npsv3 and running tests 
+# * Force "Unix Makefiles" instead of Ninja due to issues with ExternalProject_Add download and build
+# * Search PyTorch index for packages first, then PyPI (not uv reverses the interpretation of those variables vs. pip)
+# * Specify the uv copy mode to silence expected warning about hard links in the container filesystem
+# * Disable Ray's automatic `uv run` rebuild feature which is not compatible with our build requirements
 ENV CMAKE_GENERATOR="Unix Makefiles" \
   CMAKE_INCLUDE_PATH="/opt/odgi/src:${CMAKE_INCLUDE_PATH}" \
-  CMAKE_LIBRARY_PATH="/opt/odgi/fork/build/handlegraph-prefix/lib:/opt/odgi/lib:${CMAKE_LIBRARY_PATH}" \
-  PYTHONPATH="/usr/local/lib:${PYTHON_PATH}" \
+  CMAKE_LIBRARY_PATH="/opt/odgi/build/handlegraph-prefix/lib:/opt/odgi/lib:${CMAKE_LIBRARY_PATH}" \
+  PYTHONPATH="/usr/local/lib:${PYTHONPATH}" \
   PATH="/root/.local/bin:$PATH" \
   PIP_INDEX_URL=https://pytorch.org \
-  UV_EXTRA_INDEX_URL=https://pytorch.org \
   PIP_EXTRA_INDEX_URL=https://pypi.org/simple/ \
   UV_INDEX_URL=https://pypi.org/simple/ \
-  HATCH_TEST_ENV=hatch-test.py${PYTHON_VERSION}
+  UV_EXTRA_INDEX_URL=https://pytorch.org \
+  UV_LINK_MODE=copy \
+  RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0 \
+  RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 
 RUN case ${TARGETARCH} in \
     "arm64") ARCH="aarch64" ;; \
@@ -111,22 +118,19 @@ RUN case ${TARGETARCH} in \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install hatch for development (seems to be a regression in 1.16.3)
 RUN --mount=type=cache,target=/root/.cache/uv \
-  uv python install "${PYTHON_VERSION}" \
-  && uv tool install hatch>1.16.3
+  uv python install "${PYTHON_VERSION}"
 
 ADD . /opt/npsv3
 
 WORKDIR /opt/npsv3
 
-# Pre-generate the hatch testing environment
-# RUN --mount=type=cache,target=/root/.cache/uv \
-#   hatch -e ${HATCH_TEST_ENV} run uv pip install nanobind scikit-build-core[pyproject] \
-#   && hatch -e ${HATCH_TEST_ENV} run uv pip install --no-build-isolation -ve .
+# Pre-generate the project's virtual environment (build deps + no-isolation build
+# of npsv3 are handled automatically by the [tool.uv] settings in pyproject.toml)
+# RUN --mount=type=cache,target=/root/.cache/uv uv sync --group test
 
 # TODO: Multistage build to reduce image size and avoid installing build dependencies in the final image
 # Adapted from: https://pythonspeed.com/articles/multi-stage-docker-python/
 
 # Create the wheel to prepare for a multistage build
-# RUN --mount=type=cache,target=/root/.cache/uv hatch build -t wheel
+# RUN --mount=type=cache,target=/root/.cache/uv uv build --wheel

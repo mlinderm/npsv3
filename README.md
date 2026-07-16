@@ -16,7 +16,7 @@ When cloning NPSV3, make sure to recursively clone all of the submodules, i.e. `
 NPSV3 requires Python 3.12+ and a suite of command-line genomics tools. For convenience, a Docker file is provided that installs all of the dependencies. To build that image:
 
 ```
-docker build -t npsv3 .
+docker build --target build -t npsv3 .
 ```
 
 ### Manual installation
@@ -37,10 +37,11 @@ To manually install and run NPSV3 from the source, you will need the following d
 
 along with standard command-line utilities, CMake and a C++17 compiler.
 
-We have installed NPSV3 with conda, e.g.,
+We have installed NPSV3 with conda as shown below (note that we set `RAY_ENABLE_UV_RUN_RUNTIME_ENV` to [prevent the Ray library from attempting to reinstall the package](https://github.com/ray-project/ray/issues/54344#issuecomment-3058801560) when using `uv run`.)
 
 ```
 conda create -n npsv3 python=3.12
+conda env config vars set -n npsv3 RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 conda activate npsv3
 uv pip install -e .
 ```
@@ -60,61 +61,63 @@ docker run --rm --entrypoint /bin/bash \
 
 ## Development
 
-NPSV3 is configured a [Hatch project](https://hatch.pypa.io/latest/) that uses [scikit-build-core](https://github.com/scikit-build/scikit-build-core) as the build backed and [uv](https://docs.astral.sh/uv/) as the installer.
+NPSV3 is managed with [uv](https://docs.astral.sh/uv/), using [scikit-build-core](https://github.com/scikit-build/scikit-build-core) as the build backend for its native extension.
+
+### Running the Python tests
+
+Run the PyTest test suite with
+```
+uv run pytest <pytest args...>
+```
 
 ### Using PDB with ray remote functions
 
 Run the tests with the "legacy" Ray debugger, e.g.
 ```
-RAY_DEBUG=legacy pytest
+RAY_DEBUG=legacy uv run pytest
 ```
 
-Then from another instance of the hatch test environment, `ray debug` to connect.
+Then from terminal session use `uv run ray debug` to connect.
 
 ### Building and testing the native extension
 
-The C++ extension build is implemented with scikit-build-core. The hatch test environment is automatically setup for easy rebuilding when making changes to the C++ extension (i.e., it builds the project without build isolation). 
+The C++ extension build is implemented with scikit-build-core. npsv3 is configured (see `[tool.uv]` in `pyproject.toml`) to build without isolation, reusing the same environment and CMake build directory (`build/{wheel_tag}`) for fast incremental rebuilds when making changes to the C++ extension.
 
-Run the following to rebuild when making changes to the C++ extension. The name of the hatch environment and corresponding build directory are determined by the Python version in use: 
+If the Python tests depend on changes in the C++ extension, reinstall the package with (optionally adding `--config-settings=cmake.build-type="Debug"` for a debug build)
 ```
-hatch -e hatch-test.py3.12 shell
-```
-at which point you can run the tests with `pytest <pytest args...>`, e.g., `pytest tests` to run all tests.
-
-If the Python tests depend on changes in the C++ extension, reinstall the package with
-```
-uv pip install --no-build-isolation -e .
+uv pip install -e .
 ```
 
 There are a separate set of C++ units, implemented with GoogleTest that can be built and run with the following (assuming you are using Python 3.12, if not point to the relevant build directory). Re-building just the C++ tests can be faster than re-building the entire Python package.
 ```
-cmake --build build/cp312-abi3-linux_x86_64 -t graph_test
-ctest --test-dir build/cp312-abi3-linux_x86_64
+uv run --no-sync cmake --build build/cp312-abi3-linux_x86_64 -t graph_test
+uv run --no-sync ctest --test-dir build/cp312-abi3-linux_x86_64
 ```
+For convenience the `build/{wheel_tag}` is embedded in the container as the `$EXT_BUILD_DIR` environment variable, e.g., `uv run --no-sync cmake --build $EXT_BUILD_DIR -t graph_test && uv run --no-sync ctest --test-dir $EXT_BUILD_DIR`.
 
-To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--dist no` disables the distributed test plugin.
+To use GDB with pytest, build with debug symbols, then run `python3` under GDB. The `--no-sync` argument to `uv run` prevents uv from attempting to rebuild the package without debug symbols. The `--dist no` disables the distributed test plugin.
 ```
-uv pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug"
-gdb -args python3 -m pytest --dist no tests
+uv pip install -e . --config-settings=cmake.build-type="Debug"
+uv run --no-sync gdb --args python -m pytest --dist no <pytest args...>
 ```
 
 To use valgrind, similarly build with debug symbols, then run python3 under valgrind. `-p no:warnings` prevents warnings related to NumPy from blocking the tests from running.
 ```
-valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt python3 -m pytest -p no:warnings tests
+uv run --no-sync valgrind --tool=memcheck --track-origins=yes --log-file=valgrind-report.txt python -m pytest -p no:warnings <pytest args...>
 ```
 
 To use Address Sanitizer (ASan), set the CMAKE ENABLE_ASAN option to ON during build
 ```
-uv pip install --no-build-isolation -ve . --config-settings=cmake.build-type="Debug" --config-settings=cmake.define.ENABLE_ASAN:BOOL=ON
+uv pip install -e . --config-settings=cmake.build-type="Debug" --config-settings=cmake.define.ENABLE_ASAN:BOOL=ON
 ```
 then run the tests ensuring libasan is preloaded before execution:
 ```
-LD_PRELOAD="$(gcc -print-file-name=libasan.so):$LD_PRELOAD" python3 -m pytest --dist no tests
+LD_PRELOAD="$(gcc -print-file-name=libasan.so):$LD_PRELOAD" uv run --no-sync python3 -m pytest --dist no <pytest args...>
 ```
 
 To run the native tests with GDB, run the tests with `-V` to report the specific test command that failed, e.g., `build/cp312-abi3-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"`, then run that command under GDB, e.g.,
 ```
-gdb -args build/cp312-abi3-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"
+uv run --no-sync gdb -args build/cp312-abi3-linux_x86_64/graph_test "--gtest_filter=GraphConstructionTest.LinksBetweenAltAllelesInSameVariant" "--gtest_also_run_disabled_tests"
 ```
 
 To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE_ARGS="--fresh"`.
@@ -123,7 +126,7 @@ To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE
 
 Build the container using the provided Docker file:
 ```
-docker build --target build -t npsv3-build .
+docker build --target build -t npsv3 .
 ```
 
 The following launches a restartable container in the background (for use with the VScode devcontainer extension). We set the shared memory to support loading the BWA indices into shared memory and mount a local directory at `/data` containing the reference genomes, etc.
@@ -133,7 +136,7 @@ docker run --entrypoint /bin/bash \
     -v ~/Research/data:/data \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
-    -dt npsv3-build
+    -dt npsv3
 docker exec -it <container name> bash -l  
 ```
 
@@ -144,10 +147,10 @@ docker run --rm \
     -v ~/Research/data:/data \
     -v `pwd`:/opt/npsv3 \
     -w /opt/npsv3 \
-    -it npsv3-build bash -l
+    -it npsv3 bash -l
 ```
 
-The development process is the same as described above. The name of the hatch environment and corresponding build directory are determined by the Python version in the container. For convenience the test environment is embedded as the `HATCH_TEST_ENV` environment variable and the build directory as `EXT_BUILD_DIR`.
+The development process is the same as described above. The name of the build directory is determined by the Python version in the container; for convenience it is embedded as the `EXT_BUILD_DIR` environment variable.
 
 ## License
 

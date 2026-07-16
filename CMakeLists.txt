@@ -72,6 +72,7 @@ find_package(ODGI REQUIRED)
 find_package(KMC REQUIRED)
 
 # Find (or build) Boost
+set(Boost_USE_STATIC_LIBS ON)
 find_package(Boost 1.88 COMPONENTS serialization HINTS "${CMAKE_BINARY_DIR}/lib/boost")
 if (NOT Boost_FOUND)
   message(STATUS "Boost not found, downloading and building Boost...")
@@ -82,7 +83,7 @@ if (NOT Boost_FOUND)
     PREFIX "${CMAKE_BINARY_DIR}/lib/boost"
 		UPDATE_COMMAND ""
 		CONFIGURE_COMMAND ./bootstrap.sh --prefix=<INSTALL_DIR>
-		BUILD_COMMAND ./b2 -d0 link=static --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 --with-scope --with-serialization install
+		BUILD_COMMAND ./b2 -d0 link=static cxxflags="-fPIC" cflags="-fPIC" --prefix=<INSTALL_DIR> --with-flyweight --with-hash2 --with-scope --with-serialization install
 		BUILD_IN_SOURCE true
 		INSTALL_COMMAND ""
 	)

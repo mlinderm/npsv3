@@ -62,41 +62,6 @@ build-dir = "build/{wheel_tag}"
 # Build stable ABI wheels for CPython 3.12+
 wheel.py-api = "cp312"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.envs.default]
-installer = "uv"
-
-[tool.hatch.envs.types]
-extra-dependencies = [
-  "mypy>=1.0.0",
-]
-
-[tool.hatch.envs.types.scripts]
-check = "mypy --install-types --non-interactive {args:src/npsv3 tests}"
-
-[tool.hatch.envs.hatch-test]
-# In build-isolation, uv, etc. ignores build.requires so pre-install build packages for npsv3 and its dependencies
-pre-install-commands = [
-  "uv pip install 'scikit-build-core[pyproject]>=0.4.3' 'nanobind>=1.3.2' setuptools setuptools_scm[toml] cython", 
-]
-extra-dependencies = [
-  "pytest-timeout",
-  "debugpy>=1.8.0", # Needed by Ray
-]
-
-[tool.hatch.envs.hatch-test.env-vars]
-RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO = "0"
-PIP_NO_BUILD_ISOLATION = "1"
-UV_NO_BUILD_ISOLATION = "1"
-PIP_INDEX_URL = "https://download.pytorch.org/whl/cpu" # Use CPU packages for tests to speed up installation
-UV_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu" # UV's (extra) index url are reversed vs. pip
-
-[tool.hatch.envs.hatch-static-analysis]
-dependencies = ["ruff==0.11.2"]
-config-path = "ruff_defaults.toml"
-
 [tool.coverage.run]
 source_pkgs = ["npsv3", "tests"]
 branch = true
@@ -129,25 +94,32 @@ extend-ignore = [
 [tool.ruff.lint.extend-per-file-ignores]
 "**/tests/**/*" = ["SLF001"]
 
-[tool.uv.extra-build-dependencies]
-npsv3 = ["scikit-build-core[pyproject]", "nanobind"]
+[tool.uv]
+# Build npsv3 itself without isolation so the scikit-build-core/CMake build
+# directory (build/{wheel_tag}) is reused for fast incremental rebuilds of the
+# C++ extension across `uv sync` / `uv pip install` invocations.
+no-build-isolation-package = ["npsv3"]
+# Always include the "build" group so the build-time deps above are present
+# in the shared environment before npsv3 itself is built.
+default-groups = ["build", "dev"]
 
-# Define "standalone" environment for running the NPSV2-NPSV3 TFRecordConverter script
-[tool.hatch.envs.tfrecordconverter]
-template = "tfrecordconverter"
-skip-install = true
-dependencies = [
-  "hydra-core",
-  "hydra-submitit-launcher",
-  "tensorflow-cpu",
-  "webdataset>=0.2.100",
-  "tqdm",
+[dependency-groups]
+# Build-time deps for npsv3 itself: since it builds without isolation (above),
+# these must be present in the shared environment ahead of time.
+build = [
+  "scikit-build-core[pyproject]>=0.4.3",
+  "nanobind>=1.3.2",
 ]
-
-[tool.hatch.envs.tfrecordconverter.env-vars]
-PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION = "python" # Since we are using NPSV2's outdated pb definition
-PYTHONPATH = "{root}/scripts" # Make npsv2_phy import available
-TF_CPP_MIN_LOG_LEVEL = "3" # Suppress warnings
-
-[tool.hatch.envs.tfrecordconverter.scripts]
-convert = "python scripts/TFRecordConverter.py {args}"
+dev = [
+  "coverage-enable-subprocess==1.0",
+  "coverage[toml]~=7.11",
+  "pytest~=9.0",
+  "pytest-mock~=3.12",
+  "pytest-randomly~=3.15",
+  "pytest-rerunfailures~=14.0",
+  "pytest-xdist[psutil]~=3.5",
+  "pytest-timeout",
+  "debugpy>=1.8.0", # Needed by Ray
+  "mypy>=1.0.0",
+  "ruff==0.11.2",
+]

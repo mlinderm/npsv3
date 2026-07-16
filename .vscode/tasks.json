@@ -4,21 +4,21 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run hatch tests",
+            "label": "Run pytest tests",
             "type": "shell",
-            "command": "hatch test ${input:pytestArgs}",
+            "command": "uv run pytest ${input:pytestArgs}",
             "group": "test"
         },
         {
             "label": "Build native tests",
             "type": "shell",
-            "command": "hatch -e ${env:HATCH_TEST_ENV} run cmake --build ${env:EXT_BUILD_DIR} -t graph_test",
+            "command": "uv run --no-sync cmake --build ${env:EXT_BUILD_DIR} -t graph_test",
             "group": "build"
         },
         {
             "label": "Run native tests with ctest",
             "type": "shell",
-            "command": "hatch -e ${env:HATCH_TEST_ENV} run ctest --test-dir ${env:EXT_BUILD_DIR} --output-on-failure",
+            "command": "uv run --no-sync ctest --test-dir ${env:EXT_BUILD_DIR} --output-on-failure",
             "group": "test",
             "dependsOn": "Build native tests"
         }
