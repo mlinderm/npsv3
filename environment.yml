@@ -1,0 +1,13 @@
+name: npsv3
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - pip
+  - libstdcxx-ng
+  - pip:
+    - uv
+variables:
+  RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: 0
+  RAY_ENABLE_UV_RUN_RUNTIME_ENV: 0
