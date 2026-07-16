@@ -35,15 +35,15 @@ To manually install and run NPSV3 from the source, you will need the following d
 * sambamba
 * samtools
 
-along with standard command-line utilities, CMake and a C++17 compiler.
+along with standard command-line utilities, CMake and a C++17 compiler. You can then install with `pip install .` or `uv pip install .`. If planning to run tests or commands via `uv run` set `RAY_ENABLE_UV_RUN_RUNTIME_ENV` to [prevent the Ray library from attempting to reinstall the package](https://github.com/ray-project/ray/issues/54344#issuecomment-3058801560) when it detects `uv run`.
 
-We have installed NPSV3 with conda as shown below (note that we set `RAY_ENABLE_UV_RUN_RUNTIME_ENV` to [prevent the Ray library from attempting to reinstall the package](https://github.com/ray-project/ray/issues/54344#issuecomment-3058801560) when using `uv run`.)
-
+We have installed npsv3 into a Conda environment named "npsv3" with the following approach that uses the Conda environment instead of uv's dedicated virtual environment:
 ```
-conda create -n npsv3 python=3.12
-conda env config vars set -n npsv3 RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
+conda create --file environment.yml
+conda env config vars set -n npsv3 \
+  UV_PROJECT_ENVIRONMENT=$(conda env list --json | jq -r '.envs[] | select(endswith("npsv3"))')
 conda activate npsv3
-uv pip install -e .
+uv sync
 ```
 
 ## Running
