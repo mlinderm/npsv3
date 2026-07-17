@@ -1,4 +1,4 @@
 # @package _global_
 command: test
 model:
-  checkpoint: ???
+  checkpoint: null

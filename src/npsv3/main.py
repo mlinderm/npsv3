@@ -126,7 +126,9 @@ def main(cfg: DictConfig) -> None:
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
-        _make_paths_absolute(cfg, ["model.checkpoint"])
+        # if not OmegaConf.is_missing(cfg, "model.checkpoint") and OmegaConf.select(cfg, "model.checkpoint") is not None:
+        #     print("hi")
+            # _make_paths_absolute(cfg, ["model.checkpoint"])
         OmegaConf.update(cfg, "data.test_urls", _to_webdataset_urls(cfg.data.test_urls), merge=False)
 
         metrics = test(cfg)

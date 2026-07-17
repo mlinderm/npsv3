@@ -18,6 +18,7 @@ from npsv3.models.metrics import (
     GenotypingNonRefRecall,
 )
 from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
+from transformers import AutoModel, DINOv3ViTModel, DINOv3ViTConfig
 
 
 class InceptionEncoder(nn.Module):
@@ -60,6 +61,48 @@ class ViTEncoder(nn.Module):
         outputs = self.model(x)
         sequence_output = outputs[0]
         return sequence_output[:, 0, :]
+
+class DINOv3Encoder(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        model_name = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
+        self.model = AutoModel.from_pretrained(model_name)
+
+    def forward(self, data):
+        # print(data.shape)
+        # TODO: Cut down to 3 input channels
+        resized_data = data[:, :3, :, :]
+        # reducer = nn.Conv2d(in_channels=7, out_channels=3, kernel_size=1)
+        # convoluted_data = reducer(data)
+        # print(convoluted_data.shape)
+        embeddings = self.model(resized_data)
+        sequence_output = embeddings[0]
+        return sequence_output[:, 0, :]
+    
+# Currently useless
+class DINOv3(L.LightningModule):
+    ignored_hyperparameters = ()
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        num_channels = 7,
+        image_size = (96, 288),
+        num_labels = 2,
+        patch_size=16
+    ):
+        super().__init__()
+        model_name = "facebook/dinov3-vits16plus-pretrain-lvd1689m"
+        self.model = AutoModel.from_pretrained(model_name)
+        self.save_hyperparameters()
+
+    def forward(self, pixel_values, labels):
+        outputs = self.model(pixel_values, labels=labels)
+        return outputs
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        pixel_values, _, _, _, labels = batch
+        return self(pixel_values, labels)
 
 class EuclideanDistanceMetric(nn.Module):
     """
@@ -243,6 +286,7 @@ class PackedVariant(L.LightningModule):
         optimizer: torch.optim.Optimizer,
         predictor: nn.Module,
         scheduler: Optional[Callable] = None,
+        **kwargs,
     ):
         super().__init__()
 
@@ -401,8 +445,8 @@ class WorstLossCallback(L.pytorch.callbacks.Callback):
 
     def on_predict_end(self, trainer, model):  # noqa: ARG002
         for loss, metric, labels, metadata in sorted(self.worst_losses, reverse=True):
+            print("predict has ended")
             print(loss, metric.offsets(), metric.values(), labels.values(), metadata)
-
 
 def predict(cfg, **kw_args):
     dm = hydra.utils.instantiate(cfg.data)

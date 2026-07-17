@@ -85,7 +85,7 @@ class TestRegionToExample:
             assert sample["image.npy.gz"].shape == (cfg.pileup.image_height, region.length, len(cfg.pileup.image_channels))
         assert _i == 0, "Only one sample in dataset"
 
-@pytest.mark.skip
+# @pytest.mark.skip
 @pytest.mark.skipif(
     # How do I load B37_REF_FASTA?
     # What exactly is B37? How is it different from HG38?
@@ -164,7 +164,7 @@ class TestVariableWidthImages:
         assert os.path.exists(png_path)
 
     def test_compress_del(self, tmp_path, cfg, hg002_sample):
-        OmegaConf.update(cfg, "pileup", {"max_image_width": 512}, merge = True)
+        OmegaConf.update(cfg, "pileup", {"max_image_width": 288}, merge = True)
 
         # 823 length deletion
         region = Range("12", 22129564, 22130387)
@@ -195,11 +195,11 @@ class TestVariableWidthImages:
         ), "Bi-allelic variant with single background should have 4 phased diploid genotypes"
 
         # png_path = str(tmp_path / "testwide.png")
-        png_path = result_path("test_del_compress.png")
+        png_path = result_path("deletion_w288.png")
         example_to_image(cfg, example, png_path, with_simulations=True, select_channels=[0, 1, 5]) # ALIGNED, PAIRED, ALLELE
         assert os.path.exists(png_path)
     
-
+@pytest.mark.skip
 @pytest.mark.skipif(
     # How do I load B37_REF_FASTA?
     # What exactly is B37? How is it different from HG38?

@@ -1,0 +1,57 @@
+import pytorch_lightning as pl
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+from transformers import AutoModel
+import webdataset as wds
+
+class HFToLightning(pl.LightningModule):
+    def __init__(self):
+        super().__init__()
+        # Load the Hugging Face model
+        self.model = AutoModel.from_pretrained("facebook/dinov3-vits16plus-pretrain-lvd1689m")
+        
+    def forward(self, batch):
+        return self.model(batch)
+        
+    def training_step(self, batch, batch_idx):
+        outputs = self.model(**batch)
+        loss = outputs.loss
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(self.parameters(), lr=2e-5)
+    
+    def predict_step(self, batch):
+        return self(batch)
+
+model = HFToLightning()
+
+# Initialize the Lightning Trainer
+trainer = pl.Trainer(accelerator="auto", devices=1)
+
+images_path = "/storage/mlinderman/projects/sv/npsv3-experiments/training/hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.eval-images/HG00733/generator=coverage,pileup=unphased_variant,simulation.replicates=1/images-{0000..0015}.tar"
+dataset = wds.WebDataset(images_path, shardshuffle=False).decode()
+
+predict_dataset = []
+for i, sample in enumerate(dataset):
+    predict_dataset.append(sample)
+    if i == 100:
+        break
+
+# predict_dataset = TensorDataset(torch.randn(10, 10))
+predict_dataloader = DataLoader(predict_dataset, batch_size=2)
+
+# trainer.predict(model, dataloaders=predict_dataloader)
+trainer.save_checkpoint("VanillaDINOv3.ckpt")
+
+dino = HFToLightning.load_from_checkpoint("DINOv3.ckpt", weights_only=False)
+
+# Not super sure if this is working as intended
+# checkpoint = {
+#     "state_dict": model.state_dict(),
+#     "hyper_parameters": getattr(model, 'hparams', {}),
+#     "pytorch-lightning_version": pl.__version__,
+#     "epoch": 0,
+#     "global_step": 0,
+# }
+# torch.save(checkpoint, "DINOv3.ckpt")

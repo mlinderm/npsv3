@@ -1,10 +1,10 @@
 import hydra
 import lightning as L
+import lightning_fabric
 import torch
 from omegaconf import OmegaConf
 
 from npsv3.models.paired import WorstLossCallback
-
 
 def load_model_from_checkpoint(cfg, *, strict=True):
     # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
@@ -14,6 +14,8 @@ def load_model_from_checkpoint(cfg, *, strict=True):
     for key, value in cfg.model.items():
         if key in model_cls.ignored_hyperparameters and "_target_" in value:
             model_args[key] = hydra.utils.instantiate(value)
+
+    print(strict)
 
     return model_cls.load_from_checkpoint(
         cfg.model.checkpoint,
@@ -75,7 +77,10 @@ def test(cfg, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+        model = hydra.utils.instantiate(cfg.model)
+    else:
+        model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
@@ -90,8 +95,13 @@ def predict(cfg, return_predictions=None, **kw_args):
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
 
+    print(cfg.data)
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+
+    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+        model = hydra.utils.instantiate(cfg.model)
+    else:
+        model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50), WorstLossCallback()],

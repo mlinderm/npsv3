@@ -185,9 +185,12 @@ def _pack_and_pad_images(
     for sample in data:
         query, support, label, *addl = sample
         num_genotypes, num_replicates, *image_size = support.shape
+        if num_images == 0:
+            image_width = support.shape[4]
+        # print(num_images, support.shape[4])
 
         remaining_space = batch_size - num_images
-        if num_genotypes * num_replicates + 1 > remaining_space:
+        if num_genotypes * num_replicates + 1 > remaining_space or not support.shape[4] == image_width:
             # If the current sample doesn't fit, yield the current batch.
             final = _pack_image_batch(
                 query_images,
@@ -206,7 +209,10 @@ def _pack_and_pad_images(
             addl_fields.clear()
             num_images = 0
 
+            # print("batched")
             yield final
+        image_width = support.shape[4]
+        # print(num_images, support.shape[4])
 
         # Append the "query" (real image) to the images list as a CHW tensor
         query_images.append(query)

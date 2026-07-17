@@ -20,8 +20,8 @@ echo "Starting: "`date +"%D %T"`
 mkdir ada_output/${SLURM_JOB_ID}/images
 
 # python3 /home/cachang/npsv3/img_view.py
-python3 /home/cachang/npsv3/model_test.py "$SLURM_JOB_ID"
-# python3 /home/cachang/npsv3/dataset_checker.py "$SLURM_JOB_ID"
+# python3 /home/cachang/npsv3/model_test.py "$SLURM_JOB_ID"
+python3 /home/cachang/npsv3/dataset_checker.py "$SLURM_JOB_ID"
 
 # End of job info 
 echo "Ending: "`date +"%D %T"`
