@@ -225,7 +225,11 @@ print(f"Model: {model_name}")
 print(f"Dataset: {images_path}")
 
 # Maximum number of images that will be predicted
+<<<<<<< HEAD
 n = 1
+=======
+n = 100000
+>>>>>>> 6650b2af8efec55ca53213eea3080adc56859e10
 # Targeted number of incorrect images displayed after evaluation
 k = 0
 # Defines how many variants will be classified before another is printed
