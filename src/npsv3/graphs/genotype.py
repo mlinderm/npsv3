@@ -404,8 +404,13 @@ def _genotypes_in_topk_shard(
                     "diplotype_idx": diplotype_idx,
                 })
 
+            if len(record_rows) == 0:
+                logging.info("Missing genotypes for analysis variants for sample %s in region %s", sample_name, region_string)
+                continue
+
             # Find the first diplotype that matches both haplotypes across all variants
             all_matching_haplotypes = np.all(np.stack(all_matching_haplotypes), axis=0)
+            all_haplotype_idxs = tuple(np.where(np.any(all_matching_haplotypes, axis=1), np.argmax(all_matching_haplotypes, axis=1), -1))
             all_diplotype_idx = next((
                 i for i, diplotype in enumerate(diplotypes)
                 if all(all_matching_haplotypes[j][h] for j, h in enumerate(diplotype.haplotypes))
@@ -429,6 +434,7 @@ def _genotypes_in_topk_shard(
                 true_diplotype_idx = -1
 
             for record_row in record_rows:
+                record_row["all_haplotype_idxs"] = all_haplotype_idxs
                 record_row["all_diplotype_idx"] = all_diplotype_idx
                 record_row["true_haplotype_idxs"] = true_haplotypes_idxs
                 record_row["true_diplotype_idx"] = true_diplotype_idx
@@ -479,9 +485,8 @@ def genotypes_in_topk(
             stack.callback(ray.shutdown)
 
         # Phase 1: Create and serialize graphs for subsequent analysis along with filtered k-mers
-        _region_count = None
         if graph_shards is None:
-            graph_shards, filtered_kmer_path, _region_count = _serialize_graph_and_unique_kmers(
+            graph_shards, filtered_kmer_path, *_ = _serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
                 sample,

@@ -60,6 +60,8 @@ class UniqueKmersOverlay {
   const size_t k_;
 
   std::vector<std::string> sequences_;
+
+  /// All recorded locations (possible multiple) for each k-mer, in the same order as @p sequences_.
   std::vector<std::vector<KmerLocation>> locations_;
 };
 

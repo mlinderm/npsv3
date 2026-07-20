@@ -87,6 +87,20 @@ NB_MODULE(_native_graph, m) {
     }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
     .def("__len__", &npsv3::UniqueKmersOverlay::size)
     .def_prop_ro("sequences", &npsv3::UniqueKmersOverlay::sequences)
+    .def("locations_as_node_ids", [](const npsv3::UniqueKmersOverlay& self, const npsv3::Graph& graph) {
+      // DIAGNOSTIC: temporary, returns for each k-mer index a list of (node_id_list, offset) locations.
+      std::vector<std::vector<std::pair<std::vector<odgi::nid_t>, uint64_t>>> result;
+      for (const auto& kmer_locations : self.locations()) {
+        std::vector<std::pair<std::vector<odgi::nid_t>, uint64_t>> locs;
+        for (const auto& loc : kmer_locations) {
+          std::vector<odgi::nid_t> node_ids;
+          for (const auto& h : loc.handles_) node_ids.push_back(graph.get_id(h));
+          locs.emplace_back(std::move(node_ids), loc.starting_handle_offset_);
+        }
+        result.push_back(std::move(locs));
+      }
+      return result;
+    }, "graph"_a) // DIAGNOSTIC: temporary
     .def("save_fasta", &npsv3::UniqueKmersOverlay::SaveFasta, "fasta_path"_a)
     .def("save", nb::overload_cast<const std::string&>(&npsv3::UniqueKmersOverlay::Save, nb::const_), "path"_a)
     .def("save_bytes", [](const npsv3::UniqueKmersOverlay& overlay) {
@@ -129,9 +143,22 @@ NB_MODULE(_native_graph, m) {
     }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
     .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
+    .def("find_best_paths", &npsv3::HaplotypeSamplerOverlay::FindBestPaths, "n"_a)
     .def("sample_diplotypes", &npsv3::HaplotypeSamplerOverlay::SampleDiplotypes, "candidates"_a, "n"_a)
+    .def("score", &npsv3::HaplotypeSamplerOverlay::Score, "haplotype"_a)
     .def("decode_haplotype", nb::overload_cast<const npsv3::HaplotypeSamplerOverlay::Haplotype&>(&npsv3::HaplotypeSamplerOverlay::DecodeHaplotype, nb::const_), "haplotype"_a)
-    .def("num_kmers", &npsv3::HaplotypeSamplerOverlay::NumKmers);
+    .def("num_kmers", &npsv3::HaplotypeSamplerOverlay::NumKmers)
+    .def("kmers_on_path", [](const npsv3::HaplotypeSamplerOverlay& self, const npsv3::HaplotypeSamplerOverlay::Haplotype& path) {
+      // Returns the set-bit (present) k-mer indices for a path -- useful for score debugging.
+      auto bits = self.KmersOnPath(path);
+      std::vector<size_t> result;
+      for (size_t idx = bits.find_first(); idx != npsv3::HaplotypeSamplerOverlay::KmerIdSet::npos; idx = bits.find_next(idx)) {
+        result.push_back(idx);
+      }
+      return result;
+    }, "path"_a)
+    .def("kmer_score_at", &npsv3::HaplotypeSamplerOverlay::KmerScoreAt, "idx"_a)
+    .def("kmer_sequence_at", &npsv3::HaplotypeSamplerOverlay::KmerSequenceAt, "idx"_a);
 
   nb::class_<npsv3::Range>(m, "Range")
     // https://nanobind.readthedocs.io/en/latest/api_core.html#_CPPv4IDpEN8nanobind4initE

@@ -1,9 +1,8 @@
 #include <algorithm>
-#include <array>
+#include <unordered_map>
 #include <vector>
 
 #include <boost/dynamic_bitset.hpp>
-#include <boost/core/span.hpp>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -19,23 +18,6 @@ class HaplotypeSamplerOverlay {
   using KmerNodeIdSeq = std::vector<odgi::nid_t>;
   using KmerIdSet = boost::dynamic_bitset<>;
 
-  // Transparent comparator to enable heterogeneous lookup in PathKmerMap using
-  // boost::span or std::array keys without constructing a KmerNodeIdSeq.
-  struct NodeIdSeqLess {
-    using is_transparent = void;
-    template<typename L, typename R>
-    bool operator()(const L& lhs, const R& rhs) const {
-      return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
-    }
-  };
-
-  struct PathKmerEntry {
-    KmerIdSet kmer_set_;
-    Graph::PathIdSet intermediate_paths_;
-    explicit PathKmerEntry(size_t kmer_count = 0) : kmer_set_(kmer_count) {}
-  };
-  using PathKmerMap = std::map<KmerNodeIdSeq, PathKmerEntry, NodeIdSeqLess>;
-  
   struct Diplotype {
     size_t h1, h2; ///< Haplotype indices
     double score; ///< Score of this diplotype (higher is better)
@@ -93,6 +75,9 @@ class HaplotypeSamplerOverlay {
   /// Return the top @p n highest-scoring diplotypes from all pairs of the @p candidate haplotypes, sorted by descending score.
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n = 1) const;
 
+  /// Score @p haplotype under the current k-mer scores, i.e. the same score used to rank haplotypes while sampling.
+  double Score(const Haplotype& haplotype) const;
+
   /// Return the variant_id-allele pairs a @p haplotype traversed by a haplotype or is corresponding @p covered_paths set
   std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Haplotype& haplotype) const;
   std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Graph::PathIdSet& covered_paths) const;
@@ -100,13 +85,30 @@ class HaplotypeSamplerOverlay {
   /// Number of unique k-mers used in sampling
   size_t NumKmers() const { return kmers_.size(); }
 
-  /// Return the set of k-mers that lie on @p path.
+  /// Return the set of k-mers that lie on @p path
   KmerIdSet KmersOnPath(const Graph::NodeIdSeq& path) const;
 
-  const PathKmerMap& PathKmers() const { return path_kmers_; }
+  /// Current score for k-mer @p idx (as used in Score()/PropagateBestPathState).
+  double KmerScoreAt(size_t idx) const { return kmers_[idx].score; }
+  /// Sequence for k-mer @p idx.
+  const std::string& KmerSequenceAt(size_t idx) const { return kmer_sequences_[idx]; }
+
+  using AutomatonIndex = size_t;
+  static constexpr size_t kAutomatonRoot = 0;
+
+  /// A state in the Aho-Corasick automaton mapping k-mer locations (path snippets) to k-mer indices.
+  /// Exposed for direct unit testing of goto/fail/output construction.
+  struct AutomatonState {
+    std::unordered_map<odgi::nid_t, AutomatonIndex> goto_; ///< Trie edges: node id -> child state
+    AutomatonIndex fail = kAutomatonRoot; ///< Failure link: state for the longest proper suffix of this state's path that is still a live prefix
+    KmerIdSet output_kmers_; ///< Every k-mer whose location ends exactly here, including via failure links
+    explicit AutomatonState(size_t kmer_count = 0) : output_kmers_(kmer_count) {}
+  };
+
+  const std::vector<AutomatonState>& Automaton() const { return automaton_; }
 
  private:
- 
+
   struct KmerScore {
     KmerZygosity zygosity;
     double score;
@@ -115,19 +117,48 @@ class HaplotypeSamplerOverlay {
   struct Backpointer {
     double score;
     odgi::nid_t pred_node;
-    PathKmerMap::const_iterator edge_it;
-    size_t pred_path_idx;
+    AutomatonIndex pred_automaton_state; ///< Automaton state pool at pred_node this entry backtracks into
+    size_t pred_path_idx; ///< Index within that (pred_node, pred_automaton_state) pool
     Graph::PathIdSet covered_paths;
   };
 
-  using BestPathState = std::vector<std::vector<Backpointer>>;
+  /// For haplotype sampling, maintain G x (AutomationIndex -> N x Backpointer), where G is number of graph nodes.
+  using StatePool = std::vector<Backpointer>;
+  using NodeState = std::unordered_map<AutomatonIndex, StatePool>;
+  using BestPathState = std::vector<NodeState>;
+  
   using PathWithCoverage = std::pair<Haplotype, Graph::PathIdSet>;
+  
+  /// Num nodes by Num automaton states table 
+  using ScoreToGoTable = std::vector<std::vector<double>>;
 
-  /// Compute BestPathState backpointers for up to @p n paths for the current scores
-  BestPathState PropagateBestPathState(size_t n) const;
+  /// Return the Aho-Corasick automaton state reached from @p state on @p node_id.
+  AutomatonIndex AutomatonGoto(AutomatonIndex state, odgi::nid_t node_id) const;
 
-  /// Backtrack using BestPathState to return complete path with its covered_paths set
-  PathWithCoverage BacktrackPath(const BestPathState& path_state, size_t back_idx) const;
+  /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
+  /// for the current k-mer scores.
+  ///
+  /// When @p score_to_go, a nodes by automaton states table of possible future scores, is non-null, every entry
+  /// discarded at a settlement point updates @p max_escaped_bound with an admissible upper bound on what that
+  /// discarded branch could have gone on to score.
+  BestPathState PropagateBestPathState(size_t n, const std::vector<std::vector<double>>* score_to_go = nullptr,
+                                       double* max_escaped_bound = nullptr) const;
+
+  /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
+  /// for the current k-mer scores, using adaptive beam search (increasing @p n up to a factor of @p max_widening)
+  /// to guarantee that the top scoring paths are returned.                                      
+  BestPathState PropagateBestPathStateAdaptively(size_t n, size_t max_widening = 8) const;
+
+  /// Compute best achievable *additional* score [v][s] from Graph node v with pending automaton state s
+  /// to the sink for the current k-mer scores. Used as an admissible bound in adaptive beam search.
+  ScoreToGoTable ComputeScoreToGo() const;
+
+  /// Return complete path using @p path_state starting at (max_node, @p back_automaton_state), at index @p back_idx
+  PathWithCoverage BacktrackPath(const BestPathState& path_state, AutomatonIndex back_automaton_state,
+                                 size_t back_idx) const;
+
+  /// Return the additive score delta for every k-mer in @p set
+  double KmerSetScoreDelta(const KmerIdSet& set) const;
 
   /// Update the scores of k-mers having sampled @p path
   void UpdateScores(const Graph::NodeIdSeq& path);
@@ -141,14 +172,8 @@ class HaplotypeSamplerOverlay {
 
   std::vector<std::string> kmer_sequences_; ///< k-mer sequences
   std::vector<KmerScore> kmers_; ///< k-mer zygosity and score information (parallel to kmer_sequences_)
-  
-  /** 
-   * Map from path (sequence of nids) to k-mer indices. We leverage sorted order to efficiently query for path segments
-    * that have associated k-mers. This could potentially be replaced with a trie, if it becomes a performance bottleneck.
-   */
-  PathKmerMap path_kmers_; ///< path (sequence of nids) to k-mer indices
-  static_assert(!std::is_same<typename PathKmerMap::key_compare, void>::value, "HaplotypeSamplerOverlay requires PathKmerMap to be ordered");
 
+  std::vector<AutomatonState> automaton_; ///< Aho-Corasick automaton over every k-mer's recorded location, rooted at automaton_[kAutomatonRoot]
 };
 
 }

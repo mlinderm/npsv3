@@ -1,4 +1,3 @@
-import glob
 import os
 import subprocess
 import tempfile
@@ -8,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from npsv3._native_graph import Graph, KmerCounts, Range, VariantFileReader
+from npsv3._native_graph import Graph, KmerClassify, KmerCounts, Range, VariantFileReader
 from npsv3.graphs.genotype import (
     _create_graph_and_sampler,
     _sample_diplotypes_from_counts,
@@ -16,10 +15,31 @@ from npsv3.graphs.genotype import (
     genotypes_in_topk,
     sample_diplotypes,
 )
-from npsv3.util.sample import Sample, filter_kmc_database, filter_kmc_database_from_fasta
+from npsv3.util.sample import Sample, filter_kmc_database
 
-from .. import HG38_REF_FASTA, RESULT_DIR, _create_vcf, _first_existing, data_path, result_path
+from .. import HG38_REF_FASTA, _create_vcf, data_path, result_path
 
+
+def _hash_vcf_file(vcf_path: str) -> str:
+    """Compute a hash of the VCF file contents, ignoring header lines."""
+    import hashlib
+    with open(vcf_path, "rb") as f:
+        digest = hashlib.file_digest(f, "sha256")
+        return digest.hexdigest()
+
+def _cache_filter_kmc_database( cfg, sample: Sample, vcf_path: str, region: Range, unique_kmers, tmp_path) -> str:
+    # Incorporate hash into custom VCF file into cache directory to avoid collisions
+    results_directory = result_path(f"{region.slug}.{_hash_vcf_file(vcf_path)}.{sample.name}.k{cfg.kmer.kmer_size}")
+    os.makedirs(results_directory, exist_ok=True)
+    filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
+    if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
+        # Generate filtered k-mers if not already available (a slow step, so we cache the results)
+        if not sample.kmc_prefix:
+            pytest.skip(f"KMC database for {sample.name} not found")
+        filter_kmc_database(
+            sample.kmc_prefix, unique_kmers, cfg.kmer.kmer_size, filtered_kmer_path, tmp_dir=tmp_path
+        )
+    return filtered_kmer_path
 
 @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
 class TestTopkHaplotypeSampling:
@@ -164,6 +184,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
                 "haplotype_idxs": [(0, 0)],
                 "diplotypes": [3],
                 "diplotype_idx": [0],
+                "all_haplotype_idxs": [(0, 0)],
                 "all_diplotype_idx": [0],
                 "true_haplotype_idxs": [(0, 0)],
                 "true_diplotype_idx": [0],
@@ -224,10 +245,11 @@ class TestTopkHaplotypeSamplingInHG00733:
             pytest.skip("Reference kmer counts not found")
         ref_kmer_counts = KmerCounts(ref_kmer_counts_prefix)
 
+        region = Range("chr1:789386-789670")
         graph, unique_kmers, haplotype_sampler = _create_graph_and_sampler(
             cfg.reference,
             vcf_path,
-            Range("chr1:789386-789670"),
+            region,
             k=cfg.kmer.kmer_size,
             ref_kmer_counts=ref_kmer_counts,
         )
@@ -257,14 +279,8 @@ class TestTopkHaplotypeSamplingInHG00733:
         # 2. Identify/implement a background model of off-target k-mer counts in the SRS data to have k-mer specific
         # thresholds for different zygosity classifications.
 
-        filtered_kmer_path = result_path(f"chr1_789385_789577.HG00733.filtered_kmers.k{cfg.kmer.kmer_size}")
-        if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
-            # Generate filtered k-mers if not already available (a slow step, so we cache the results)
-            if not hg00733_sample.kmc_prefix:
-                pytest.skip("KMC database for HG00733 not found")
-            filter_kmc_database(
-                hg00733_sample.kmc_prefix, unique_kmers, cfg.kmer.kmer_size, filtered_kmer_path, tmp_dir=tmp_path
-            )
+        # Use cached files to speed up repeated runs of the test
+        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
 
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
@@ -324,7 +340,7 @@ class TestTopkHaplotypeSamplingInHG00733:
         assert statistics["haplotype_idxs"].equals(pd.Series([(0, 1), (0, 1), (0, 0)]))
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
-    #@pytest.mark.skip(reason="Skip unless debugging")
+    @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -359,7 +375,44 @@ class TestTopkHaplotypeSamplingInHG00733:
         statistics = genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
-    @pytest.mark.skip(reason="Skip unless debugging")
+    # @pytest.mark.skip(reason="Skip unless debugging")
+    @pytest.mark.usefixtures("ray_setup")
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "kmer.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}",
+    )
+    def test_missing_matching_halotypes(self, cfg, hg00733_sample):
+        vcf_path = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz"
+        if not os.path.exists(vcf_path):
+            pytest.skip("HG00733 VCF not found")
+
+        if not os.path.exists(f"{cfg.kmer.ref_kmer_counts_kmc_prefix}.kmc_pre"):
+            pytest.skip("Reference kmer counts not found")
+
+        region = Range("chr1:6006213-6006792")
+
+        # Use cached files to speed up repeated runs of the test
+        results_directory = result_path(f"{region.slug}.HG00733.k{cfg.kmer.kmer_size}")
+        os.makedirs(results_directory, exist_ok=True)
+        filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
+        graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
+        if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
+            graph_shards, filtered_kmer_path, _region_count = _serialize_graph_and_unique_kmers(
+                cfg,
+                vcf_path,
+                hg00733_sample,
+                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
+                output_dir=results_directory,
+                filter_kmers=True,
+                region=region,
+            )
+
+        statistics = genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        assert len(statistics) == 0, "There should be no fully genotyped analysis variants in this region"
+        # TODO: Test that an info message was logged about this region
+
+
+    #@pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
     )
@@ -382,15 +435,7 @@ class TestTopkHaplotypeSamplingInHG00733:
             ref_kmer_counts=ref_kmer_counts,
         )
 
-        filtered_kmer_path = result_path(f"{region.slug}.HG00733.filtered_kmers.k{cfg.kmer.kmer_size}")
-        if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
-            # Generate filtered k-mers if not already available (a slow step, so we cache the results)
-            if not hg00733_sample.kmc_prefix:
-                pytest.skip("KMC database for HG00733 not found")
-            filter_kmc_database(
-                hg00733_sample.kmc_prefix, unique_kmers, cfg.kmer.kmer_size, filtered_kmer_path, tmp_dir=tmp_path
-            )
-
+        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
             unique_kmers,
@@ -401,22 +446,108 @@ class TestTopkHaplotypeSamplingInHG00733:
         )
         assert len(haplotypes) > 0
 
-    @pytest.mark.skip(reason="Skip unless debugging")
-    @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
     )
-    def test_debug_full_run(self, cfg, hg00733_sample):
-        vcf_path = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz"
+    def test_overlapping_alleles(self, cfg, hg00733_sample, tmp_path):
+        """Test region with overlapping variants, not all of genotyped in this sample"""
+        # cSpell:disable
+        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr12,length=133275309>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00733
+chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAATAAAATGAAATGGACTCCAATGGATTGGAATGGAATTGACTCCAATGGAATTGAATGGAGTGGAACCGAATGGAACGGATTGGAATGGAATGCACTCGAAATGAATTTGAATGGAATGGATTGGGCTCAAATGGAATGGAATGGAATGGAATGGAATGGAATGAACTCAAATGGATTAGCATGGAATGAAGTGGACTCGAATACAATGGAATGGAATGGACTCGAATGGAATGGAACGGACTTGAACGGAATGGAGTGGAATGGACTCGAATGGAATGGAGTTGAATGGACTCGAATGGAATGGAATGTAAAGGAATGGAATGAACTCGAAAGGAGTGGAATGTAATGGAATGAAATGGACTCGAATGGAATTAAATGGAATGGAACGGAATGGACTGGGATGGAATGGAACGGAACGGAACGCAGTTGAATTGAACGGACCCGGAATGGAATGGAATGGAATGGAATGAAATGGAATGAAGTGGACTCTAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGACTCGAATGAAATGGGATGGACTCGAATGGAATGGAACGGAATGGAATCGACTCGAGTGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGAATGGAATTGACTCAATTTAAATGGAATGAAGTGGAATGAACTCGAATGGCATGCAATGGAATGGAATAGAATCGAATGGAATAGAATGGACCCAAATGGAATGGAACGGAATGGAATGGAATGGAACGGAATGGAATAGAACGGAACGGAATGGAATGGATTGGAATGAACTCCAACGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGAATGGAATGGAGTGGACTGGAATGGAATAGAATGGAATGGAATGGATAGGACTGGAATGAAATGGAATGGAATGGACTCGAATGGAATGGAATGGAATGGAATGGACTCAAATGGAATGGAATGGAATGGAATGGACACGAATGGAATGGAATTGAATGGAATGGAATGGACTGTATGAAAAGGAATGGATTGGAAAGGAATGGAATAGAACGGAATGGACTCGAATGGAATGGAAAGGACTCGAGTGGAATGGAATGGAATGGAATGGACTCGAATGGAATGGAGTGGAATGTATGCGAATGGAATGGAATTGAATGGATTCGAGTCTAACGGAATGTATGGAATGGACTCGAATGGAATGTAATGTAATGGAATGAAATGGACGCGAATGGAATGGAATGGAATGGAATGGAATGGAGTGGAATGGAATGGACTCGAATGGTATGGAATGGAATTGAATGGACTCGATAGGAATGGAATGGAATGGATTGGACTCGAAAGGAATGTAATGGAATGAAATGTGCTGGAATGGAATGGAATGGAATGGAATAAAATGTAATGGAATGGACTCGAATGGAATACAGTTGAATTGAATGGACCCGAAAGCAATGGAATGGAATGGAACGGATTGGAAGGGAATGGAATGGAATGAAATGGAAAAGACTCGAATGGAATGGAATGGACTCGAATGAAATGGAGTGGACTAGAATGGAATGGAATGGACTTGAAAGAAATGGAATGCAGTGGAATGGACTCGAATGGAATGCAATGGAATGGAATAGACTCGAACGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAACGGAATGGACGCGAATGAAATGGAACGGAACGGAATGGACTCGGATGGAACGGAATGGAACGGAATGGAATGGAATTTACTCGAATGGGATGGAATGGAATGGAATTTACTCGAATGGAATGGAATGGAATGGACTGAAATGGAATAGCATGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGACTCGAATGGAACGGAATGGACTCGAACGGAGTGGAGTCGAATGGATTCGAATGGAATGCAATGGAATGGAACGGAATGCAATGTACTCGAATGGAATGGAATGTAATAGAATGAAAATTACTCGAATGGAATGGAATGGAATGGACTCCAATGGAATGGAATCGAACGGACTCGAATAGAATGCAGTTGAATTGAATGGACCTGAAAGAATGCAATGGAATGGAATGAAATGGACTCGAATGGAATGGAATAGACTGAAATGAAATGGAATGTACTGGAATGGAATGGAATGGAATGTACTGGAATGGAATGGAATGGACTCGAATGATATGCAATTGAATGGACTCGCATGGATTGGAATGGACTCTAGTGGAATGGAATGGAATA	30	PASS	.	GT	1|1
+chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAATAAAATGAAATGGACTCCAATGGATTGGAATGGAATTGACTCCAATGGAATTGAATGGAGTGGAACCGAATGGAACGGATTGGAATGGAATGCACTCGAAATGAATTTGAATGGAATGGATTGGGCTCAAATGGAATGGAATGGAATGGAATGGAATGGAATGAACTCAAATGGATTAGCATGGAATGAAGTGGACTCGAATACAATGGAATGGAATGGACTCGAATGGAATGGAACGGACTTGAACGGAATGGAGTGGAATGGACTCAAATGGAATGGAATGGAGTTGAATGGACTCGAATGGAATGGAATGTAAAGGAATGGAATGAACTCGAAAGGAGTGGAATGTAATGGAATGAAATGGACTCGAATGGAATTAAATGGAATGGAACGGAATGGACTGGGATGGAATGGAACGGAACGGAACGCAGTTGAATTGAACGGACCCGGAATGGAATGGAATGGAATGGAATGAAATGGAATGAAGTGGACTCTAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGACTCGAATGAAATGGGATGGACTCGAATGGAATGGAACGGAATGGAATCGACTCGAGTGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGAATGGAATTGACTCAATTTAAATGGAATGAAGTGGAATGAACTCGAATGGCATGCAATGGAATGGAATAGAATCGAATGGAATAGAATGGACCCAAATGGAATGGAACGGAATGGAATGGAATGGAACGGAATGGAATAGAACGGAACGGAATGGAATGGATTGGAATGAACTCCAACGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGAATGGAATGGAGTGGACTGGAATGGAATAGAATGGAATGGAATGGATAGGACTGGAATGAAATGGAATGGAATGGACTCGAATGGAATGGAATGGAATGGAATGGAATGGACTCAAATGGAATGGAATGGAATGGAATGGACACGAATGGAATGGAATTGAATGGAATGGAATGGACTGTATGAAAAGGAATGGATTGGAAAGGAATGGAATAGAACGGAATGGACTCGAATGGAATGGAAAGGACTCGAGTGGAATGGAATGGAATGGAATGGACTCGAATGGAATGGAGTGGAATGTATGCGAATGGAATGGAATTGAATGGATTCGAGTCTAACGGAATGTATGGAATGGACTCGAATGGAATGGAATGTAATGGAATGAAATGGACGCGAATGGAATGGAATGGAATGGAATGGAGTGGAATGGAATGGACTCGAATGGTATGGAATGGAATTGAATGGACTCGATAGGAATGGAATGGAATGGATTGGACTCGAAAGGAATGTAATGGAATGAAATGTGCTGGAATGGAATGGAATGGAATGGAATAAAATGTAATGGAATGGACTCGAATGGAATACAGTTGAATTGAATGGACCCGAAAGCAATGGAATGGAATGGAACGGATTGGAAGGGAATGGAATGGAATGAAATGGAAAAGACTCGAATGGAATGGAATGGACTCGAATGAAATGGAGTGGACTAGAATGGAATGGAATGGACTTGAAAGAAATGGAATGCAGTGGAATGGACTCGAATGGAATGCAATGGAATGGAATAGACTCGAACGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAACGGAATGGACGCGAATGAAATGGAACGGAACGGAATGGACTCGGATGGAACGGAACGGAACGGAATGGAATGGAATTTACTCGAATGGGATGGAATGGAATGGAATTTACTCGAATGGAATGGAATGGAATGGACTGAAATGGAATAGCATGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGACTCGAATGGAACGGAATGGACTCGAACGGAGTGGAGTCGAATGGATTCGAATGGAATGCAATGGAATGGAACGGAATGCAATGTACTCGAATGGAATGGAATGTAATAGAATGAAAATTACTCGAATGGAATGGAATGGAATGGACTCCAATGGAATGGAATCGAACGGACTCGAATAGAATGCAGTTGAATTGAATGGACCTGAAAGAATGCAATGGAATGGAATGAAATGGACTCGAATGGAATGGAATAGACTGAAATGAAATGGAATGTACTGGAATGGAATGGAATGGAATGTACTGGAATGGAATGGAATGGACTCGAATGATATGCAATTGAATGGACTCGCATGGATTGGAATGGACTCTAGTGGAATGGAATGGAATA,GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAATAAAATGAAATGGACTCCAATGGATTGGAATGGAATTGACTCCAATGGAATTGAATGGAGTGGAACCGAATGGAACGGATTGGAATGGAATGCACTCGAAATGAATTTGAATGGAATGGATTGGGCTCAAATGGAATGGAATGGAATGGAATGGAATGGAATGAACTCAAATGGATTAGCATGGAATGAAGTGGACTCGAATACAATGGAATGGAATGGACTCGAATGGAATGGAACGGACTTGAACGGAATGGAGTGGAATGGACTCGAATGGAATGGAGTTGAATGGACTCGAATGGAATGGAATGTAAAGGAATGGAATGAACTCGAAAGGAGTGGAATGTAATGGAATGAAATGGACTCGAATGGAATTAAATGGAATGGAACGGAATGGACTGGGATGGAATGGAACGGAACGGAACGCAGTTGAATTGAACGGACCCGGAATGGAATGGAATGGAATGGAATGAAATGGAATGAAGTGGACTCTAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGACTCGAATGAAATGGGATGGACTCGAATGGAATGGAACGGAATGGAATCGACTCGAGTGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATAGAATGGAATTGACTCAATTTAAATGGAATGAAGTGGAATGAACTCGAATGGCATGCAATGGAATGGAATAGAATCGAATGGAATAGAATGGACCCAAATGGAATGGAACGGAATGGAATGGAATGGAACGGAATGGAATAGAACGGAACGGAATGGAATGGATTGGAATGAACTCCAACGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGAATGGAATGGAGTGGACTGGAATGGAATAGAATGGAATGGAATGGATAGGACTGGAATGAAATGGAATGGAATGGACTCGAATGGAATGGAATGGAATGGAATGGACTCAAATGGAATGGAATGGAATGGAATGGACACGAATGGAATGGAATTGAATGGAATGGAATGGACTGTATGAAAAGGAATGGATTGGAAAGGAATGGAATAGAACGGAATGGACTCGAATGGAATGGAAAGGACTCGAGTGGAATGGAATGGAATGGAATGGACTCGAATGGAATGGAGTGGAATGTATGCGAATGGAATGGAATTGAATGGATTCGAGTCTAACGGAATGTATGGAATGGACTCGAATGGAATGTAATGTAATGGAATGAAATGGACGCGAATGGAATGGAATGGAATGGAATGGAATGGAGTGGAATGGAATGGACTCGAATGGTATGGAATGGAATTGAATGGACTCGATAGGAATGGAATGGAATGGATTGGACTCGAAAGGAATGTAATGGAATGAAATGTGCTGGAATGGAATGGAATGGAATGGAATAAAATGTAATGGAATGGACTCGAATGGAATACAGTTGAATTGAATGGACCCGAAAGCAATGGAATGGAATGGAACGGATTGGAAGGGAATGGAATGGAATGAAATGGAAAAGACTCGAATGGAATGGAATGGACTCGAATGAAATGGAGTGGACTAGAATGGAATGGAATGGACTTGAAAGAAATGGAATGCAGTGGAATGGACTCGAATGGAATGCAATGGAATGGAATAGACTCGAACGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAATGGAACGGAATGGACGCGAATGAAATGGAACGGAACGGAATGGACTCGGATGGAACGGAATGGAACGGAATGGAATGGAATTTACTCGAATGGGATGGAATGGAATGGAATTTACTCGAATGGAATGGAATGGAATGGACTGAAATGGAATAGCATGGAATGGAATGGACTCGAATGCAATGGAATGGAATGGACTCGAATGGAACGGAATGGACTCGAACGGAGTGGAGTCGAATGGATTCGAATGGAATGCAATGGAATGGAACGGAATGCAATGTACTCGAATGGAATGGAATGTAATAGAATGAAAATTACTCGAATGGAATGGAATGGAATGGACTCCAATGGAATGGAATCGAACGGACTCGAATAGAATGCAGTTGAATTGAATGGACCTGAAAGAATGCAATGGAATGGAATGAAATGGACTCGAATGGAATGGAATAGACTGAAATGAAATGGAATGTACTGGAATGGAATGGAATGGAATGTACTGGAATGGAATGGAATGGACTCGAATGATATGCAATTGAATGGACTCGCATGGATTGGAATGGACTCTAGTGGAATGGAATGGAATA	30	PASS	.	GT	."""
+        ) # fmt: skip
+        # cSpell:enable
+
+        ref_kmer_counts_prefix = f"/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k{cfg.kmer.kmer_size}"
+        if not os.path.exists(f"{ref_kmer_counts_prefix}.kmc_pre"):
+            pytest.skip("Reference kmer counts not found")
+        ref_kmer_counts = KmerCounts(ref_kmer_counts_prefix)
+
+        region = Range("chr1:789386-789670")
+        graph, unique_kmers, haplotype_sampler = _create_graph_and_sampler(
+            cfg.reference,
+            vcf_path,
+            region,
+            k=cfg.kmer.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+        # The graph construction automatically "deduplicates" the overlapping insertions, so the graph should have 2
+        # alternate alleles
+
+        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        haplotypes, diplotypes = _sample_diplotypes_from_counts(
+            haplotype_sampler,
+            unique_kmers,
+            filtered_kmer_path,
+            k=cfg.kmer.kmer_size,
+            kmer_coverage=hg00733_sample.kmer_coverage,
+            filter_kmers=False,
+        )
+        assert len(haplotypes) == 3, "There should be 3 haplotypes, since there are only 2 unique alternate alleles"
+
+        # `sample_haplotypes` mutates k-mer scores in place as it greedily selects haplotypes, so re-initialize
+        # scores from the same k-mer counts before scoring the true and sampled haplotypes on equal footing.
+        counts = KmerClassify(filtered_kmer_path, hg00733_sample.kmer_coverage)
+        haplotype_sampler.initialize_scores(counts)
+
+        true_scores = [haplotype_sampler.score(graph.path_nodes(f"{hg00733_sample.name}#{h}#{region.contig}#0")) for h in range(2)]
+        sampled_scores = [haplotype_sampler.score(haplotype) for haplotype in haplotypes]
+
+        assert sampled_scores[0] >= max(sampled_scores), "The first sampled haplotype should be the best-scoring sampled haplotype"
+        assert sampled_scores[0] >= max(true_scores), "The first sampled haplotype should be the best-scoring sampled haplotype"
+
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+    )
+    def test_population_scale_overlapping_alleles(self, cfg, hg00733_sample, tmp_path):
+        vcf_path = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz"
         if not os.path.exists(vcf_path):
             pytest.skip("HG00733 VCF not found")
 
-        genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, progress_bar=True, graph_shards=[
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00000.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00001.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00002.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00003.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00004.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00005.tar.gz",
-            "/storage/mlinderman/tmp/tmpy59a78tm/graphs-00006.tar.gz",
-        ], filtered_kmer_path="/storage/mlinderman/tmp/tmpy59a78tm/filtered_kmers")
+        ref_kmer_counts_prefix = f"/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k{cfg.kmer.kmer_size}"
+        if not os.path.exists(f"{ref_kmer_counts_prefix}.kmc_pre"):
+            pytest.skip("Reference kmer counts not found")
+        ref_kmer_counts = KmerCounts(ref_kmer_counts_prefix)
+
+        region = Range("chr1:789386-789670")
+        graph, unique_kmers, haplotype_sampler = _create_graph_and_sampler(
+            cfg.reference,
+            vcf_path,
+            region,
+            k=cfg.kmer.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+
+        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        haplotypes, diplotypes = _sample_diplotypes_from_counts(
+            haplotype_sampler,
+            unique_kmers,
+            filtered_kmer_path,
+            k=cfg.kmer.kmer_size,
+            kmer_coverage=hg00733_sample.kmer_coverage,
+            filter_kmers=False,
+        )
+
+        # The "correct" insertion allele is node 105, but is not necessarily sampled. The sampled vs. true insertion alleles have 238
+        # mismatches out of a 2369bp insertion, i.e., are very similar. We would want the correct allele to be ranked higher, but not
+        # necessarily penalize the other alleles much given the similarity.
+
+        # `sample_haplotypes` mutates k-mer scores in place as it greedily selects haplotypes, so re-initialize
+        # scores from the same k-mer counts before scoring the true and sampled haplotypes on equal footing.
+        counts = KmerClassify(filtered_kmer_path, hg00733_sample.kmer_coverage)
+        haplotype_sampler.initialize_scores(counts)
+
+        true_scores = [haplotype_sampler.score(graph.path_nodes(f"{hg00733_sample.name}#{h}#{region.contig}#0")) for h in range(2)]
+        sampled_scores = [haplotype_sampler.score(haplotype) for haplotype in haplotypes]
+
+        assert sampled_scores[0] >= max(sampled_scores), "The first sampled haplotype should be the best-scoring sampled haplotype"
+        assert sampled_scores[0] >= max(true_scores), "The first sampled haplotype should be the best-scoring sampled haplotype"
+
+        # TODO: Introduce a threshold, analogous to how Truvari, etc. match variant calls to determine if a haplotype should be considered
+        # distinct or not? For exmaple, if the haplotype is 90% similar to another haplotype, that probably wouldn't be distinct enough to
+        # detect.
