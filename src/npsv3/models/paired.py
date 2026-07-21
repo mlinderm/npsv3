@@ -7,8 +7,10 @@ import torch
 import torchmetrics
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 from torchvision import models
 from torchvision.transforms import v2 as transforms
+from timm.optim import create_optimizer_v2
 
 from npsv3.models.metrics import (
     GenotypingConcordance,
@@ -18,6 +20,89 @@ from npsv3.models.metrics import (
     GenotypingNonRefRecall,
 )
 from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
+
+
+class PostDinoConvLayer(nn.Module):
+    def __init__(self, input_dim, output_dim=None):
+        super().__init__()
+        if output_dim is None:
+            output_dim = input_dim
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.BatchNorm1d(input_dim),
+            nn.ReLU(),
+            nn.Linear(input_dim, output_dim),
+        )
+
+    def forward(self, x):
+        x = self.mlp(x)
+        return F.normalize(x, p=2, dim=1)
+
+
+class InOutEncoder(nn.Module):
+    def __init__(self, dino_model="facebook/dinov3-vitl16-pretrain-lvd1689m", chunk_size=4, num_channels=7, projection_size=512):
+        super().__init__()
+        self.chunk_size = chunk_size
+        self.num_channels = num_channels
+        self.projection_size = projection_size
+
+        from transformers import AutoImageProcessor
+
+        processor = AutoImageProcessor.from_pretrained(dino_model)
+        self.register_buffer("mean", torch.tensor(processor.image_mean, dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor(processor.image_std, dtype=torch.float32).view(1, 3, 1, 1))
+
+        self.bn = nn.BatchNorm2d(num_channels)
+        self.conv1 = nn.Conv2d(in_channels=num_channels, out_channels=32, kernel_size=1)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=16, kernel_size=1)
+        self.relu2 = nn.ReLU()
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=3, kernel_size=1)
+
+        from transformers import AutoModel
+
+        self.backbone = AutoModel.from_pretrained(dino_model)
+        self.backbone.config.use_cache = False
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        self.post_dino_layer = PostDinoConvLayer(
+            input_dim=self.backbone.config.hidden_size,
+            output_dim=projection_size,
+        )
+
+    def _run_dino_checkpoint(self, chunk):
+        outputs = self.backbone(chunk)
+        if hasattr(outputs, "last_hidden_state"):
+            return outputs.last_hidden_state[:, 0, :]
+        return outputs[:, 0, :]
+
+    def no_weight_decay(self) -> set[str]:
+        return set()
+
+    def forward(self, x):
+        if x.ndim != 4:
+            msg = f"Expected 4D input (B,C,H,W), got shape {tuple(x.shape)}"
+            raise ValueError(msg)
+
+        x = self.bn(x)
+        x = self.relu1(self.conv1(x))
+        x = self.relu2(self.conv2(x))
+        x = self.conv3(x)
+        x = torch.sigmoid(x)
+        x = F.interpolate(x, size=(128, 128), mode="bilinear", align_corners=False)
+        pixel_values = (x - self.mean) / self.std
+
+        embeddings = []
+        num_images = pixel_values.size(0)
+        for start in range(0, num_images, self.chunk_size):
+            chunk = pixel_values[start : start + self.chunk_size]
+            chunk_emb = checkpoint(self._run_dino_checkpoint, chunk, use_reentrant=False)
+            embeddings.append(chunk_emb)
+
+        embeddings = torch.cat(embeddings, dim=0)
+        return self.post_dino_layer(embeddings)
 
 
 class InceptionEncoder(nn.Module):
@@ -371,7 +456,9 @@ class PackedVariant(L.LightningModule):
             return { "optimizer": optimizer }
 
         # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
-        optimizer = self.hparams.optimizer(self.trainer.model)
+        optimizer = create_optimizer_v2(self.trainer.model, "adamw")
+        # TODO: Revise for current timm implementation
+        #optimizer = self.hparams.optimizer(self.trainer.model)
         scheduler= self.hparams.scheduler(optimizer=optimizer)
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 

@@ -75,7 +75,12 @@ def test(cfg, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+    #model = load_model_from_checkpoint(cfg)
+    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+       model = hydra.utils.instantiate(cfg.model)
+    else:
+       model = load_model_from_checkpoint(cfg)
+
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
@@ -91,7 +96,12 @@ def predict(cfg, return_predictions=None, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+
+    #model = load_model_from_checkpoint(cfg)
+    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+       model = hydra.utils.instantiate(cfg.model)
+    else:
+       model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50), WorstLossCallback()],

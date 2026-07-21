@@ -1,0 +1,21 @@
+_target_: npsv3.models.paired.PackedVariant
+encoder:
+  _target_: npsv3.models.paired.InOutEncoder
+  dino_model: facebook/dinov3-vitl16-pretrain-lvd1689m
+  chunk_size: 4
+  num_channels: ${len:${pileup.image_channels}}
+  projection_size: 512
+metric:
+  _target_: npsv3.models.paired.EuclideanDistanceMetric
+loss:
+  _target_: npsv3.models.paired.InfoNCE
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
+predictor:
+  _target_: npsv3.models.paired.MinimizingPredictor
+# ADDED HYDRA FILE FOR NEW ENCODER
