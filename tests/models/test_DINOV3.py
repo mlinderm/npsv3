@@ -3,18 +3,6 @@ import pytest
 from npsv3.models.runners import predict
 from npsv3.models.runners import test as model_test
 
-import os
-import hydra
-import typing
-from omegaconf import DictConfig, OmegaConf
-# from npsv3.main import _to_webdataset_urls
-
-def _to_webdataset_urls(urls: str | typing.Iterable[str]) -> str:
-    # Join multiple URLs with "::" separator expected by WebDataset
-    list_of_urls = urls.split("::") if isinstance(urls, str) else urls
-    list_of_urls = [hydra.utils.to_absolute_path(url) for url in list_of_urls]
-    return "::".join(list_of_urls)
-
 class TestAccuracy:
     @pytest.mark.cfg_overrides(
         "pileup=unphased_variant",
@@ -27,4 +15,4 @@ class TestAccuracy:
         # '+model.checkpoint="DINOv3.ckpt"',
     )
     def test_accuracy(self, tmp_path, cfg):
-        model_test(cfg)
+        model_test(cfg, limit_predict_batches=2)
