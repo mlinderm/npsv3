@@ -234,9 +234,24 @@ class Variant {
 
   ContigName contig() const;
 
+  // Raw record start/end (0-based, half-open), i.e. the bounds of RecordReferenceRegion()
+  Pos start() const { return record_->pos; }
+  Pos end() const { return record_->pos + record_->rlen; }
+
   int num_alleles() const { return record_->n_allele; }
   int num_alts() const { return record_->n_allele - 1; }
   int AlleleIndex(const std::string& allele_sequence) const;
+
+  // Length of the REF allele, including any padding bases
+  Pos ref_length() const { return record_->rlen; }
+  // Length of the given ALT allele (allele_idx >= 1), including any padding bases; nullopt for a
+  // "*" (spanning deletion) allele
+  std::optional<Pos> AlleleLength(int allele_idx) const;
+
+  // Per-ALT length change (alt length - ref length), preferring the SVLEN INFO field when present
+  // (falling back to the literal length difference otherwise); nullopt entries are "*" alleles.
+  // Indexed [0, num_alts()), i.e. LengthChanges()[i] corresponds to allele_idx == i + 1.
+  std::vector<std::optional<int>> LengthChanges() const;
 
   VariantId variant_id() const;
 
@@ -247,9 +262,18 @@ class Variant {
   bool has_flag(Flags flag) const { return (flags_ & flag); }
 
   virtual Range ReferenceRegion() const;
+  // Full region spanned by the record's REF allele, including any left/right padding bases
+  // (i.e. unlike ReferenceRegion(), this is not trimmed to the "changed" bases).
+  Range RecordReferenceRegion() const;
   virtual std::optional<Range> AlleleReferenceRegion(int allele_idx) const = 0;
   virtual std::optional<int> AlleleLengthChange(int allele_idx) const = 0;
   virtual std::optional<std::string_view> AlleleSequence(int allele_idx) const = 0;
+
+  // Raw, untrimmed allele sequence exactly as stored in the record (allele_idx == 0 is REF)
+  std::string_view AlleleRawSequence(int allele_idx) const;
+
+  // Fetch an Integer-typed INFO field (e.g. SVLEN); returns std::nullopt if not present
+  std::optional<std::vector<int32_t>> InfoInt(const std::string& key) const;
 
   bool IsFiltered() const;
   void SetFilterToPass();

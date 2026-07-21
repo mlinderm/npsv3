@@ -72,7 +72,7 @@ class TestSampleFromJson:
 
     def test_from_json_gc_coverage_keys_are_integers(self):
         sample = Sample.from_json(data_path("stats.json"), min_gc_bin=100, max_gc_error=0.01)
-        assert all(isinstance(k, int) for k in sample.gc_normalized_coverage.keys())
+        assert all(isinstance(k, int) for k in sample.gc_normalized_coverage)
 
     def test_from_json_gc_coverage_unknown_defaults_to_one(self):
         sample = Sample.from_json(data_path("stats.json"))

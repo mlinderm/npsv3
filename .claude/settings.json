@@ -37,7 +37,11 @@
       "Bash(python3 -m py_compile src/npsv3/graphs/genotype.py tests/graphs/test_genotype.py)",
       "Bash(conda run *)",
       "Bash(bcftools query *)",
-      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -R 'ParsesGenotypeAndPhasing' --output-on-failure)"
+      "Bash(ctest --test-dir build/cp312-abi3-linux_x86_64 -R 'ParsesGenotypeAndPhasing' --output-on-failure)",
+      "Bash(cd /home/mlinderman/research/npsv3-native *)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }

@@ -1,25 +1,15 @@
 import os
 import pathlib
 
-import pysam
 import pytest
 from omegaconf import OmegaConf
 
-from npsv3._native_graph import Range, VariantFileReader
 from npsv3.images.population import split_and_filter_vcf
-from npsv3.util.vcf import index_variant_file
+from npsv3.util.range import Range
+from npsv3.util.variant import VariantFileReader
 
-from .. import EXPERIMENTS_DIR, HG38_REF_FASTA, _first_existing
+from .. import EXPERIMENTS_DIR, HG38_REF_FASTA, _first_existing, create_vcf
 
-
-def _create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
-    """Create and return path to bgzip-compressed VCF file at tmp_path/name containing vcf"""
-    vcf_path = os.path.join(tmp_path, name)
-    assert vcf_path.endswith(".vcf.gz"), "VCF path must end with .vcf.gz"
-    with pysam.BGZFile(vcf_path, "wb", index=None) as vcf_file:
-        vcf_file.write(vcf)
-    index_variant_file(vcf_path)
-    return vcf_path
 
 def _sample_vcf_paths(output_dir: str|pathlib.Path, ext: str = ".vcf.gz") -> dict[str, str]:
     """ Return mapping from samples to path for all VCF files in output_dir with extension ext."""
@@ -29,7 +19,7 @@ def _sample_vcf_paths(output_dir: str|pathlib.Path, ext: str = ".vcf.gz") -> dic
 @pytest.mark.cfg_overrides(f"reference={HG38_REF_FASTA}")
 class TestMakeTrainingVCFsFromPopulation:
     def test_update_filter(self, tmp_path, cfg):
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
 ##FILTER=<ID=GAP2,Description="Uncalled in the second haplotype">
@@ -71,7 +61,7 @@ chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
 
     def test_split_passing_sv_creates_sample_vcfs(self, tmp_path, cfg):
         """Passing SV: carrier is positive, non-carriers are negative, all get output VCFs."""
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
@@ -98,7 +88,7 @@ chr1	3999762	.	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAG
 
     def test_split_no_passing_variants_skips_region(self, tmp_path, cfg):
         """Passing SV: carrier is positive, non-carriers are negative, all get output VCFs."""
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
@@ -119,7 +109,7 @@ chr1	3999762	.	ATGGAGTTGCAGGATACGCCACAGAGAGGGGAGGGGGCCACACTGCCGACGGGGCAGGCCTGGAG
 
     def test_split_filtered_sv_excluded_from_positive(self, tmp_path, cfg):
         """Sample with only a filtered SV should not be positive or negative."""
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">

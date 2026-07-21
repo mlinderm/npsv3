@@ -188,8 +188,8 @@ def main(cfg: DictConfig) -> None:
             hydra.utils.to_absolute_path(cfg.input),
             output,
         )
-    elif cfg.command == "genotype_topk":
-        from npsv3.graphs.genotype import genotypes_in_topk
+    elif cfg.command == "diplotype_topk":
+        from npsv3.graphs.haplotype import diplotypes_in_topk
         from npsv3.util.sample import Sample
 
         _make_paths_absolute(cfg, ["reference", "stats_path", "input"])
@@ -197,7 +197,7 @@ def main(cfg: DictConfig) -> None:
         output = "topk_statistics.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         sample = Sample.from_json(cfg.stats_path)
-        statistics = genotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True, progress_bar=True)
+        statistics = diplotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True, progress_bar=True)
         statistics.to_pickle(output)
 
     else:

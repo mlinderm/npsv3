@@ -3,21 +3,22 @@ import subprocess
 import tempfile
 from shlex import quote
 
-import numpy as np
 import pandas as pd
 import pytest
 
-from npsv3._native_graph import Graph, KmerClassify, KmerCounts, Range, VariantFileReader
-from npsv3.graphs.genotype import (
+from npsv3.graphs.haplotype import (
+    KmerClassify,
+    KmerCounts,
     _create_graph_and_sampler,
     _sample_diplotypes_from_counts,
     _serialize_graph_and_unique_kmers,
-    genotypes_in_topk,
+    diplotypes_in_topk,
     sample_diplotypes,
 )
+from npsv3.util.range import Range
 from npsv3.util.sample import Sample, filter_kmc_database
 
-from .. import HG38_REF_FASTA, _create_vcf, data_path, result_path
+from .. import HG38_REF_FASTA, create_vcf, data_path, result_path
 
 
 def _hash_vcf_file(vcf_path: str) -> str:
@@ -44,7 +45,7 @@ def _cache_filter_kmc_database( cfg, sample: Sample, vcf_path: str, region: Rang
 @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
 class TestTopkHaplotypeSampling:
     def test_correct_diplotype_homalt(self, cfg, tmp_path):
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr12,length=133275309>
@@ -93,7 +94,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
             assert diplotypes[1].haplotypes.count(0) >= 1, "The second-ranked diplotype should contain true haplotype"
 
     def test_correct_diplotype_het(self, cfg, tmp_path):
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr12,length=133275309>
@@ -139,7 +140,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
         f"reference={HG38_REF_FASTA}",
     )
     def test_topk_genotype(self, cfg, hg00096_sample, tmp_path):
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr1,length=248956422>
@@ -173,7 +174,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
 
         hg00096_sample.kmc_prefix = kmc_prefix
 
-        statistics = genotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
         pd.testing.assert_frame_equal(
             statistics,
             pd.DataFrame({
@@ -197,7 +198,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
         "kmer.kmer_size=31",  # Test files were generated with k=31, so we need to use that here to get the expected results
     )
     def test_topk_genotype_multiallelic(self, cfg, hg00096_sample, tmp_path):
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr1,length=248956422>
@@ -224,7 +225,7 @@ chr1	1924223	.	G	GACCACCCCCCAGCTCACAGCCCACCCCCCCATCTCACCGCCCAGCCCCCCCATCTCACCAGC
         )
         hg00096_sample.kmc_prefix = kmc_prefix
 
-        statistics = genotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
         assert len(statistics) == 1, "There should be one row of statistics for the single variant"
         assert all(h > 0 for h in statistics.iloc[0]["haplotype_idxs"]), "The true haplotypes should be found, but not necessarily top-ranked"
         assert statistics.iloc[0]["diplotype_idx"] >= 0, "The true diplotype should be found, but not necessarily top-ranked"
@@ -325,7 +326,7 @@ class TestTopkHaplotypeSamplingInHG00733:
                 region=region,
             )
 
-        statistics = genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
 
         # The first variant is 0/1, but overlaps the second (genotype of 1/2 with a star allele), so we correctly
         # sample haplotypes that don't include the full reference allele for the first variant (nodes [3,5]), just node [3].
@@ -372,7 +373,7 @@ class TestTopkHaplotypeSamplingInHG00733:
                 region=region,
             )
 
-        statistics = genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
     # @pytest.mark.skip(reason="Skip unless debugging")
@@ -407,7 +408,7 @@ class TestTopkHaplotypeSamplingInHG00733:
                 region=region,
             )
 
-        statistics = genotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert len(statistics) == 0, "There should be no fully genotyped analysis variants in this region"
         # TODO: Test that an info message was logged about this region
 
@@ -452,7 +453,7 @@ class TestTopkHaplotypeSamplingInHG00733:
     def test_overlapping_alleles(self, cfg, hg00733_sample, tmp_path):
         """Test region with overlapping variants, not all of genotyped in this sample"""
         # cSpell:disable
-        vcf_path = _create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr1,length=248956422>

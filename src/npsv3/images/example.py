@@ -27,8 +27,8 @@ from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample
 from npsv3.util.timeout import Timeout
+from npsv3.util.variant import Variant, overlapping_records
 from npsv3.util.vcf import index_variant_file, pysam_write_mode
-from npsv3.variant import Variant, overlapping_records
 
 
 def _reference_sequence(reference_fasta: str, region: Range) -> str:

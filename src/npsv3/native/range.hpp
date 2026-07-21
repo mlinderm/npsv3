@@ -3,15 +3,16 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <vector>
 
 #include "utility.hpp"
 
 namespace npsv3 {
 
 struct ContigNameTag {};
-typedef util::FlyweightStringNoTrack<ContigNameTag> ContigName;
+using ContigName = util::FlyweightStringNoTrack<ContigNameTag>;
 
-typedef uint64_t Pos;
+using Pos = uint64_t;
 
 class Range {
  public:
@@ -32,6 +33,16 @@ class Range {
   }
   Range Union(const Range& other) const;
   void UnionWith(const Range& other);
+  Range Intersection(const Range& other) const;
+
+  Range Center() const {
+    Pos mid = start_ + length() / 2;
+    return Range(contig_, mid, mid);
+  }
+
+  std::vector<Range> Window(Pos size) const;
+
+  bool Contains(Pos point) const { return start_ <= point && point < end_; }
 
   bool Overlaps(const Range& other) const {
     return contig_ == other.contig_ && start_ < other.end_ && other.start_ < end_;
@@ -40,11 +51,15 @@ class Range {
     return contig_ == other.contig_ && start_ == other.start_ && end_ == other.end_;
   }
   bool operator<(Pos point) const { return start_ < point; }
+  
+  /// Return true if this Range is a proper subset of @p other (matches Python Range.__lt__)
+  bool operator<(const Range& other) const {
+    return contig_ == other.contig_ &&
+           ((start_ >= other.start_ && end_ < other.end_) || (start_ > other.start_ && end_ <= other.end_));
+  }
   bool operator<=(const Range& other) const {
     return contig_ == other.contig_ && start_ >= other.start_ && end_ <= other.end_;
   }
-
-  // friend std::ostream& operator<<(std::ostream&, const Range&);
 
  protected:
   ContigName contig_;

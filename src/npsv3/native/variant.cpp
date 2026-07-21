@@ -137,6 +137,56 @@ Range Variant::ReferenceRegion() const {
   return Range(contig(), pos + left_padding_, pos + record_->rlen - right_padding_);
 }
 
+Range Variant::RecordReferenceRegion() const {
+  auto pos = record_->pos;  // 0-based position
+  return Range(contig(), pos, pos + record_->rlen);
+}
+
+std::string_view Variant::AlleleRawSequence(int allele_idx) const {
+  if (allele_idx < 0 || allele_idx >= record_->n_allele) {
+    throw std::out_of_range("Allele index out of range");
+  }
+  return std::string_view(record_->d.allele[allele_idx]);
+}
+
+std::optional<Pos> Variant::AlleleLength(int allele_idx) const {
+  auto change = AlleleLengthChange(allele_idx);
+  if (!change) return std::nullopt;
+  return static_cast<Pos>(static_cast<int64_t>(record_->rlen) + *change);
+}
+
+std::vector<std::optional<int>> Variant::LengthChanges() const {
+  auto svlen = InfoInt("SVLEN");
+  std::vector<std::optional<int>> result;
+  result.reserve(num_alts());
+
+  if (svlen && svlen->size() == static_cast<size_t>(num_alts())) {
+    for (int i = 1; i <= num_alts(); i++) {
+      // "*" alleles are not assigned an SVLEN entry by convention, matching AlleleLengthChange
+      auto allele = AlleleRawSequence(i);
+      result.push_back((allele == "*") ? std::nullopt : std::make_optional((*svlen)[i - 1]));
+    }
+  } else {
+    for (int i = 1; i <= num_alts(); i++) {
+      result.push_back(AlleleLengthChange(i));
+    }
+  }
+  return result;
+}
+
+std::optional<std::vector<int32_t>> Variant::InfoInt(const std::string& key) const {
+  int32_t* dst = nullptr;
+  int ndst = 0;
+  int n = bcf_get_info_int32(hdr_->bcf_hdr(), record_.get(), key.c_str(), &dst, &ndst);
+  if (n <= 0) {
+    if (dst) free(dst);
+    return std::nullopt;
+  }
+  std::vector<int32_t> result(dst, dst + n);
+  free(dst);
+  return result;
+}
+
 Variant::RecordPtr Variant::SubsetSamplesRecord(const std::vector<int>& original_idxs) const {
   RecordPtr subset_record_ptr(bcf_dup(record_.get()));
   if (!subset_record_ptr) {

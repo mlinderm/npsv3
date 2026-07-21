@@ -19,8 +19,8 @@ from npsv3.models.runners import load_model_from_checkpoint
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
+from npsv3.util.variant import Variant, overlapping_records, vg_variant_id
 from npsv3.util.vcf import bcftools_format, bcftools_index, index_variant_file
-from npsv3.variant import Variant, overlapping_records, vg_variant_id
 
 PLOIDY = 2
 VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG"])

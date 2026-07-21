@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <functional>
 #include <sstream>
 #include <streambuf>
 
@@ -11,8 +13,10 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/operators.h>
 #include <fmt/format.h>
+#include <boost/container_hash/hash.hpp>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -46,6 +50,18 @@ struct MemReadBuf : std::streambuf {
 //   });
 //   return nb::ndarray<nb::numpy, uint8_t, nb::ndim<1>>(data, {size}, owner);
 // }
+
+// Parse a 1-indexed fully closed region string "contig:start-end" into a Range, as accepted by
+// samtools/htslib (e.g. Range("chr1:1000-2000") or Range.parse_literal("chr1:1000-2000")).
+static npsv3::Range ParseRegionString(const char* region) {
+  hts_pos_t beg, end;
+  const char* colon = hts_parse_reg64(region, &beg, &end);
+  if (colon == nullptr) {
+    throw std::invalid_argument(fmt::format("Invalid region string: {}", region));
+  }
+  npsv3::ContigName contig(region, colon);
+  return npsv3::Range(contig, static_cast<npsv3::Pos>(beg), static_cast<npsv3::Pos>(end));
+}
 
 class VariantFileReaderIterator {
   public:
@@ -167,37 +183,123 @@ NB_MODULE(_native_graph, m) {
     })
     // Construct from a 1-indexed fully closed region string "contig:start-end"
     .def("__init__", [](npsv3::Range* r, const char* region) {
-      hts_pos_t beg, end;
-      const char* colon = hts_parse_reg64(region, &beg, &end);
-      if (colon == nullptr) {
-        throw std::invalid_argument(fmt::format("Invalid region string: {}", region));
-      }
-      npsv3::ContigName contig(region, colon);
-      new (r) npsv3::Range(contig, static_cast<npsv3::Pos>(beg), static_cast<npsv3::Pos>(end));
+      new (r) npsv3::Range(ParseRegionString(region));
     }, "region"_a)
+    // Alias for the region-string constructor, for parity with the old pysam-backed Range.parse_literal
+    .def_static("parse_literal", [](const std::string& region) {
+      return ParseRegionString(region.c_str());
+    }, "region"_a)
+    // Parse a slug of the form "contig_start_end" (as produced by the `slug` property) from the end to
+    // allow contigs with underscores in their names. The slug is a 0-indexed half-open interval.
+    .def_static("parse_slug", [](const std::string& slug) {
+      size_t end = slug.rfind('_');
+      if (end != std::string::npos) {
+        size_t start = slug.rfind('_', end-1);
+        if (start != std::string::npos) {
+          return npsv3::Range(
+            slug.substr(0, start),
+            static_cast<npsv3::Pos>(std::stoull(slug.substr(start + 1, end - (start + 1)))),
+            static_cast<npsv3::Pos>(std::stoull(slug.substr(end + 1)))
+          );
+        }
+      } 
+      throw std::invalid_argument(fmt::format("Invalid Range slug: {}", slug));
+    }, "slug"_a)
     .def_prop_ro("contig", [](const npsv3::Range& r) { return r.contig().get(); })
     .def_prop_ro("start", &npsv3::Range::start)
     .def_prop_ro("end", &npsv3::Range::end)
     .def_prop_ro("length", &npsv3::Range::length)
+    .def("__len__", &npsv3::Range::length)
+    .def_prop_ro("center", &npsv3::Range::Center)
+    .def_prop_ro("pysam_fetch", [](const npsv3::Range& r) {
+      nb::dict d;
+
+      d["contig"] = r.contig().get();
+      d["start"] = r.start();
+      d["stop"] = r.end();
+
+      return d;
+    })
     .def("expand", nb::overload_cast<npsv3::Pos, npsv3::Pos>(&npsv3::Range::Expand, nb::const_))
     .def("expand", nb::overload_cast<npsv3::Pos>(&npsv3::Range::Expand, nb::const_))
+    .def("union", &npsv3::Range::Union)
     .def("union_with", &npsv3::Range::UnionWith)
+    .def("intersection", &npsv3::Range::Intersection)
     .def("overlaps", &npsv3::Range::Overlaps)
+    .def("contains", &npsv3::Range::Contains, "point"_a)
+    .def("window", &npsv3::Range::Window, "size"_a)
+    .def("get_overlap", [](const npsv3::Range& r, nb::object has_region) -> int64_t {
+      if (nb::isinstance<npsv3::Range>(has_region)) {
+        const auto& other = nb::cast<const npsv3::Range&>(has_region);
+        if (r.contig() != other.contig()) { 
+          return 0;
+        }
+        auto overlap_start = std::max<int64_t>(r.start(), other.start());
+        auto overlap_end = std::min<int64_t>(r.end(), other.end());
+        return std::max<int64_t>(0, overlap_end - overlap_start);
+      }
+      // Otherwise assume a pysam.AlignedSegment-like object
+      if (!nb::hasattr(has_region, "reference_name")) {
+        throw std::invalid_argument("Unsupported type for Range.get_overlap");
+      }
+      nb::object ref_name = has_region.attr("reference_name");
+      if (ref_name.is_none() || nb::cast<std::string>(ref_name) != r.contig().get()) {
+        return 0;
+      }
+      return nb::cast<int64_t>(has_region.attr("get_overlap")(r.start(), r.end()));
+    }, "has_region"_a)
     .def(nb::self == nb::self)
+    .def(nb::self <= nb::self)
+    .def(nb::self < nb::self)
+    .def("__hash__", [](const npsv3::Range& r) {
+      //size_t h = std::hash<npsv3::ContigName>{}(r.contig());
+      size_t seed = 0;
+      boost::hash_combine(seed, r.contig());
+      boost::hash_combine(seed, r.start());
+      boost::hash_combine(seed, r.end());
+      return seed;
+    })
     .def_prop_ro("slug", [](const npsv3::Range& r) {
       return fmt::format("{}_{}_{}", r.contig(), r.start(), r.end());
     })
     .def("__str__", [](const npsv3::Range& r) {
-      // Convert to 1-based closed interval for display, which is more conventional for genomic coordinates
+      // Convert to 1-based closed interval for display
       return fmt::format("{}:{}-{}", r.contig(), r.start()+1, r.end());
     });
 
   nb::class_<npsv3::Variant>(m, "Variant")
+    .def_prop_ro("contig", [](const npsv3::Variant& v) { return v.contig().get(); })
+    .def_prop_ro("start", &npsv3::Variant::start)
+    .def_prop_ro("end", &npsv3::Variant::end)
     .def_prop_ro("num_alleles", &npsv3::Variant::num_alleles)
+    .def_prop_ro("num_alts", &npsv3::Variant::num_alts)
+    .def_prop_ro("ref_length", &npsv3::Variant::ref_length)
+    // variant_id is recomputed (SHA1) on every access; not cached on the C++ side yet
     .def_prop_ro("variant_id", [](const npsv3::Variant& v) { return to_string(v.variant_id()); })
+    .def_prop_ro("has_star_allele", [](const npsv3::Variant& v) { return v.has_flag(npsv3::Variant::kHasStarAllele); })
     .def("reference_region", &npsv3::Variant::ReferenceRegion)
+    .def("record_reference_region", &npsv3::Variant::RecordReferenceRegion)
     .def("allele_reference_region", &npsv3::Variant::AlleleReferenceRegion)
     .def("allele_length_change", &npsv3::Variant::AlleleLengthChange)
+    .def("allele_length", &npsv3::Variant::AlleleLength, "allele_idx"_a)
+    // No-arg form returns the per-ALT list (SVLEN-aware, see LengthChanges()); the single-allele
+    // overload below indexes into it, e.g. length_change(2) == length_change()[1]
+    .def("length_change", &npsv3::Variant::LengthChanges)
+    .def("length_change", [](const npsv3::Variant& v, int allele_idx) {
+      if (allele_idx < 1 || allele_idx > v.num_alts()) {
+        throw std::out_of_range("Allele index out of range");
+      }
+      return v.LengthChanges()[allele_idx - 1];
+    }, "allele_idx"_a)
+    .def("allele", [](const npsv3::Variant& v, int allele_idx) {
+      return std::string(v.AlleleRawSequence(allele_idx));
+    }, "allele_idx"_a)
+    .def("allele_sequence", [](const npsv3::Variant& v, int allele_idx) -> std::optional<std::string> {
+      auto seq = v.AlleleSequence(allele_idx);
+      if (!seq) return std::nullopt;
+      return std::string(*seq);
+    }, "allele_idx"_a)
+    .def("info_int", &npsv3::Variant::InfoInt, "key"_a)
     .def("is_filtered", &npsv3::Variant::IsFiltered)
     .def("set_filter_pass", &npsv3::Variant::SetFilterToPass)
     .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))

@@ -1,5 +1,4 @@
 import os
-import sys
 
 import hydra
 import pytest
@@ -15,13 +14,18 @@ from . import _first_existing
 def hydra_setup():
     hydra.initialize(config_path="../src/npsv3/conf", version_base=None)
     yield
-    hydra.core.global_hydra.GlobalHydra.instance().clear()
+    hydra.core.global_hydra.GlobalHydra.instance().clear() # type: ignore
 
 
 @pytest.fixture(scope="session")
 def ray_setup(tmp_path_factory):
     ray_tmp_dir = tmp_path_factory.mktemp("ray")
-    ray.init(num_cpus=1, include_dashboard=False, _temp_dir=str(ray_tmp_dir), runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
+    ray.init(
+        num_cpus=1,
+        include_dashboard=False,
+        _temp_dir=str(ray_tmp_dir),
+        runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore
+    )
     yield
     ray.shutdown()
 

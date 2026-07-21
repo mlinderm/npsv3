@@ -2,7 +2,6 @@ import contextlib
 import glob
 import logging
 import os
-import sys
 import tempfile
 from collections.abc import Sequence
 
@@ -13,23 +12,21 @@ import webdataset as wds
 from tqdm import tqdm
 
 from npsv3 import PathType
-from npsv3._native_graph import (
-    Graph,
-    HaplotypeSamplerOverlay,
-    KmerClassify,
-    KmerCounts,
-    Range,
-    UniqueKmersOverlay,
-    VariantFileReader,
-)
+from npsv3._native_graph import HaplotypeSamplerOverlay as HaplotypeSamplerOverlay
+from npsv3._native_graph import KmerClassify as KmerClassify
+from npsv3._native_graph import KmerCounts as KmerCounts
+from npsv3._native_graph import UniqueKmersOverlay as UniqueKmersOverlay
+from npsv3.graphs.graph import Graph
 from npsv3.images.population import overlapping_variants
 from npsv3.util.config import setup_resolvers
+from npsv3.util.range import Range
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmc_database, filter_kmc_database_from_fasta
+from npsv3.util.variant import VariantFileReader
 
 
 def _create_graph_and_sampler(
-    reference: str | os.PathLike,
-    vcf_path: str | os.PathLike,
+    reference: PathType,
+    vcf_path: PathType,
     region: Range,
     *,
     k: int,
@@ -39,12 +36,12 @@ def _create_graph_and_sampler(
     canonicalize=False,
     ref_kmer_counts: KmerClassify | None = None,
 ) -> tuple[Graph, UniqueKmersOverlay, HaplotypeSamplerOverlay]:
-    graph = Graph(reference, vcf_path, region)
+    graph = Graph(str(reference), str(vcf_path), region)
     unique_kmers = UniqueKmersOverlay(
         graph, k, max_edges=max_edges, exclude_universal=exclude_universal, canonicalize=canonicalize, ref_kmer_counts=ref_kmer_counts
     )
     sampler = HaplotypeSamplerOverlay(
-        graph, unique_kmers, vcf_path, region, min_variant_size
+        graph, unique_kmers, str(vcf_path), region, min_variant_size
     )
     return graph, unique_kmers, sampler
 
@@ -310,7 +307,7 @@ def _star_alleles(analysis_variants) -> dict[tuple[str, int], int]:
     return star_alleles
 
 
-def _haplotype_paths(sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[int], star_alleles: dict[tuple[str, int], int]):
+def _haplotype_paths(sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[Sequence[int]], star_alleles: dict[tuple[str, int], int]):
     """For each haplotype, determine the set of (variant_id, allele) pairs it is compatible with
 
     `sampler.decode_haplotype` reports the alleles a haplotype actually traverses distinguishing nodes for
@@ -332,7 +329,7 @@ def _haplotype_paths(sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[int]
 
 
 @ray.remote # type: ignore
-def _genotypes_in_topk_shard(
+def _diplotypes_in_topk_shard(
     shard_path: str,
     vcf_path: str,
     sample_name: str,
@@ -443,7 +440,7 @@ def _genotypes_in_topk_shard(
     return result_rows
 
 
-def genotypes_in_topk(
+def diplotypes_in_topk(
     cfg,
     vcf_path: PathType,
     sample: Sample,
@@ -508,7 +505,7 @@ def genotypes_in_topk(
 
         # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
         pending = [
-            _genotypes_in_topk_shard.remote( # type: ignore
+            _diplotypes_in_topk_shard.remote( # type: ignore
                 shard_path,
                 str(vcf_path),
                 sample.name,

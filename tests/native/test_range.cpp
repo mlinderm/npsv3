@@ -94,3 +94,60 @@ TEST(RangeTest, StartPointComparisonOperatorLt) {
   EXPECT_FALSE(r < 50);   // start (50) < 50 is false
   EXPECT_TRUE(r < 200);
 }
+
+TEST(RangeTest, StrictContainmentOperatorLt) {
+  Range outer("chr1", 0, 100);
+  Range inner("chr1", 20, 80);
+  EXPECT_TRUE(inner < outer);
+  EXPECT_FALSE(outer < inner);
+  EXPECT_FALSE(inner < inner);  // not reflexive
+  EXPECT_FALSE(inner < Range("chr2", 0, 100));  // different contigs never compare
+}
+
+TEST(RangeTest, Contains) {
+  Range r("chr1", 100, 200);
+  EXPECT_TRUE(r.Contains(100));
+  EXPECT_TRUE(r.Contains(199));
+  EXPECT_FALSE(r.Contains(200));
+  EXPECT_FALSE(r.Contains(99));
+}
+
+TEST(RangeTest, Center) {
+  Range r("chr1", 100, 200);
+  auto center = r.Center();
+  EXPECT_EQ(center.contig(), ContigName("chr1"));
+  EXPECT_EQ(center.start(), 150u);
+  EXPECT_EQ(center.end(), 150u);
+  EXPECT_EQ(center.length(), 0u);
+}
+
+TEST(RangeTest, Window) {
+  Range r("chr1", 100, 200);
+  auto windows = r.Window(50);
+  ASSERT_EQ(windows.size(), 2u);
+  EXPECT_EQ(windows[0], Range("chr1", 100, 150));
+  EXPECT_EQ(windows[1], Range("chr1", 150, 200));
+}
+
+TEST(RangeTest, WindowThrowsWhenNotMultiple) {
+  Range r("chr1", 100, 175);
+  EXPECT_THROW(r.Window(50), std::invalid_argument);
+}
+
+TEST(RangeTest, Intersection) {
+  Range a("chr1", 100, 200);
+  Range b("chr1", 150, 250);
+  auto overlap = a.Intersection(b);
+  EXPECT_EQ(overlap.contig(), ContigName("chr1"));
+  EXPECT_EQ(overlap.start(), 150u);
+  EXPECT_EQ(overlap.end(), 200u);
+}
+
+TEST(RangeTest, IntersectionNoOverlapOrDifferentContigs) {
+  Range a("chr1", 100, 200);
+  Range b("chr1", 200, 300);
+  EXPECT_EQ(a.Intersection(b).length(), 0u);
+
+  Range c("chr2", 100, 200);
+  EXPECT_EQ(a.Intersection(c).length(), 0u);
+}

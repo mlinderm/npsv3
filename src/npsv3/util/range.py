@@ -1,103 +1,105 @@
 from collections import defaultdict
 
 from intervaltree import IntervalTree
-from pysam import AlignedSegment
-from pysam.libcutils import parse_region
+
+from npsv3._native_graph import Range as Range
+# from pysam import AlignedSegment
+# from pysam.libcutils import parse_region
 
 
-class Range:
-    # Zero indexed start, 0-indexed exclusive end
-    def __init__(self, contig, start, end):
-        assert end >= start
-        self.contig = contig
-        self.start = start
-        self.end = end
+# class Range:
+#     # Zero indexed start, 0-indexed exclusive end
+#     def __init__(self, contig, start, end):
+#         assert end >= start
+#         self.contig = contig
+#         self.start = start
+#         self.end = end
 
-    @classmethod
-    def parse_literal(cls, region):
-        contig, start, end = parse_region(region=region)
-        return Range(contig, start, end)
+#     @classmethod
+#     def parse_literal(cls, region):
+#         contig, start, end = parse_region(region=region)
+#         return Range(contig, start, end)
 
-    @classmethod
-    def parse_slug(cls, slug):
-        contig, start, end = slug.split("_")
-        return Range(contig, int(start), int(end))
+#     @classmethod
+#     def parse_slug(cls, slug):
+#         contig, start, end = slug.split("_")
+#         return Range(contig, int(start), int(end))
 
-    def __eq__(self, rhs):
-        return isinstance(rhs, Range) and self.contig == rhs.contig and self.start == rhs.start and self.end == rhs.end
+#     def __eq__(self, rhs):
+#         return isinstance(rhs, Range) and self.contig == rhs.contig and self.start == rhs.start and self.end == rhs.end
 
-    def __le__(self, rhs):
-        return isinstance(rhs, Range) and self.contig == rhs.contig and self.start >= rhs.start and self.end <= rhs.end
+#     def __le__(self, rhs):
+#         return isinstance(rhs, Range) and self.contig == rhs.contig and self.start >= rhs.start and self.end <= rhs.end
 
-    def __lt__(self, rhs):
-        return isinstance(rhs, Range) and self.contig == rhs.contig and ((self.start >= rhs.start and self.end < rhs.end) or (self.start > rhs.start and self.end <= rhs.end))
+#     def __lt__(self, rhs):
+#         return isinstance(rhs, Range) and self.contig == rhs.contig and ((self.start >= rhs.start and self.end < rhs.end) or (self.start > rhs.start and self.end <= rhs.end))
 
-    def __str__(self):
-        return f"{self.contig}:{self.start+1}-{self.end}"
+#     def __str__(self):
+#         return f"{self.contig}:{self.start+1}-{self.end}"
 
-    def __hash__(self):
-        return hash((self.contig, self.start, self.end))
+#     def __hash__(self):
+#         return hash((self.contig, self.start, self.end))
 
-    def __len__(self):
-        return self.end - self.start
+#     def __len__(self):
+#         return self.end - self.start
 
-    @property
-    def slug(self):
-        return f"{self.contig}_{self.start}_{self.end}"
+#     @property
+#     def slug(self):
+#         return f"{self.contig}_{self.start}_{self.end}"
 
-    @property
-    def length(self):
-        return self.end - self.start
+#     @property
+#     def length(self):
+#         return self.end - self.start
 
-    @property
-    def pysam_fetch(self):
-        return {"contig": self.contig, "start": self.start, "stop": self.end}
+#     @property
+#     def pysam_fetch(self):
+#         return {"contig": self.contig, "start": self.start, "stop": self.end}
 
-    @property
-    def center(self):
-        start = self.start + self.length // 2
-        return Range(self.contig, start, start)
+#     @property
+#     def center(self):
+#         start = self.start + self.length // 2
+#         return Range(self.contig, start, start)
 
-    def contains(self, point: int):
-        return self.start <= point < self.end
+#     def contains(self, point: int):
+#         return self.start <= point < self.end
 
-    # TODO: Add contig map
-    def expand(self, left_or_both, right=None):
-        if right is None:
-            right = left_or_both
-        new_start = max(self.start - left_or_both, 0)
-        new_end = self.end + right
-        return Range(self.contig, new_start, new_end)
+#     # TODO: Add contig map
+#     def expand(self, left_or_both, right=None):
+#         if right is None:
+#             right = left_or_both
+#         new_start = max(self.start - left_or_both, 0)
+#         new_end = self.end + right
+#         return Range(self.contig, new_start, new_end)
 
-    def overlaps(self, other: "Range") -> bool:
-        return self.contig == other.contig and other.start < self.end and self.start < other.end
+#     def overlaps(self, other: "Range") -> bool:
+#         return self.contig == other.contig and other.start < self.end and self.start < other.end
 
-    def get_overlap(self, has_region):
-        # Tried @singledispatchmethod, but couldn't make it work for Range inputs
-        if isinstance(has_region, AlignedSegment):
-            if has_region.reference_name != self.contig:
-                return 0
-            return has_region.get_overlap(self.start, self.end)
-        if isinstance(has_region, Range):
-            if self.contig != has_region.contig:
-                return 0
-            return max(0, min(self.end, has_region.end) - max(self.start, has_region.start))
-        raise NotImplementedError
+#     def get_overlap(self, has_region):
+#         # Tried @singledispatchmethod, but couldn't make it work for Range inputs
+#         if isinstance(has_region, AlignedSegment):
+#             if has_region.reference_name != self.contig:
+#                 return 0
+#             return has_region.get_overlap(self.start, self.end)
+#         if isinstance(has_region, Range):
+#             if self.contig != has_region.contig:
+#                 return 0
+#             return max(0, min(self.end, has_region.end) - max(self.start, has_region.start))
+#         raise NotImplementedError
 
-    def union(self, other: "Range") -> "Range":
-        if self.contig != other.contig:
-            msg = "Can't union Ranges with different contigs"
-            raise ValueError(msg)
-        return Range(self.contig, min(self.start, other.start), max(self.end, other.end))
+#     def union(self, other: "Range") -> "Range":
+#         if self.contig != other.contig:
+#             msg = "Can't union Ranges with different contigs"
+#             raise ValueError(msg)
+#         return Range(self.contig, min(self.start, other.start), max(self.end, other.end))
 
-    def intersection(self, other: "Range") -> "Range":
-        if self.contig != other.contig or other.start >= self.end or self.start >= other.end:
-            return Range("", 0, 0)
-        return Range(self.contig, max(self.start, other.start), min(self.end, other.end))
+#     def intersection(self, other: "Range") -> "Range":
+#         if self.contig != other.contig or other.start >= self.end or self.start >= other.end:
+#             return Range("", 0, 0)
+#         return Range(self.contig, max(self.start, other.start), min(self.end, other.end))
 
-    def window(self, size):
-        assert self.length % size == 0
-        return [Range(self.contig, s, s + size) for s in range(self.start, self.end, size)]
+#     def window(self, size):
+#         assert self.length % size == 0
+#         return [Range(self.contig, s, s + size) for s in range(self.start, self.end, size)]
 
 
 class RangeTree:
