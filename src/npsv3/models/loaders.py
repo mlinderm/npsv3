@@ -199,6 +199,8 @@ def _pack_and_pad_images(
                 padding_value=padding_value,
             )
 
+            print(f"Images batched: {num_images}")
+
             # Reset for the next batch
             query_images.clear()
             support_images.clear()

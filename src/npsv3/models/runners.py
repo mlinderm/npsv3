@@ -4,6 +4,7 @@ import torch
 from omegaconf import OmegaConf
 
 from npsv3.models.paired import WorstLossCallback
+from lightning.pytorch.profilers import PyTorchProfiler
 
 
 def load_model_from_checkpoint(cfg, *, strict=True):
@@ -53,6 +54,11 @@ def train(cfg, output_dir=None, **kw_args):
     # Skip testing if no testing data provided
     limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if cfg.data.test_urls else 0
 
+    profiler = PyTorchProfiler(
+        on_trace_ready=torch.profiler.tensorboard_trace_handler("./logs/profiler"),
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+    )
+
     trainer = hydra.utils.instantiate(
         cfg.trainer,
         # Decrease TQDM progress refresh rate to mitigate performance issues
@@ -60,6 +66,7 @@ def train(cfg, output_dir=None, **kw_args):
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
+        profiler=profiler,
         **kw_args,
     )
 

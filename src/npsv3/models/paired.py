@@ -82,6 +82,8 @@ class InOutEncoder(nn.Module):
         return set()
 
     def forward(self, x):
+        print("DINO forward")
+
         if x.ndim != 4:
             msg = f"Expected 4D input (B,C,H,W), got shape {tuple(x.shape)}"
             raise ValueError(msg)
@@ -102,6 +104,7 @@ class InOutEncoder(nn.Module):
             embeddings.append(chunk_emb)
 
         embeddings = torch.cat(embeddings, dim=0)
+        print("End of DINO forward")
         return self.post_dino_layer(embeddings)
 
 
@@ -387,6 +390,8 @@ class PackedVariant(L.LightningModule):
         # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
         # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
         labels_nt = torch.nested.nested_tensor_from_jagged(labels, offsets=offsets, max_seqlen=max_support)
+
+        print("End of PackedVariant forward")
 
         return (metrics, preds, labels_nt, *metadata)
 
