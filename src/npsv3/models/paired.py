@@ -21,7 +21,7 @@ from npsv3.models.metrics import (
 )
 from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
 
-
+'''
 class PostDinoConvLayer(nn.Module):
     def __init__(self, input_dim, output_dim=None):
         super().__init__()
@@ -102,6 +102,127 @@ class InOutEncoder(nn.Module):
             embeddings.append(chunk_emb)
 
         embeddings = torch.cat(embeddings, dim=0)
+        return self.post_dino_layer(embeddings)
+'''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoImageProcessor, AutoModel
+
+
+class PostDinoConvLayer(nn.Module):
+    def __init__(self, input_dim, output_dim=None):
+        super().__init__()
+
+        output_dim = output_dim or input_dim
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.BatchNorm1d(input_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(input_dim, output_dim),
+        )
+
+    def forward(self, x):
+        x = self.mlp(x)
+        return F.normalize(x, p=2, dim=1, eps=1e-6)
+
+
+class InOutEncoder(nn.Module):
+    def __init__(
+        self,
+        dino_model="facebook/dinov3-vitl16-pretrain-lvd1689m",
+        chunk_size=4,
+        num_channels=7,
+        projection_size=512,
+    ):
+        super().__init__()
+
+        self.chunk_size = chunk_size
+
+        # --------------------------------------------------
+        # DINO normalization statistics
+        # --------------------------------------------------
+        processor = AutoImageProcessor.from_pretrained(dino_model)
+
+        self.register_buffer(
+            "mean",
+            torch.tensor(processor.image_mean, dtype=torch.float32).view(1, 3, 1, 1),
+        )
+        self.register_buffer(
+            "std",
+            torch.tensor(processor.image_std, dtype=torch.float32).view(1, 3, 1, 1),
+        )
+
+        # --------------------------------------------------
+        # Learnable channel adapter
+        # --------------------------------------------------
+        self.adapter = nn.Sequential(
+            nn.BatchNorm2d(num_channels),
+
+            nn.Conv2d(num_channels, 32, kernel_size=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(32, 16, kernel_size=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(16, 3, kernel_size=1),
+        )
+
+        # --------------------------------------------------
+        # Frozen DINO backbone
+        # --------------------------------------------------
+        self.backbone = AutoModel.from_pretrained(dino_model)
+        self.backbone.config.use_cache = False
+
+        self.backbone.requires_grad_(False)
+        self.backbone.eval()
+
+        # --------------------------------------------------
+        # Projection head
+        # --------------------------------------------------
+        self.post_dino_layer = PostDinoConvLayer(
+            input_dim=self.backbone.config.hidden_size,
+            output_dim=projection_size,
+        )
+
+    def no_weight_decay(self):
+        return set()
+
+    @torch.no_grad()
+    def _run_backbone(self, x):
+        outputs = self.backbone(pixel_values=x)
+        return outputs.last_hidden_state[:, 0]
+
+    def forward(self, x):
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected input of shape (B,C,H,W), got {tuple(x.shape)}"
+            )
+
+        # Convert arbitrary channel count to RGB
+        x = self.adapter(x)
+
+        # Resize to DINO resolution
+        x = F.interpolate(
+            x,
+            size=(128, 128),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # ImageNet normalization expected by DINO
+        x = (x - self.mean) / self.std
+
+        embeddings = []
+
+        for chunk in x.split(self.chunk_size):
+            embeddings.append(self._run_backbone(chunk))
+
+        embeddings = torch.cat(embeddings, dim=0)
+
         return self.post_dino_layer(embeddings)
 
 
