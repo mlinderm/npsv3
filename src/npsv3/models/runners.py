@@ -60,6 +60,7 @@ def train(cfg, output_dir=None, **kw_args):
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
+        profiler="simple",
         **kw_args,
     )
 
