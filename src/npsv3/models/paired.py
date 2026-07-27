@@ -209,12 +209,14 @@ class InOutEncoder(nn.Module):
         x = self.adapter(x)
 
         # Resize to DINO resolution
-        x = F.interpolate(
-            x,
-            size=(128, 128),
-            mode="bilinear",
-            align_corners=False,
-        )
+        # x = F.interpolate(
+        #     x,
+        #     size=(128, 128),
+        #     mode="bilinear",
+        #     align_corners=False,
+        # )
+
+        print(x.shape)
 
         # ImageNet normalization expected by DINO
         x = (x - self.mean) / self.std
