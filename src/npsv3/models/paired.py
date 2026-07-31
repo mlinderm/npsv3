@@ -178,10 +178,13 @@ class InOutEncoder(nn.Module):
         # Frozen DINO backbone
         # --------------------------------------------------
         self.backbone = AutoModel.from_pretrained(dino_model)
+        self.backbone.eval()
         self.backbone.config.use_cache = False
 
-        self.backbone.requires_grad_(False)
-        self.backbone.eval()
+        # self.backbone.requires_grad_(False)
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        
 
         # --------------------------------------------------
         # Projection head
@@ -194,19 +197,19 @@ class InOutEncoder(nn.Module):
     def no_weight_decay(self):
         return set()
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def _run_backbone(self, x):
         outputs = self.backbone(pixel_values=x)
         return outputs.last_hidden_state[:, 0]
 
-    def forward(self, x):
-        if x.ndim != 4:
+    def forward(self, inputs):
+        if inputs.ndim != 4:
             raise ValueError(
-                f"Expected input of shape (B,C,H,W), got {tuple(x.shape)}"
+                f"Expected input of shape (B,C,H,W), got {tuple(inputs.shape)}"
             )
 
         # Convert arbitrary channel count to RGB
-        x = self.adapter(x)
+        conved_inputs = self.adapter(inputs)
 
         # Resize to DINO resolution
         # x = F.interpolate(
@@ -216,17 +219,22 @@ class InOutEncoder(nn.Module):
         #     align_corners=False,
         # )
 
-        print(x.shape)
+        # print(x.shape)
 
         # ImageNet normalization expected by DINO
-        x = (x - self.mean) / self.std
+        conved_inputs = (conved_inputs - self.mean) / self.std
 
-        embeddings = []
+        # print("before running checkpoint")
 
-        for chunk in x.split(self.chunk_size):
-            embeddings.append(self._run_backbone(chunk))
+        embeddings = checkpoint(
+            self._run_backbone,
+            conved_inputs,
+            use_reentrant=False
+        )
 
-        embeddings = torch.cat(embeddings, dim=0)
+        # print("after running checkpoint")
+
+        # embeddings = torch.cat(embeddings, dim=0)
 
         return self.post_dino_layer(embeddings)
 
@@ -514,7 +522,7 @@ class PackedVariant(L.LightningModule):
         # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
         labels_nt = torch.nested.nested_tensor_from_jagged(labels, offsets=offsets, max_seqlen=max_support)
 
-        print("End of PackedVariant forward")
+        # print("End of PackedVariant forward")
 
         return (metrics, preds, labels_nt, *metadata)
 
@@ -580,14 +588,17 @@ class PackedVariant(L.LightningModule):
 
     def configure_optimizers(self):
         if self.hparams.scheduler is None:
-            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+            # optimizer = self.hparams.optimizer(params = filter(lambda p: p.requires_grad, self.trainer.model.parameters()))
+            optimizer = self.hparams.optimizer(params = self.trainer.model.parameters())
+            print("Configured optimizer without scheduler")
             return { "optimizer": optimizer }
 
         # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
-        optimizer = create_optimizer_v2(self.trainer.model, "adamw")
+        optimizer = create_optimizer_v2(filter(lambda p: p.requires_grad, self.trainer.model.parameters()), "adamw")
         # TODO: Revise for current timm implementation
         #optimizer = self.hparams.optimizer(self.trainer.model)
         scheduler= self.hparams.scheduler(optimizer=optimizer)
+        print("COnfigured optimizer with scheduler")
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
     def lr_scheduler_step(self, scheduler, metric):
