@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,6 +20,49 @@
 #include "variant.hpp"
 
 namespace npsv3 {
+
+namespace {
+// Ad hoc, opt-in (NPSV3_HAPLOTYPE_PROFILE=1) timing breakdown for PropagateBestPathStateAdaptively, to separate
+// the higher-level algorithmic cost drivers documented in PERFORMANCE_NOTES.md: (1) the per-sampled-haplotype
+// repeat of the *entire* DP (SampleHaplotypes calls this once per haplotype), (2) adaptive-widening retries
+// within a single call (each a full extra forward pass), (3) beam-width growth's effect on a single forward
+// pass's cost, and (4) ComputeScoreToGo's fixed backward-sweep cost, paid once per call regardless of width.
+// Negligible overhead when disabled (one getenv call, cached in a function-local static).
+bool HaplotypeProfilingEnabled() {
+  static const bool enabled = std::getenv("NPSV3_HAPLOTYPE_PROFILE") != nullptr;
+  return enabled;
+}
+
+using ProfileClock = std::chrono::steady_clock;
+double ElapsedMs(ProfileClock::time_point start) {
+  return std::chrono::duration<double, std::milli>(ProfileClock::now() - start).count();
+}
+
+// Process-wide resident memory, sampled from /proc/self/status. rss_kb is the *current* resident set
+// (drops when the allocator returns freed pages to the OS, which it often doesn't promptly -- so this can
+// stay elevated after a discarded widening attempt's C++ objects are destroyed); hwm_kb ("high water mark")
+// is the peak resident set since process start and is monotonically non-decreasing, i.e. the number that
+// actually predicts OOM-kill risk. Linux-only (matches this project's documented environment); returns
+// zeros if /proc/self/status is unavailable rather than failing the (opt-in, diagnostic-only) measurement.
+struct RssSample {
+  long rss_kb = 0;
+  long hwm_kb = 0;
+};
+
+RssSample CurrentRss() {
+  RssSample sample;
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (line.compare(0, 6, "VmRSS:") == 0) {
+      sample.rss_kb = std::strtol(line.c_str() + 6, nullptr, 10);
+    } else if (line.compare(0, 6, "VmHWM:") == 0) {
+      sample.hwm_kb = std::strtol(line.c_str() + 6, nullptr, 10);
+    }
+  }
+  return sample;
+}
+}  // namespace
 
 // -----------------------------------------------------------------------------------------------
 // The Aho-Corasick automaton: structure and how the forward DP queries it
@@ -31,10 +78,10 @@ namespace npsv3 {
 //   fail             the state for the longest proper suffix of this state's own path that is also
 //                    some other state's path (root if none) -- lets matching resume without rescanning
 //                    the text after a goto_ miss
-//   output_kmers_    every k-mer whose location ends exactly here, including via failure links -- built
-//                    during construction as own_kmer_set_[state] (k-mers whose location is *exactly*
-//                    this state's path) unioned with the failure target's already-computed
-//                    output_kmers_.
+//   output_kmer_indices_  every k-mer whose location ends exactly here, including via failure links --
+//                    built during construction as own_kmer_set_[state] (k-mers whose location is *exactly*
+//                    this state's path) unioned with the failure target's already-computed output set,
+//                    then flattened to a sparse index list to improve performance and memory usage.
 //
 // AutomatonGoto(state, node_id) is the *effective* (fail-chasing) transition: follow goto_ if present,
 // otherwise walk fail links until one has a goto_ for node_id, otherwise land on root. This is the
@@ -43,12 +90,12 @@ namespace npsv3 {
 //
 // The DP consumes a path by calling, once per real graph node it visits:
 //     state = AutomatonGoto(state, node_id);
-//     score += KmerSetScoreDelta(automaton_[state].output_kmers_);
-// starting from state = kAutomatonRoot. Because output_kmers_ already includes every key ending at
-// that state (via failure links), this single call correctly credits *all* keys -- short or long,
-// nested or overlapping -- that end at this node, without the DP ever needing to special-case a
+//     score += KmerSetScoreDelta(state);
+// starting from state = kAutomatonRoot. Because output_kmer_indices_ already includes every key ending at
+// that state (via failure links), this single call correctly credits *all* keys, short or long,
+// nested or overlapping, which end at this node, without the DP ever needing to special-case a
 // multi-node key as an atomic edge. KmersOnPath does the same walk over a complete path to compute the
-// same set (used by Score/UpdateScores/SampleDiplotypes) -- it is not a separate implementation.
+// same set (used by Score/UpdateScores/SampleDiplotypes).
 //
 // Concrete example (this is exactly the fixture in OverlappingKeyTest, tests/native/test_haplotype.cpp):
 // two keys that overlap by two nodes: P at [1,3,4] and R at [3,4,6] (node ids on a graph
@@ -62,7 +109,7 @@ namespace npsv3 {
 //    4/                 \6
 //   3  <- own={P}         6  <- own={R}
 //
-//   state  path      goto_        fail    output_kmers_
+//   state  path      goto_        fail    output_kmer_indices_
 //   0      []        {1:1, 3:4}   -       {}
 //   1      [1]       {3:2}        0       {}
 //   4      [3]       {4:5}        0       {}
@@ -84,7 +131,65 @@ namespace npsv3 {
 // A single DP lineage walking node-by-node therefore credits *both* P (at node 4) and R (at node 6)
 // on the same path even though R's key starts partway *through* P's key.
 
+// -----------------------------------------------------------------------------------------------
+// GotoMap: out-of-line implementation (declared in haplotype.hpp, see the class comment there)
+// -----------------------------------------------------------------------------------------------
+
+HaplotypeSamplerOverlay::GotoMap::GotoMap(const GotoMap& other)
+    : inline_keys_(other.inline_keys_), inline_values_(other.inline_values_), size_(other.size_),
+      overflow_(other.overflow_ ? std::make_unique<std::unordered_map<odgi::nid_t, AutomatonIndex>>(*other.overflow_)
+                                 : nullptr) {}
+
+HaplotypeSamplerOverlay::GotoMap& HaplotypeSamplerOverlay::GotoMap::operator=(const GotoMap& other) {
+  if (this == &other) return *this;
+  inline_keys_ = other.inline_keys_;
+  inline_values_ = other.inline_values_;
+  size_ = other.size_;
+  overflow_ = other.overflow_ ? std::make_unique<std::unordered_map<odgi::nid_t, AutomatonIndex>>(*other.overflow_)
+                               : nullptr;
+  return *this;
+}
+
+const HaplotypeSamplerOverlay::AutomatonIndex* HaplotypeSamplerOverlay::GotoMap::find(odgi::nid_t node_id) const {
+  if (overflow_) {
+    auto it = overflow_->find(node_id);
+    return it != overflow_->end() ? &it->second : nullptr;
+  }
+  for (size_t i = 0; i < size_; ++i) {
+    if (inline_keys_[i] == node_id) return &inline_values_[i];
+  }
+  return nullptr;
+}
+
+void HaplotypeSamplerOverlay::GotoMap::emplace(odgi::nid_t node_id, AutomatonIndex child) {
+  if (overflow_) {
+    overflow_->emplace(node_id, child);
+    return;
+  }
+  if (size_ < kInlineCapacity) {
+    inline_keys_[size_] = node_id;
+    inline_values_[size_] = child;
+    ++size_;
+    return;
+  }
+  overflow_ = std::make_unique<std::unordered_map<odgi::nid_t, AutomatonIndex>>();
+  for (size_t i = 0; i < size_; ++i) overflow_->emplace(inline_keys_[i], inline_values_[i]);
+  overflow_->emplace(node_id, child);
+}
+
+size_t HaplotypeSamplerOverlay::GotoMap::size() const { return overflow_ ? overflow_->size() : size_; }
+
+template <typename Fn>
+void HaplotypeSamplerOverlay::GotoMap::for_each(Fn&& fn) const {
+  if (overflow_) {
+    for (const auto& [node_id, child] : *overflow_) fn(node_id, child);
+  } else {
+    for (size_t i = 0; i < size_; ++i) fn(inline_keys_[i], inline_values_[i]);
+  }
+}
+
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
+    HaplotypeSamplerCommonCtor,
     const Graph& graph, const std::vector<std::string>& sequences,
     const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params)
     : graph_(graph), params_(params), apply_path_filter_(false), kmer_sequences_(sequences) {
@@ -98,7 +203,8 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
 
   // Build the Aho-Corasick automaton directly from each k-mer's own recorded location(s) to enable matching
   // k-mers that span multiple handles.
-  automaton_.emplace_back(num_kmers); // root = kAutomatonRoot (0)
+  automaton_.emplace_back(); // root = kAutomatonRoot (0)
+  trie_symbol_mask_.resize(graph_.max_node_id() + 1);
 
   // k-mers whose location is *exactly* this state's path. Made sparse since not all states are terminal for some k-mer.
   std::unordered_map<size_t, KmerIdSet> own_kmer_set;
@@ -110,14 +216,15 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
       size_t state = kAutomatonRoot;
       for (const auto& handle : handles) {
         auto node_id = graph_.get_id(handle);
-        auto child_it = automaton_[state].goto_.find(node_id);
+        trie_symbol_mask_.set(node_id);
+        const auto* child_ptr = automaton_[state].goto_.find(node_id);
         size_t child;
-        if (child_it == automaton_[state].goto_.end()) {
+        if (!child_ptr) {
           child = automaton_.size();
-          automaton_.emplace_back(num_kmers); // May reallocate automaton_; index (not reference) into it afterward
+          automaton_.emplace_back(); // May reallocate automaton_; index (not reference) into it afterward
           automaton_[state].goto_.emplace(node_id, child);
         } else {
-          child = child_it->second;
+          child = *child_ptr;
         }
         state = child;
       }
@@ -125,21 +232,30 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
     }
   }
 
-  // BFS to compute failure links and output_kmers_ (standard Aho-Corasick construction). BFS visits
-  // states in non-decreasing depth order, and a state's failure link always points to a strictly
-  // shallower state, so each state's failure target's output_kmers_ is already finalized when needed.
+  // BFS to compute failure links and output_kmer_indices_ (standard Aho-Corasick construction, adapted to
+  // store each state's output set as a sparse index list rather than a dense per-state bitset). A state's
+  // full output set is the union of its failure target's (already-finalized) output set and its own k-mers.
+  // We build this as a scratch bitset then convert to sparse indices. BFS visits states in non-decreasing
+  // depth order, and a state's failure link always points to a strictly shallower state, so each state's
+  // failure target's full_output entry is already finalized when needed.
+  std::vector<KmerIdSet> full_output(automaton_.size(), KmerIdSet(num_kmers));
   std::queue<size_t> to_visit;
-  for (auto& [node_id, child] : automaton_[kAutomatonRoot].goto_) {
+  automaton_[kAutomatonRoot].goto_.for_each([&](odgi::nid_t /*node_id*/, size_t child) {
     automaton_[child].fail = kAutomatonRoot;
     to_visit.push(child);
-  }
+  });
   while (!to_visit.empty()) {
     size_t state = to_visit.front();
     to_visit.pop();
 
-    automaton_[state].output_kmers_ = automaton_[automaton_[state].fail].output_kmers_;
+    KmerIdSet& state_output = full_output[state];
+    state_output = full_output[automaton_[state].fail];
     if (auto it = own_kmer_set.find(state); it != own_kmer_set.end()) {
-      automaton_[state].output_kmers_ |= it->second;
+      state_output |= it->second;
+    }
+    auto& indices = automaton_[state].output_kmer_indices_;
+    for (size_t kmer_idx = state_output.find_first(); kmer_idx != KmerIdSet::npos; kmer_idx = state_output.find_next(kmer_idx)) {
+      indices.push_back(static_cast<uint32_t>(kmer_idx));
     }
 
     // Standard construction: fail[child] = goto*(fail[state], node_id) is the state reached by taking
@@ -147,25 +263,56 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
     // the DP uses at query time (AutomatonGoto). Safe to call here: goto_ is fully built for every
     // state before this BFS starts, and fail[state] always points to a strictly shallower state, whose
     // own .fail chain BFS has already been finalized.
-    for (auto& [node_id, child] : automaton_[state].goto_) {
+    automaton_[state].goto_.for_each([&](odgi::nid_t node_id, size_t child) {
       automaton_[child].fail = AutomatonGoto(automaton_[state].fail, node_id);
       to_visit.push(child);
-    }
+    });
   }
 }
 
-HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers, const Params& params)
-    : HaplotypeSamplerOverlay(graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
+HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
+    const Graph& graph, const std::vector<std::string>& sequences,
+    const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params)
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, sequences, locations, params) {
+  InitializeContributesPathsMask();
+}
+
+HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
+                                                 const Params& params)
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
+  InitializeContributesPathsMask();
 }
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
                                                  const std::string& inference_vcf, const Range& region,
                                                  size_t min_size, const Params& params)
-    : HaplotypeSamplerOverlay(graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
   // Initialize inference VCF filtering
   apply_path_filter_ = true;
   graph.PopulateNodeAndPathMasks(inference_vcf, region, min_size, inference_node_mask_, inference_path_mask_);
   assert(inference_path_mask_.any());
+
+  // Initialize the contributes_paths_mask_ based on the inference masks, so that we can do fast
+  // propagation of covered_paths when the current node doesn't contribute any new paths.
+  InitializeContributesPathsMask();
+}
+
+void HaplotypeSamplerOverlay::InitializeContributesPathsMask() {
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+
+  contributes_paths_mask_.clear();
+  contributes_paths_mask_.resize(max_id + 1);
+  for (odgi::nid_t i = min_id; i <= max_id; ++i) {
+    if (!graph_.has_node(i)) continue;
+    // Mirrors accumulate_covered_paths's condition in PropagateBestPathState exactly: a node "contributes"
+    // iff that lambda would actually set a new bit for it.
+    if (!apply_path_filter_) {
+      if (graph_.node_variant_paths_[i].any()) contributes_paths_mask_.set(i);
+    } else if (inference_node_mask_.test(i) && (graph_.node_variant_paths_[i] & inference_path_mask_).any()) {
+      contributes_paths_mask_.set(i);
+    }
+  }
 }
 
 void HaplotypeSamplerOverlay::InitializeScores(const KmerClassify& counts) {
@@ -196,16 +343,24 @@ namespace {
   template<typename T>
   void DedupCoveredPaths(T& backtrack) {
     if (backtrack.empty()) return;
+    // covered_paths is an immutable, refcounted PathIdSetHolder to enable fast "shallow" copies when
+    // there are no changes. First check for pointer equality, then hash equality and then bits. Only
+    // entries with *different* holders fall back to comparing ->hash and, on a hash tie, ->bits (potentially
+    // thousands of bits). Since equal covered_paths always hash equal, this can never merge or split groups
+    // differently than comparing covered_paths directly.
     std::sort(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) {
+      if (a.covered_paths == b.covered_paths) return a.score > b.score;
+      if (a.covered_paths->hash != b.covered_paths->hash) return a.covered_paths->hash > b.covered_paths->hash;
       // Group by covered_paths first, then sort by descending score within groups
-      if (a.covered_paths == b.covered_paths) {
+      if (a.covered_paths->bits == b.covered_paths->bits) {
         return a.score > b.score;
       }
-      return a.covered_paths > b.covered_paths;
+      return a.covered_paths->bits > b.covered_paths->bits;
     });
     // Retain only the highest-scoring representative per inference equivalence class.
     auto last = std::unique(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) {
-      return a.covered_paths == b.covered_paths;
+      return a.covered_paths == b.covered_paths ||
+             (a.covered_paths->hash == b.covered_paths->hash && a.covered_paths->bits == b.covered_paths->bits);
     });
     backtrack.resize(std::distance(backtrack.begin(), last));
   }
@@ -238,36 +393,56 @@ namespace {
 }
 
 size_t HaplotypeSamplerOverlay::AutomatonGoto(size_t state, odgi::nid_t node_id) const {
+  // node_id never appears in any k-mer's recorded location, at any depth of any state's goto_/fail chain,
+  // so every goto_.find(node_id) below is guaranteed to miss regardless of starting state. Skip straight
+  // to the root, the only possible result, instead of walking the fail chain to discover the same result.
+  if (!trie_symbol_mask_.test(node_id)) return kAutomatonRoot;
   while (state != kAutomatonRoot) {
-    auto it = automaton_[state].goto_.find(node_id);
-    if (it != automaton_[state].goto_.end()) return it->second;
+    if (const auto* child = automaton_[state].goto_.find(node_id)) return *child;
     state = automaton_[state].fail;
   }
-  auto it = automaton_[kAutomatonRoot].goto_.find(node_id);
-  return it != automaton_[kAutomatonRoot].goto_.end() ? it->second : kAutomatonRoot;
+  const auto* child = automaton_[kAutomatonRoot].goto_.find(node_id);
+  return child ? *child : kAutomatonRoot;
 }
 
-double HaplotypeSamplerOverlay::KmerSetScoreDelta(const KmerIdSet& set) const {
+double HaplotypeSamplerOverlay::KmerSetScoreDelta(AutomatonIndex state) const {
+  // Empty for the (overwhelming majority of) states with no pending/completing k-mer match.
   double total = 0.0;
-  for (size_t kmer_idx = set.find_first(); kmer_idx != KmerIdSet::npos; kmer_idx = set.find_next(kmer_idx)) {
+  for (auto kmer_idx : automaton_[state].output_kmer_indices_) {
     total += kmers_[kmer_idx].score;
   }
   return 2.0 * total;
 }
 
-std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
-  auto path_state = PropagateBestPathStateAdaptively(n);
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::ExtractBestPaths(const BestPathState& path_state) const {
   const auto & best_paths = path_state.back().at(kAutomatonRoot); // Sink pools are always merged under this one key
 
   std::vector<Haplotype> result;
   result.reserve(best_paths.size());
   for (size_t back_idx = 0; back_idx < best_paths.size(); ++back_idx) {
-    if (apply_path_filter_ && best_paths[back_idx].covered_paths.none()) {
+    if (apply_path_filter_ && best_paths[back_idx].covered_paths->bits.none()) {
       continue; // Skip paths that do not cover any inference paths when filtering is active
     }
     result.push_back(std::move(BacktrackPath(path_state, kAutomatonRoot, back_idx).first));
   }
   return result;
+}
+
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
+  return FindBestPaths(n, nullptr);
+}
+
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n, size_t* attempts_used) const {
+  auto result = ExtractBestPaths(PropagateBestPathStateAdaptively(n, /*max_widening=*/8, attempts_used));
+  // The adaptive loop's settled width can exceed n (widening enlarges the beam to *certify* the top n,
+  // not to deliberately return more); trim back to the documented "up to n" contract. Safe because
+  // ExtractBestPaths' backing pool is already sorted by descending score, so this keeps the best n.
+  if (result.size() > n) result.resize(n);
+  return result;
+}
+
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPathsFixedWidth(size_t n) const {
+  return ExtractBestPaths(PropagateBestPathState(n));
 }
 
 HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(
@@ -298,6 +473,9 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
       covered_paths |= (graph_.node_variant_paths_[node_id] & inference_path_mask_);
     }
   };
+  auto make_covered_paths = [](Graph::PathIdSet bits) -> SharedPathIdSet {
+    return SharedPathIdSet(new PathIdSetHolder(std::move(bits)));
+  };
 
   // Seed the source node: a virtual transition from the automaton's root consuming min_id itself, exactly
   // mirroring how every other node's arrival is processed below.
@@ -306,11 +484,11 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     Graph::PathIdSet seed_covered_paths(covered_paths_size);
     accumulate_covered_paths(seed_covered_paths, min_id);
     dp[0][seed_state].push_back({
-      min_score + KmerSetScoreDelta(automaton_[seed_state].output_kmers_),
+      min_score + KmerSetScoreDelta(seed_state),
       0,  // no predecessor node
       kAutomatonRoot, // irrelevant without predecessor node
       0, // irrelevant without predecessor node
-      std::move(seed_covered_paths)
+      make_covered_paths(std::move(seed_covered_paths))
     });
   }
 
@@ -337,14 +515,25 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     graph_.follow_edges(graph_.get_handle(i), false /* forward */, [&](const handlegraph::handle_t& next) {
       auto next_node = graph_.get_id(next);
       auto& next_node_state = dp[next_node - min_id];
+      // contributes_paths_mask_ is a static property of next_node (independent of any predecessor's
+      // covered_paths), so it's safe to test once per edge rather than once per (automaton_state, b_idx).
+      // When false, no b_idx below can possibly gain a new path bit at next_node -- share the predecessor's
+      // PathIdSetHolder (cheap refcount bump, reuses its cached hash) instead of copying, et al.
+      const bool contributes = contributes_paths_mask_.test(next_node);
 
       for (auto& [automaton_state, pool] : node_state) {
         size_t new_state = AutomatonGoto(automaton_state, next_node);
-        double weight_delta = KmerSetScoreDelta(automaton_[new_state].output_kmers_);
+        double weight_delta = KmerSetScoreDelta(new_state);
         auto& next_pool = next_node_state[new_state];
         for (size_t b_idx = 0; b_idx < pool.size(); ++b_idx) {
-          Graph::PathIdSet new_covered_paths = pool[b_idx].covered_paths;
-          accumulate_covered_paths(new_covered_paths, next_node);
+          SharedPathIdSet new_covered_paths;
+          if (contributes) {
+            Graph::PathIdSet bits = pool[b_idx].covered_paths->bits;
+            accumulate_covered_paths(bits, next_node);
+            new_covered_paths = make_covered_paths(std::move(bits));
+          } else {
+            new_covered_paths = pool[b_idx].covered_paths; // unchanged -- share, don't copy
+          }
           next_pool.push_back({
             pool[b_idx].score + weight_delta,
             i, // predecessor node
@@ -399,9 +588,19 @@ HaplotypeSamplerOverlay::ScoreToGoTable HaplotypeSamplerOverlay::ComputeScoreToG
     graph_.follow_edges(graph_.get_handle(i), false /* forward */, [&](const handlegraph::handle_t& next) {
       auto next_node = graph_.get_id(next);
       const auto& next_row = score_to_go[next_node - min_id];
+      if (!trie_symbol_mask_.test(next_node)) {
+        // next_node never appears in any k-mer location, so AutomatonGoto(s, next_node) == kAutomatonRoot
+        // (and KmerSetScoreDelta(kAutomatonRoot) == 0.0, since output_kmer_indices_ is always empty at the root)
+        // for *every* state s -- every row[s] is max'd with the identical constant. Skip the per-state
+        // AutomatonGoto/KmerSetScoreDelta calls (the dominant cost of this function, since it otherwise
+        // runs them for every state on every edge) in favor of a plain branchless max sweep.
+        double val = next_row[kAutomatonRoot];
+        for (size_t s = 0; s < num_states; ++s) row[s] = std::max(row[s], val);
+        return true;
+      }
       for (size_t s = 0; s < num_states; ++s) {
         size_t new_state = AutomatonGoto(s, next_node);
-        double weight_delta = KmerSetScoreDelta(automaton_[new_state].output_kmers_);
+        double weight_delta = KmerSetScoreDelta(new_state);
         row[s] = std::max(row[s], weight_delta + next_row[new_state]);
       }
       return true;
@@ -411,8 +610,43 @@ HaplotypeSamplerOverlay::ScoreToGoTable HaplotypeSamplerOverlay::ComputeScoreToG
   return score_to_go;
 }
 
-HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathStateAdaptively(size_t n, size_t max_widening) const {
+HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathStateAdaptively(size_t n, size_t max_widening, size_t* attempts_used) const {
+  const bool profiling = HaplotypeProfilingEnabled();
+  static size_t call_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
+  size_t this_call = profiling ? call_index++ : 0;
+  auto call_start = ProfileClock::now();
+  RssSample call_start_rss = profiling ? CurrentRss() : RssSample{};
+
+  if (profiling) {
+    const odgi::nid_t min_id = graph_.min_node_id();
+    const odgi::nid_t max_id = graph_.max_node_id();
+    const size_t num_graph_nodes = max_id - min_id + 1;
+    const size_t num_automaton_states = automaton_.size();
+    const size_t covered_paths_bits = graph_.node_variant_paths_[min_id].size();
+    // ScoreToGoTable is vector<vector<double>> (haplotype.hpp): num_graph_nodes separate heap allocations
+    // (one per row), each holding num_automaton_states doubles. Payload bytes below is just the doubles;
+    // it excludes each row's own std::vector control-block + allocator bookkeeping, which a single flat
+    // allocation would avoid entirely (num_graph_nodes-1 fewer allocations).
+    const size_t score_to_go_payload_bytes = num_graph_nodes * num_automaton_states * sizeof(double);
+    // A single PathIdSetHolder's boost::dynamic_bitset block storage alone (excludes the holder's own
+    // hash/refcount/dynamic_bitset-object overhead) -- one of these is allocated per DP transition where
+    // contributes_paths_mask_ is set (see PropagateBestPathState), shared thereafter via intrusive_ptr.
+    const size_t covered_paths_bitset_bytes = ((covered_paths_bits + 63) / 64) * 8;
+    fmt::print(stderr,
+               "HAP_PROFILE call={} n={} stage=sizes graph_nodes={} automaton_states={} "
+               "score_to_go_payload_bytes={} covered_paths_bits={} covered_paths_bitset_bytes={} "
+               "rss_kb={} hwm_kb={}\n",
+               this_call, n, num_graph_nodes, num_automaton_states, score_to_go_payload_bytes,
+               covered_paths_bits, covered_paths_bitset_bytes, call_start_rss.rss_kb, call_start_rss.hwm_kb);
+  }
+
+  auto score_to_go_start = ProfileClock::now();
   auto score_to_go = ComputeScoreToGo();
+  if (profiling) {
+    RssSample rss = CurrentRss();
+    fmt::print(stderr, "HAP_PROFILE call={} n={} stage=score_to_go ms={:.3f} rss_kb={} hwm_kb={} rss_delta_kb={}\n",
+               this_call, n, ElapsedMs(score_to_go_start), rss.rss_kb, rss.hwm_kb, rss.rss_kb - call_start_rss.rss_kb);
+  }
 
   // Adaptive beam search. Start by maintaining n backpointers, then double with the width until the top scoring paths
   // are guaranteed to be included. max_escaped_bound reports an admissible upper bound on what a discarded branch
@@ -420,26 +654,48 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
   // worst kept result, so the top-n set must contain the true top-n and the search can stop. Otherwise, some discarded
   // branch *might* have beaten the worst kept result, so the width is doubled and the search is redone from scratch at
   // the wider beam.
-  for (size_t width = n; ; width *= 2) {
+  for (size_t width = n, attempt = 0; ; width *= 2, ++attempt) {
+    auto forward_start = ProfileClock::now();
     double max_escaped_bound = -std::numeric_limits<double>::infinity();
     auto path_state = PropagateBestPathState(width, &score_to_go, &max_escaped_bound);
 
     const auto& results = path_state.back().at(kAutomatonRoot);
     double weakest_kept_score = results.empty() ? -std::numeric_limits<double>::infinity() : results.back().score;
-    if (weakest_kept_score >= max_escaped_bound || width > max_widening * std::max<size_t>(n, 1)) {
+    bool settled = weakest_kept_score >= max_escaped_bound || width > max_widening * std::max<size_t>(n, 1);
+    if (profiling) {
+      // Sampled with path_state (this attempt's full BestPathState, i.e. its backpointer pools/PathIdSetHolders)
+      // still alive: reflects this attempt's own footprint. Any *previous* attempt's path_state was already
+      // destroyed when that loop iteration's scope ended, before this attempt's PropagateBestPathState call --
+      // so rss_delta_kb isolates this attempt, but if the allocator doesn't return freed pages to the OS
+      // promptly, rss_kb/hwm_kb can still show elevated (non-dropping) memory carried over from earlier,
+      // already-destroyed attempts in this same call.
+      RssSample rss = CurrentRss();
+      fmt::print(stderr,
+                 "HAP_PROFILE call={} n={} stage=forward attempt={} width={} ms={:.3f} settled={} weakest={:.4f} bound={:.4f} "
+                 "rss_kb={} hwm_kb={} rss_delta_kb={}\n",
+                 this_call, n, attempt, width, ElapsedMs(forward_start), settled ? 1 : 0, weakest_kept_score, max_escaped_bound,
+                 rss.rss_kb, rss.hwm_kb, rss.rss_kb - call_start_rss.rss_kb);
+    }
+    if (settled) {
+      if (attempts_used) *attempts_used = attempt + 1;
+      if (profiling) {
+        RssSample rss = CurrentRss();
+        fmt::print(stderr, "HAP_PROFILE call={} n={} stage=total ms={:.3f} final_width={} attempts={} rss_kb={} hwm_kb={}\n",
+                   this_call, n, ElapsedMs(call_start), width, attempt + 1, rss.rss_kb, rss.hwm_kb);
+      }
       return path_state;
     }
   }
 }
 
 HaplotypeSamplerOverlay::KmerIdSet HaplotypeSamplerOverlay::KmersOnPath(const Haplotype& path) const {
-  // Walk the automaton one node at a time for path accumulating output_kmers_, the unique k-mers for
-  // sub-path match ending at that node.
+  // Walk the automaton one node at a time for path accumulating output_kmer_indices_, the unique k-mers
+  // for sub-path match ending at that node.
   KmerIdSet on_path(kmers_.size());
   size_t state = kAutomatonRoot;
   for (auto node_id : path) {
     state = AutomatonGoto(state, node_id);
-    on_path |= automaton_[state].output_kmers_;
+    for (auto kmer_idx : automaton_[state].output_kmer_indices_) on_path.set(kmer_idx);
   }
   return on_path;
 }
@@ -483,7 +739,7 @@ HaplotypeSamplerOverlay::PathWithCoverage HaplotypeSamplerOverlay::BacktrackPath
   size_t current_automaton_state = back_automaton_state;
   size_t current_back_idx = back_idx;
 
-  Graph::PathIdSet covered_paths = path_state[max_id - min_id].at(back_automaton_state).at(back_idx).covered_paths;
+  Graph::PathIdSet covered_paths = path_state[max_id - min_id].at(back_automaton_state).at(back_idx).covered_paths->bits;
 
   path.push_back(current_node);
   while (current_node != min_id) {
@@ -499,23 +755,55 @@ HaplotypeSamplerOverlay::PathWithCoverage HaplotypeSamplerOverlay::BacktrackPath
 }
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
+  // OPTIMIZATION_PROPOSALS.md "Proposal 2": run each draw as a single forward pass at exactly the requested
+  // width instead of going through PropagateBestPathStateAdaptively's score_to_go-certified doubling loop.
+  // Empirically validated (see that doc's "Empirical validation of Proposal 2") across 450 synthetic + 60
+  // real-small-region + 21 real worst-case-region trials to never change the sampled result versus the
+  // certified/widened result: every discard SortAndTrimBacktrack performs compares entries within a single
+  // (node, automaton_state) pool, and score_to_go is a pure function of that same pair, so a same-pool
+  // comparison of current score is already exact, not an approximation -- widening was only ever needed to
+  // *certify* that, never to find a different answer. This also drops the ~43%-of-runtime ComputeScoreToGo
+  // sweep (PERFORMANCE_NOTES.md "Higher-level timing breakdown") and the memory-compounding effect of
+  // discarded widening attempts (PERFORMANCE_NOTES.md "Memory consumption by driver") entirely, since
+  // neither ever runs here now. See SampleHaplotypesAdaptive(n) for the pre-Proposal-2 behavior, kept for
+  // comparison in tests.
+  const bool profiling = HaplotypeProfilingEnabled();
+  static size_t draw_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
+  return SampleHaplotypesImpl(n, [&](size_t width) {
+    auto draw_start = ProfileClock::now();
+    auto path_state = PropagateBestPathState(width);
+    if (profiling) {
+      RssSample rss = CurrentRss();
+      fmt::print(stderr, "HAP_PROFILE call={} n={} width={} stage=fixed_width ms={:.3f} rss_kb={} hwm_kb={}\n",
+                 draw_index++, n, width, ElapsedMs(draw_start), rss.rss_kb, rss.hwm_kb);
+    }
+    return path_state;
+  });
+}
+
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypesAdaptive(size_t n) {
+  return SampleHaplotypesImpl(n, [this](size_t width) { return PropagateBestPathStateAdaptively(width); });
+}
+
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypesImpl(
+    size_t n, const std::function<BestPathState(size_t)>& propagate) {
   std::vector<PathWithCoverage> samples;
   samples.reserve(n);
 
   while (samples.size() < n) {
     // Request more paths than already selected. Since we could select a path with no covered paths, we sample the
     // top (|selected|+2) paths to ensure we can find a new distinct path that covers at least one inference path.
-    auto path_state = PropagateBestPathStateAdaptively(samples.size() + 2);
+    auto path_state = propagate(samples.size() + 2);
     const auto & candidates = path_state.back().at(kAutomatonRoot);
 
     size_t back_idx = candidates.size();
     for (size_t i = 0; i < candidates.size(); ++i) {
       const auto& candidate = candidates[i];
-      if (apply_path_filter_ && candidate.covered_paths.none()) {
+      if (apply_path_filter_ && candidate.covered_paths->bits.none()) {
         continue; // Skip paths that do not cover any inference paths when filtering is active
       }
       auto matching_sample = std::find_if(samples.begin(), samples.end(), [&](const PathWithCoverage& result) {
-        return candidate.covered_paths == result.second;
+        return candidate.covered_paths->bits == result.second;
       });
       if (matching_sample == samples.end()) {
         back_idx = i;  // Found a new candidate that is not already in samples

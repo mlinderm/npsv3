@@ -197,7 +197,7 @@ def main(cfg: DictConfig) -> None:
         output = "topk_statistics.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         sample = Sample.from_json(cfg.stats_path)
-        statistics = diplotypes_in_topk(cfg, cfg.input, sample, filter_kmers=True, progress_bar=True)
+        statistics = diplotypes_in_topk(cfg, cfg.input, sample, progress_bar=True)
         statistics.to_pickle(output)
 
     else:

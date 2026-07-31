@@ -1,6 +1,14 @@
 import os
 
+import pytest
+from typing import TYPE_CHECKING
+
 from npsv3.util.config import setup_resolvers
+if TYPE_CHECKING:
+    from npsv3.util.range import Range
+    from npsv3.util.sample import Sample
+
+
 
 RESOURCES_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments/resources"
 EXPERIMENTS_DIR = "/storage/mlinderman/projects/sv/npsv3-experiments"
@@ -88,3 +96,46 @@ def create_vcf(tmp_path: str, vcf: bytes, name: str = "test.vcf.gz") -> str:
 
 # Register resolvers for OmegaConf
 setup_resolvers()
+
+
+def hash_vcf_file(vcf_path: str) -> str:
+    """Return the sha256 hash of the VCF file contents."""
+    import hashlib
+    with open(vcf_path, "rb") as f:
+        digest = hashlib.file_digest(f, "sha256")
+        return digest.hexdigest()
+
+
+def cache_filter_kmc_database( cfg, sample: "Sample", vcf_path: str, region: "Range", unique_kmers, tmp_path) -> str:
+    """Compute and save filtered kmers in the results directory using a hash of the VCF file to avoid collisions.
+
+    Args:
+        cfg (_type_): Hydra configuration
+        sample (Sample): Sample object containing with KMC database prefix
+        vcf_path (str): VCF file path to use for hashing
+        region (Range): Region object to use for hashing
+        unique_kmers (_type_): Unique k-mers to filter the KMC database
+        tmp_path (_type_): Temporary path to use for intermediate files
+
+    Returns:
+        str: Filtered KMC database prefix
+    """
+    # Incorporate hash into custom VCF file into cache directory to avoid collisions
+    results_directory = result_path(f"{region.slug}.{hash_vcf_file(vcf_path)}.{sample.name}.k{cfg.kmer.kmer_size}")
+    os.makedirs(results_directory, exist_ok=True)
+    filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
+    if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
+        # Generate filtered k-mers if not already available (a slow step, so we cache the results)
+        from npsv3.util.sample import filter_kmers_by_unique_kmers
+        if not sample.kmc_prefix:
+            pytest.skip(f"KMC database for {sample.name} not found")
+        filter_kmers_by_unique_kmers(
+            sample.kmc_prefix,
+            unique_kmers,
+            cfg.kmer.kmer_size,
+            filtered_kmer_path,
+            tmp_dir=tmp_path,
+            threads=cfg.threads,
+        )
+
+    return filtered_kmer_path

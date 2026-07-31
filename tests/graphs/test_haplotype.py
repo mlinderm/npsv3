@@ -1,46 +1,170 @@
+import glob
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from shlex import quote
+from typing import ClassVar, cast
 
 import pandas as pd
 import pytest
+import webdataset as wds
 
+from npsv3.graphs.graph import Graph
 from npsv3.graphs.haplotype import (
+    HaplotypeSamplerOverlay,
     KmerClassify,
     KmerCounts,
+    UniqueKmersOverlay,
     _create_graph_and_sampler,
     _sample_diplotypes_from_counts,
-    _serialize_graph_and_unique_kmers,
     diplotypes_in_topk,
+    prepare_genotyping_haplotypes,
     sample_diplotypes,
+    serialize_graph_and_unique_kmers,
 )
 from npsv3.util.range import Range
-from npsv3.util.sample import Sample, filter_kmc_database
+from npsv3.util.sample import kmc_filter
+from npsv3.util.variant import Variant
 
-from .. import HG38_REF_FASTA, create_vcf, data_path, result_path
+from .. import HG00731_HG38_BAM, HG38_REF_FASTA, cache_filter_kmc_database, create_vcf, data_path, result_path
 
 
-def _hash_vcf_file(vcf_path: str) -> str:
-    """Compute a hash of the VCF file contents, ignoring header lines."""
-    import hashlib
-    with open(vcf_path, "rb") as f:
-        digest = hashlib.file_digest(f, "sha256")
-        return digest.hexdigest()
+@dataclass(frozen=True)
+class _MockVariant:
+    """Minimal mock `Variant` class for testing"""
 
-def _cache_filter_kmc_database( cfg, sample: Sample, vcf_path: str, region: Range, unique_kmers, tmp_path) -> str:
-    # Incorporate hash into custom VCF file into cache directory to avoid collisions
-    results_directory = result_path(f"{region.slug}.{_hash_vcf_file(vcf_path)}.{sample.name}.k{cfg.kmer.kmer_size}")
-    os.makedirs(results_directory, exist_ok=True)
-    filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
-    if not os.path.exists(filtered_kmer_path + ".kmc_pre"):
-        # Generate filtered k-mers if not already available (a slow step, so we cache the results)
-        if not sample.kmc_prefix:
-            pytest.skip(f"KMC database for {sample.name} not found")
-        filter_kmc_database(
-            sample.kmc_prefix, unique_kmers, cfg.kmer.kmer_size, filtered_kmer_path, tmp_dir=tmp_path
+    variant_id: str
+    num_alleles: int = 2
+
+    def allele_length_change(self, allele_idx: int) -> int | None:
+        return None if allele_idx == 0 else -50
+
+
+class _MockGraph:
+    """Minimal mock `Graph` class for testing."""
+    def __init__(self, contig: str, reference_nodes: list[int], paths: dict[str, list[int]] | None = None):
+        self.contig = contig
+        self._reference_nodes = reference_nodes
+        self._paths = dict(paths or {})
+
+    def path_nodes(self, name: str) -> list[int]:
+        if name == self.contig:
+            return list(self._reference_nodes)
+        return list(self._paths[name])
+
+    def has_path(self, name: str) -> bool:
+        return name == self.contig or name in self._paths
+
+
+class _MockHaplotypeSampler:
+    """Minimal mock `HaplotypeSamplerOverlay` class for testing."""
+    def __init__(self, node_alleles: dict[int, tuple[str, int]]):
+        self._node_alleles = node_alleles
+
+    def decode_haplotype(self, haplotype: list[int]) -> set[tuple[str, int]]:
+        return {self._node_alleles[node] for node in haplotype if node in self._node_alleles}
+
+
+class TestPrepareGenotypingHaplotypes:
+    # Single bi-allelic variant with variant ID "v1"
+    region = Range("chr1", 100, 200)
+    variants: ClassVar = [cast(Variant, _MockVariant("v1"))]
+    sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1)}))
+
+    REF: ClassVar = [1, 2, 3]
+    ALT: ClassVar = [1, 4, 3]
+
+    def test_adds_missing_reference_haplotype(self):
+        """The reference haplotype should be added at index 0 if it wasn't already sampled."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))  # No named "true" haplotype paths
+        haplotypes, alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [self.ALT], self.variants, self.region.contig, "SAMPLE"
         )
-    return filtered_kmer_path
+        assert haplotypes == [self.REF, self.ALT]
+        assert alleles == [{("v1", 0)}, {("v1", 1)}]
+        assert true_idxs == []
+
+    def test_moves_existing_reference_haplotype_to_index_0(self):
+        """An already-sampled reference haplotype should be moved to index 0, not duplicated."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))
+        haplotypes, alleles, _true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [self.ALT, self.REF], self.variants, self.region.contig, "SAMPLE"
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert alleles == [{("v1", 0)}, {("v1", 1)}]
+
+    def test_reference_haplotype_already_first_is_untouched(self):
+        """If the reference haplotype is already at index 0, it should remain there."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))
+        haplotypes, _alleles, _true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [self.REF, self.ALT], self.variants, self.region.contig, "SAMPLE"
+        )
+        assert haplotypes == [self.REF, self.ALT]
+
+    def test_true_haplotypes_reuse_matching_sampled_haplotype(self):
+        """If a "true" haplotype path matches an already-sampled haplotype, its (possibly reordered)
+        index should be reused rather than the haplotype being duplicated."""
+        graph = cast(Graph, _MockGraph(
+            self.region.contig, self.REF,
+            paths={"SAMPLE#0#chr1#0": self.REF, "SAMPLE#1#chr1#0": self.ALT},
+        ))
+        haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [self.ALT, self.REF], self.variants, self.region.contig, "SAMPLE"
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert true_idxs == [0, 1]
+
+    def test_true_haplotypes_appended_when_not_sampled(self):
+        """A homozygous sample should report homozygous halotype indices"""
+        graph = cast(Graph, _MockGraph(
+            self.region.contig, self.REF,
+            paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.ALT},
+        ))
+        haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE",
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert true_idxs == [1, 1]
+
+    def test_true_heterozygous_haplotype(self):
+        """A heterozygous sample should report heterozygous haplotype indices, but not duplicate haplotypes."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.REF}))
+        haplotypes, alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE",
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert alleles == [{("v1", 0)}, {("v1", 1)}]
+        assert true_idxs == [1, 0]
+
+    def test_missing_true_haplotype_path_is_skipped(self):
+        """A ploidy index without a corresponding path in the graph (i.e. not fully resolved) should
+        be silently skipped rather than raising an error."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#1#chr1#0": self.ALT}))
+        # No path for "SAMPLE#0#chr1#0"
+        haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE"
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert true_idxs == [None, 1]
+
+    def test_no_true_haplotype_paths_present(self):
+        """If none of the sample's "true" haplotype paths are in the graph, `true_haplotype_idxs` is
+        empty and only the reference-haplotype invariant is enforced."""
+        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))  # No named paths at all
+        haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [self.ALT], self.variants, self.region.contig, "SAMPLE"
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert true_idxs == []
+
+    def test_does_not_mutate_input_haplotypes_list(self):
+        original = [self.ALT]
+        prepare_genotyping_haplotypes(
+            cast(Graph, _MockGraph(self.region.contig, self.REF)), self.sampler, original, self.variants, self.region.contig, "SAMPLE"
+        )
+        assert original == [self.ALT]
+
 
 @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
 class TestTopkHaplotypeSampling:
@@ -82,8 +206,8 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
                 filter_kmers=False,
             )
 
-            true_hap0_nodes = graph.haplotype_paths(f"HG00096#0#{region.contig}")
-            true_hap1_nodes = graph.haplotype_paths(f"HG00096#1#{region.contig}")
+            true_hap0_nodes = graph.path_nodes(f"HG00096#0#{region.contig}#0")
+            true_hap1_nodes = graph.path_nodes(f"HG00096#1#{region.contig}#0")
             assert true_hap0_nodes == true_hap1_nodes, "Variant is hom. alt."
 
             assert len(haplotypes) == 2, "A bi-allelic variant should have two haplotypes"
@@ -132,7 +256,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
         )
         assert sampler.num_kmers() > 1, "There should be multiple k-mers to distinguish the haplotypes"
 
-        true_hap0_idx = haplotypes.index(graph.haplotype_paths(f"HG00096#0#{region.contig}"))
+        true_hap0_idx = haplotypes.index(graph.path_nodes(f"HG00096#0#{region.contig}#0"))
         assert set(diplotypes[0].haplotypes) > { true_hap0_idx }, "The most likely diplotype should be het."
 
     @pytest.mark.usefixtures("ray_setup")
@@ -174,7 +298,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
 
         hg00096_sample.kmc_prefix = kmc_prefix
 
-        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filtered_kmer_path=kmc_prefix)
         pd.testing.assert_frame_equal(
             statistics,
             pd.DataFrame({
@@ -225,7 +349,7 @@ chr1	1924223	.	G	GACCACCCCCCAGCTCACAGCCCACCCCCCCATCTCACCGCCCAGCCCCCCCATCTCACCAGC
         )
         hg00096_sample.kmc_prefix = kmc_prefix
 
-        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filter_kmers=False)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00096_sample, filtered_kmer_path=kmc_prefix)
         assert len(statistics) == 1, "There should be one row of statistics for the single variant"
         assert all(h > 0 for h in statistics.iloc[0]["haplotype_idxs"]), "The true haplotypes should be found, but not necessarily top-ranked"
         assert statistics.iloc[0]["diplotype_idx"] >= 0, "The true diplotype should be found, but not necessarily top-ranked"
@@ -281,7 +405,7 @@ class TestTopkHaplotypeSamplingInHG00733:
         # thresholds for different zygosity classifications.
 
         # Use cached files to speed up repeated runs of the test
-        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        filtered_kmer_path = cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
 
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
@@ -292,14 +416,13 @@ class TestTopkHaplotypeSamplingInHG00733:
             filter_kmers=False,
         )
 
-
-    @pytest.mark.skip(reason="Skip unless debugging")
+    # @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
         "kmer.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}",
     )
-    def test_multi_variant_with_star_alleles(self, cfg, hg00733_sample):
+    def test_multi_variant_with_star_alleles(self, cfg, hg00733_sample, tmp_path):
         """Test region with multiple variants and star alleles"""
         vcf_path = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz"
         if not os.path.exists(vcf_path):
@@ -316,17 +439,17 @@ class TestTopkHaplotypeSamplingInHG00733:
         filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
         graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
         if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
-            graph_shards, filtered_kmer_path, _region_count = _serialize_graph_and_unique_kmers(
+            graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                hg00733_sample,
                 ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
                 output_dir=results_directory,
-                filter_kmers=True,
+                pool_kmers=True,
                 region=region,
             )
+            kmc_filter(hg00733_sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)  # type: ignore
 
-        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
 
         # The first variant is 0/1, but overlaps the second (genotype of 1/2 with a star allele), so we correctly
         # sample haplotypes that don't include the full reference allele for the first variant (nodes [3,5]), just node [3].
@@ -341,7 +464,7 @@ class TestTopkHaplotypeSamplingInHG00733:
         assert statistics["haplotype_idxs"].equals(pd.Series([(0, 1), (0, 1), (0, 0)]))
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
-    @pytest.mark.skip(reason="Skip unless debugging")
+    # @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -363,17 +486,17 @@ class TestTopkHaplotypeSamplingInHG00733:
         filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
         graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
         if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
-            graph_shards, filtered_kmer_path, _region_count = _serialize_graph_and_unique_kmers(
+            graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                hg00733_sample,
                 ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
                 output_dir=results_directory,
-                filter_kmers=True,
+                pool_kmers=True,
                 region=region,
             )
+            kmc_filter(hg00733_sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)  # type: ignore
 
-        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
     # @pytest.mark.skip(reason="Skip unless debugging")
@@ -398,17 +521,17 @@ class TestTopkHaplotypeSamplingInHG00733:
         filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
         graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
         if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
-            graph_shards, filtered_kmer_path, _region_count = _serialize_graph_and_unique_kmers(
+            graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                hg00733_sample,
                 ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
                 output_dir=results_directory,
-                filter_kmers=True,
+                pool_kmers=True,
                 region=region,
             )
+            kmc_filter(hg00733_sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)  # type: ignore
 
-        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, filter_kmers=True, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert len(statistics) == 0, "There should be no fully genotyped analysis variants in this region"
         # TODO: Test that an info message was logged about this region
 
@@ -436,7 +559,7 @@ class TestTopkHaplotypeSamplingInHG00733:
             ref_kmer_counts=ref_kmer_counts,
         )
 
-        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        filtered_kmer_path = cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
             unique_kmers,
@@ -475,12 +598,12 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
             vcf_path,
             region,
             k=cfg.kmer.kmer_size,
-            ref_kmer_counts=ref_kmer_counts,
+            ref_kmer_counts=ref_kmer_counts, # type: ignore
         )
         # The graph construction automatically "deduplicates" the overlapping insertions, so the graph should have 2
         # alternate alleles
 
-        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        filtered_kmer_path = cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
             unique_kmers,
@@ -521,10 +644,10 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
             vcf_path,
             region,
             k=cfg.kmer.kmer_size,
-            ref_kmer_counts=ref_kmer_counts,
+            ref_kmer_counts=ref_kmer_counts,  # type: ignore
         )
 
-        filtered_kmer_path = _cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        filtered_kmer_path = cache_filter_kmc_database(cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
         haplotypes, diplotypes = _sample_diplotypes_from_counts(
             haplotype_sampler,
             unique_kmers,
@@ -552,3 +675,131 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
         # TODO: Introduce a threshold, analogous to how Truvari, etc. match variant calls to determine if a haplotype should be considered
         # distinct or not? For exmaple, if the haplotype is 90% similar to another haplotype, that probably wouldn't be distinct enough to
         # detect.
+
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz",
+        "kmer.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}",
+    )
+    def test_graph_construction_errors(self, cfg):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, f"{cfg.kmer.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+            pytest.skip("Missing necessary inputs")
+
+        region = Range("chr1:148531170-148577610")
+        ref_kmer_counts = KmerCounts(cfg.kmer.ref_kmer_counts_kmc_prefix)
+        _create_graph_and_sampler(
+            cfg.reference,
+            cfg.input,
+            region,
+            k=cfg.kmer.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+
+
+    @pytest.mark.usefixtures("ray_setup")
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz",
+        f"reads={HG00731_HG38_BAM}",
+        "kmer.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}",
+    )
+    def test_sampling_performance(self, cfg, hg00733_sample, tmp_path):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.kmer.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+            pytest.skip("Missing necessary inputs")
+
+        #region = Range("chr1:148531170-148577610")
+        region = Range("chr1:148538120-148538280")
+
+        # Use cached files to focus on haplotype sampling performance
+        results_directory = result_path(f"{region.slug}.HG00733.k{cfg.kmer.kmer_size}")
+        os.makedirs(results_directory, exist_ok=True)
+        filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
+        graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
+        if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
+            graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(
+                cfg,
+                cfg.input,
+                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
+                output_dir=results_directory,
+                pool_kmers=True,
+                region=region,
+            )
+            kmc_filter(hg00733_sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)  # type: ignore
+
+        statistics = diplotypes_in_topk(cfg, cfg.input, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
+        print(statistics)
+
+
+class TestAdaptiveWideningRealData:
+    """Empirically checks whether PropagateBestPathStateAdaptively's score_to_go widening ever changes
+    the sampled result versus a single, non-adaptive pass at the same width -- see
+    OPTIMIZATION_PROPOSALS.md's "Empirical validation of Proposal 2".
+
+    Reuses the same precomputed graph shard + filtered-kmer database PERFORMANCE_NOTES.md's
+    "Higher-level timing breakdown" session used (`chr1:148531170-148577610`, HG00733 population VCF,
+    21 per-cluster graphs, largest `graph.bytes=10,076,234` at `chr1:148544977-148574123`, 18,738
+    k-mers) instead of synthetic scores: a native-only stress test using independently-random per-k-mer
+    scores at this same graph scale defeated the natural covered_paths convergence real (correlated)
+    k-mer coverage relies on and exhausted >20GB in the plain forward DP alone (unrelated to widening;
+    see the disabled `RealRegionAdaptiveWideningTest.DISABLED_FixedWidthMatchesCertifiedOnWorstCaseDenseRegion`
+    in tests/native/test_haplotype.cpp) -- real KMC-scored data shouldn't hit that, since it's exactly
+    what `sample_haplotypes(n=6)` already ran successfully over in that same benchmarking session.
+    """
+
+    REGION_CACHE_DIR = result_path("chr1_148531169_148577610.HG00733.k31")
+    VCF_PATH = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz"
+    KMER_COVERAGE = 14  # matches tests/conftest.py::hg00733_sample's kmer_coverage
+    MIN_VARIANT_SIZE = 50
+
+    def test_fixed_width_matches_certified_across_real_kmer_scored_clusters(self):
+        filtered_kmer_path = os.path.join(self.REGION_CACHE_DIR, "filtered_kmers")
+        shard_paths = sorted(glob.glob(os.path.join(self.REGION_CACHE_DIR, "graphs-*.tar.gz")))
+        if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not shard_paths:
+            pytest.skip(f"Cached graph shard(s)/filtered k-mer DB not found under {self.REGION_CACHE_DIR}")
+        if not os.path.exists(self.VCF_PATH):
+            pytest.skip("HG00733 population VCF not found")
+
+        counts = KmerClassify(filtered_kmer_path, self.KMER_COVERAGE)
+
+        records = []
+        for shard_path in shard_paths:
+            records.extend(wds.WebDataset([shard_path], shardshuffle=False))
+        # Largest (most adversarial) clusters first, per PERFORMANCE_NOTES.md's own reproduction guidance.
+        records.sort(key=lambda r: len(r["graph.bytes"]), reverse=True)
+
+        widths = (1, 8)  # 1 = narrowest possible beam; 8 matches cfg.kmer.max_haplotypes' production default
+        widening_fired = dict.fromkeys(widths, 0)
+        num_checked = dict.fromkeys(widths, 0)
+        for record in records:
+            region_string = record["region.txt"].decode()
+            region = Range(region_string)
+            graph = Graph.load_bytes(record["graph.bytes"])
+            unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
+            sampler = HaplotypeSamplerOverlay(graph, unique_kmers, self.VCF_PATH, region, self.MIN_VARIANT_SIZE)
+            if sampler.num_kmers() == 0:
+                continue
+            sampler.initialize_scores(counts)
+
+            for n in widths:
+                num_checked[n] += 1
+                fixed = sampler.find_best_paths_fixed_width(n)
+                adaptive, attempts = sampler.find_best_paths_with_attempts(n)
+                if attempts > 1:
+                    widening_fired[n] += 1
+
+                assert len(fixed) == len(adaptive), (
+                    f"{region_string}: n={n}: un-widened and certified passes returned different numbers "
+                    f"of distinct paths ({len(fixed)} vs {len(adaptive)})"
+                )
+                for i, (fixed_path, adaptive_path) in enumerate(zip(fixed, adaptive, strict=True)):
+                    assert sampler.score(fixed_path) == pytest.approx(sampler.score(adaptive_path)), (
+                        f"{region_string}: n={n}: rank {i} diverged between the un-widened pass and the "
+                        "certified/adaptive result"
+                    )
+
+        assert sum(num_checked.values()) > 0, "No non-empty cached graphs found to check"
+        for n in widths:
+            print(
+                f"TestAdaptiveWideningRealData(n={n}): widening fired in {widening_fired[n]}/{num_checked[n]} "
+                "real, KMC-scored graph clusters; the un-widened pass never diverged from the certified result."
+            )

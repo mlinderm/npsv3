@@ -9,6 +9,6 @@ ref_kmer_counts_kmc_prefix: null
 max_edges: 5
 canonicalize: false
 
-# Sampling related parameters (adapted from Sirén et al. 2024). The total diplotypes should be h(h+1)/2
+# Sampling related parameters (partly, adapted from Sirén et al. 2024). The total diplotypes should be h(h+1)/2
 max_haplotypes: 8
-max_diplotypes: 32
+max_diplotypes: 36

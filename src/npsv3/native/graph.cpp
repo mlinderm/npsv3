@@ -63,6 +63,20 @@ bool PathsInSingleVariant(const Graph::PathIdSet& paths1, const Graph::PathIdSet
 }
 
 /**
+ * @brief Return true if at least one ALT allele of @p variant has a defined reference region, i.e.
+ * is not a '*' (spanning-deletion) placeholder allele. A variant where every ALT is '*' contributes
+ * no reference breakpoints and so must be skipped entirely, regardless of how many ALT alleles it has.
+ */
+bool HasNonStarAltAllele(const Variant& variant) {
+  for (int i = 1; i < variant.num_alleles(); i++) {
+    if (variant.AlleleReferenceRegion(i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * @brief Return the [start, end) index range into @p ref_nodes spanned by @p ref_allele_nodes
  */
 Graph::NodeIdRange ComputeAlleleSpan(const Graph::NodeIdSeq& ref_allele_nodes, const Graph::NodeIdSeq& ref_nodes) {
@@ -261,8 +275,8 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
         if (ref_region.start() <= region_.start() || ref_region.end() >= region_.end()) {
           continue; // Skip variants that only partially overlap the graph region
         }
-        if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
-          continue; // Skip variants with only '*' ALTS
+        if (variant->has_flag(Variant::kHasStarAllele) && !HasNonStarAltAllele(*variant)) {
+          continue; // Skip variants where every ALT is '*' (including multi-allelic all-'*' records)
         }
 
         num_variant_paths++;
@@ -407,10 +421,10 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       continue; // Skip variants that only partially overlap the graph region
     }
 
-    if (variant->has_flag(Variant::kHasStarAllele) && variant->num_alts() == 1) {
-      continue; // Skip variants with only '*' ALTS
+    if (variant->has_flag(Variant::kHasStarAllele) && !HasNonStarAltAllele(*variant)) {
+      continue; // Skip variants where every ALT is '*' (including multi-allelic all-'*' records)
     }
-    
+
     auto genotypes = variant->Genotypes();
     assert(genotypes.size() == polytypes.size());
 
@@ -516,34 +530,6 @@ std::vector<odgi::nid_t> Graph::PathNodes(const handlegraph::path_handle_t& path
 
 std::vector<odgi::nid_t> Graph::PathNodes(const std::string& path_name) const {
   return PathNodes(get_path_handle(path_name));
-}
-
-Graph::NodeIdSeq Graph::HaplotypePaths(const std::string& prefix) const {
-  const std::string full_prefix = prefix + "#";
-
-  std::vector<std::pair<int, NodeIdSeq>> segments;
-  graph_.for_each_path_handle([&](const handlegraph::path_handle_t& path_handle) {
-    const auto name = graph_.get_path_name(path_handle);
-    if (name.size() <= full_prefix.size()) return;
-    if (!std::equal(full_prefix.begin(), full_prefix.end(), name.begin())) return;
-    const auto suffix = name.substr(full_prefix.size());
-    try {
-      size_t pos;
-      int seg_idx = std::stoi(suffix, &pos);
-      if (pos == suffix.size()) {
-        segments.emplace_back(seg_idx, PathNodes(path_handle));
-      }
-    } catch (...) {}
-  });
-
-  std::sort(segments.begin(), segments.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-
-  NodeIdSeq result;
-  for (auto& [_, nodes] : segments) {
-    result.insert(result.end(), nodes.begin(), nodes.end());
-  }
-  return result;
 }
 
 std::string Graph::PathSequence(const handlegraph::path_handle_t& path_handle) const {
@@ -738,8 +724,12 @@ void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range&
   source_vcf_file->SetRegion(region);
   while (auto variant = source_vcf_file->NextVariant()) {
     auto variant_id = variant->variant_id();
-    
-    auto ref_path = get_path_handle(AltPathName(variant_id, 0));
+
+    auto ref_path_name = AltPathName(variant_id, 0);
+    if (!has_path(ref_path_name)) {
+      continue; // Variant was excluded when the graph was built (e.g., all-'*' alleles or partial region overlap)
+    }
+    auto ref_path = get_path_handle(ref_path_name);
     auto ref_path_idx = as_integer(ref_path);
     auto ref_nodes = PathNodes(ref_path);
     for (int i=1; i < variant->num_alleles(); i++) {
@@ -748,7 +738,11 @@ void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range&
         continue; // Only consider alleles above a size threshold
       }
 
-      auto alt_path = get_path_handle(AltPathName(variant_id, i));
+      auto alt_path_name = AltPathName(variant_id, i);
+      if (!has_path(alt_path_name)) {
+        continue; // Likely a '*' allele (with no path)
+      }
+      auto alt_path = get_path_handle(alt_path_name);
       auto alt_path_idx = as_integer(alt_path);
       
       // Mark the differing nodes between alt and ref paths as zero cost and set the corresponding inference path bit

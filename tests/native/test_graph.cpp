@@ -236,6 +236,31 @@ chr14	76721239	.	C	CAAAAAAAAAA,*	344.04	PASS	.	GT	1/2)VCF");
   ASSERT_EQ(graph.PathSequence("Sample#1#chr14#0"), "GATTCCGTTGAAAAAAAAGA");
 };
 
+TEST(GraphConstructionSyntheticTest, MultiallelicAllStarAllelesSkipped) {
+  // Regression test: Records containing only, but multiple '*' alleles were not skipped, and thus triggered
+  // graph construction errors (due to missing breakpoints).
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAAAAAAAAAAAAAAAA)FASTA");
+
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	10	.	A	*,*	.	PASS	.	GT	1/2
+)VCF");
+
+  auto region = Range("chr1", 0, 20);
+  Graph graph(fasta.file_path_, vcf.file_path_, region);
+
+  // The all-'*' record contributes no breakpoints, so it should be skipped entirely, leaving a single
+  // reference node spanning the whole region and unbroken, all-reference genotype paths.
+  ASSERT_EQ(graph.get_node_count(), 1);
+  ASSERT_TRUE(graph.has_path("Sample#0#chr1#0"));
+  ASSERT_FALSE(graph.has_path("Sample#0#chr1#1"));
+  ASSERT_EQ(graph.PathSequence("Sample#0#chr1#0"), "AAAAAAAAAAAAAAAAAAAA");
+}
+
 TEST_F(GraphConstructionTest, PermuteStarAlleleVariant) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">

@@ -20,8 +20,8 @@ from npsv3.graphs.graph import Graph
 from npsv3.images.population import overlapping_variants
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
-from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmc_database, filter_kmc_database_from_fasta
-from npsv3.util.variant import VariantFileReader
+from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmers_by_unique_kmers, kmc_build_from_fasta, kmc_filter
+from npsv3.util.variant import Variant, VariantFileReader
 
 
 def _create_graph_and_sampler(
@@ -34,7 +34,7 @@ def _create_graph_and_sampler(
     max_edges=5,
     exclude_universal=True,
     canonicalize=False,
-    ref_kmer_counts: KmerClassify | None = None,
+    ref_kmer_counts: KmerCounts | None = None,
 ) -> tuple[Graph, UniqueKmersOverlay, HaplotypeSamplerOverlay]:
     graph = Graph(str(reference), str(vcf_path), region)
     unique_kmers = UniqueKmersOverlay(
@@ -61,7 +61,7 @@ def _sample_diplotypes_from_counts(
         if filter_kmers:
             tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
             filtered_kmer_path = os.path.join(tmp_dir, "kmers")
-            filter_kmc_database(
+            filter_kmers_by_unique_kmers(
                 kmer_path, unique_kmers, k, filtered_kmer_path, tmp_dir=tmp_dir
             )
         else:
@@ -159,15 +159,19 @@ class _SerializeGraphAndUniqueKmers:
     def construct_from_region(self, region_str: str):
         """Return a serialized Graph and UniqueKmersOverlay for region_str"""
         region = Range(region_str)
-        graph = Graph(self.reference, self.vcf_path, region)
-        unique_kmers = UniqueKmersOverlay(
-            graph,
-            self.kmer_size,
-            max_edges=self.max_edges,
-            exclude_universal=self.exclude_universal,
-            canonicalize=self.canonicalize,
-            ref_kmer_counts=self.ref_kmer_counts,
-        )
+        try:
+            graph = Graph(self.reference, self.vcf_path, region)
+            unique_kmers = UniqueKmersOverlay(
+                graph,
+                self.kmer_size,
+                max_edges=self.max_edges,
+                exclude_universal=self.exclude_universal,
+                canonicalize=self.canonicalize,
+                ref_kmer_counts=self.ref_kmer_counts,
+            )
+        except Exception as e:
+            e.add_note(f"Error constructing graph and unique kmers for region {region_str}")
+            raise
 
         slug = region.slug
         if self.kmer_fasta is not None:
@@ -186,14 +190,13 @@ class _SerializeGraphAndUniqueKmers:
         }
 
 
-def _serialize_graph_and_unique_kmers(
+def serialize_graph_and_unique_kmers(
     cfg,
     vcf_path: PathType,
-    sample: Sample,
     output_dir: PathType,
     *,
     min_variant_size=50,
-    filter_kmers=False,
+    pool_kmers=False,
     ref_kmer_counts_path: PathType | None = None,
     region: Range|None = None,
     max_size_shard=200*1024*1024, # 200 MB
@@ -207,7 +210,7 @@ def _serialize_graph_and_unique_kmers(
         sample (Sample): _description_
         output_dir (PathType): _description_
         min_variant_size (int, optional): _description_. Defaults to 50.
-        filter_kmers (bool, optional): _description_. Defaults to False.
+        pool_kmers (bool, optional): _description_. Defaults to False.
         region (Range | None, optional): Specific region to process. Defaults to None.
         max_size_shard (int, optional): _description_. Defaults to 200MB.
         progress_bar (bool, optional): _description_. Defaults to False.
@@ -216,14 +219,14 @@ def _serialize_graph_and_unique_kmers(
     """
 
     with contextlib.ExitStack() as stack:
-        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
 
         vcf_file = stack.enter_context(VariantFileReader.open(vcf_path))
 
         shard_pattern = os.path.join(output_dir, "graphs-%05d.tar.gz")
         sink = stack.enter_context(wds.ShardWriter(shard_pattern, maxsize=max_size_shard, verbose=False))
 
-        kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if filter_kmers else None for i in range(cfg.threads)]
+        kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if pool_kmers else None for i in range(cfg.threads)]
         actors = [
             # Convert all arguments to easily serializable types, e.g, paths to str
             _SerializeGraphAndUniqueKmers.remote(
@@ -250,7 +253,7 @@ def _serialize_graph_and_unique_kmers(
                 "unique_kmer_overlay.bytes": result["unique_kmer_bytes"].tobytes(),
             })
 
-        logging.info("Pre-generating graphs and unique k-mers to %s", shard_pattern)
+        logging.info("Generating all graphs and unique k-mers to %s", shard_pattern)
         region_count = 0
         for variants_region, variants in tqdm(
             overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region),
@@ -275,28 +278,26 @@ def _serialize_graph_and_unique_kmers(
         del pool, actors # Clean up actors (i.e., ensure files are closed)
         logging.info("Created and saved graphs for %d region(s)", region_count)
 
-        # Single k-mer filtering step across all regions
-        if region_count > 0 and filter_kmers:
-            assert sample.kmc_prefix is not None, "sample must have a KMC database when filter_kmers is True"
+        if region_count > 0 and pool_kmers:
             assert all(kmer_fasta_paths), "All kmer_fasta_paths must be non-None when filter_kmers is True"
-
-            filtered_kmer_path = os.path.join(output_dir, "filtered_kmers")
-            filter_kmc_database_from_fasta(
-                sample.kmc_prefix,
+            # Combine all k-mers into a single KMC database for subsequent filtering
+            unique_kmer_path = os.path.join(output_dir, "unique_kmers")
+            kmc_build_from_fasta(
                 kmer_fasta_paths, # type: ignore
                 cfg.kmer.kmer_size,
-                filtered_kmer_path,
+                unique_kmer_path,
+                tmp_dir,
                 canonicalize=cfg.kmer.canonicalize,
-                tmp_dir=tmp_dir,
                 threads=cfg.threads,
             )
         else:
-            filtered_kmer_path = sample.kmc_prefix
+            unique_kmer_path = None
 
-    return glob.glob(os.path.join(output_dir, "graphs-*.tar.gz")), filtered_kmer_path, region_count
+    return glob.glob(os.path.join(output_dir, "graphs-*.tar.gz")), unique_kmer_path, region_count
 
 
-def _star_alleles(analysis_variants) -> dict[tuple[str, int], int]:
+
+def _star_alleles(analysis_variants: Sequence[Variant]) -> dict[tuple[str, int], int]:
     """Return map of (variant_id, allele) -> num_alleles for every star ('*') allele among analysis_variants"""
     star_alleles = {}
     for variant in analysis_variants:
@@ -307,17 +308,24 @@ def _star_alleles(analysis_variants) -> dict[tuple[str, int], int]:
     return star_alleles
 
 
-def _haplotype_paths(sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[Sequence[int]], star_alleles: dict[tuple[str, int], int]):
-    """For each haplotype, determine the set of (variant_id, allele) pairs it is compatible with
+def haplotype_alleles(
+    sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[Sequence[int]], variants: Sequence[Variant]
+) -> list[set[tuple[str, int]]]:
+    """Return the set of compatible variant alleles, as (variant_id, allele) tuples, for each haplotype.
 
-    `sampler.decode_haplotype` reports the alleles a haplotype actually traverses distinguishing nodes for
-    (using the same trimmed inference masks that drove sampling, so overlapping variants' shared boundary
-    nodes never make a haplotype ambiguous about its own alleles). A star allele has no graph path of its
-    own -- it reuses whatever nodes its variant's REF allele would -- so it can never be decoded directly.
-    Instead, a star allele is compatible with a haplotype whenever none of that variant's other *real*
-    alleles were decoded for it; REF is excluded from that check since REF and a star share the same nodes
-    and so cannot be told apart from decoding alone.
+    Since a '*' allele has no path of its own, we consider a haplotype compatible with a '*' allele whenever
+    none of the other alleles for that variant are in the haplotype.
+
+    Args:
+        sampler (HaplotypeSamplerOverlay): Haplotype sampler
+        haplotypes (Sequence[Sequence[int]]): List of haplotypes, each as a sequences of node IDs
+        variants (Sequence[Variant]): List of variants to consider for compatibility
+
+    Returns:
+        list[set[tuple[str, int]]]: List of sets of (variant_id, allele) tuples for each haplotype
     """
+    star_alleles = _star_alleles(variants)
+
     haplotype_paths = []
     for haplotype in haplotypes:
         paths = set(sampler.decode_haplotype(haplotype))
@@ -326,6 +334,84 @@ def _haplotype_paths(sampler: HaplotypeSamplerOverlay, haplotypes: Sequence[Sequ
                 paths.add((variant_id, star_idx))
         haplotype_paths.append(paths)
     return haplotype_paths
+
+
+def prepare_genotyping_haplotypes(
+    graph: Graph,
+    sampler: HaplotypeSamplerOverlay,
+    haplotypes: Sequence[Sequence[int]],
+    analysis_variants: Sequence[Variant],
+    contig: str,
+    sample_name: str,
+    ploidy: int = 2,
+) -> tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]:
+    """Extend and reorder sampled haplotypes so they are suitable for genotyping.
+
+    The returned haplotypes are guaranteed to include the reference haplotype (at index 0) and, for
+    any "true" haplotype path present in the graph for `sample_name`, that haplotype as well. Haplotypes
+    already present among `haplotypes` are reused (and reordered as needed); the same true haplotype
+    repeated across ploidy indices (e.g. a homozygous genotype) is only added once.
+
+    Args:
+        graph (Graph): Graph for the region, used to obtain the reference and "true" haplotype paths.
+        sampler (HaplotypeSamplerOverlay): Haplotype sampler used to translate haplotypes into sets of
+            compatible variant alleles.
+        haplotypes (Sequence[Sequence[int]]): Previously sampled haplotypes, each as a sequence of node IDs.
+            Not modified in place.
+        analysis_variants (Sequence[Variant]): Variants to consider when computing haplotype-allele
+            compatibility.
+        contig (str): The contig for the reference path.
+        sample_name (str): Sample name used to look up "true" haplotype paths in the graph.
+        ploidy (int, optional): Number of "true" haplotype paths to look for. Defaults to 2.
+
+    Returns:
+        tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]: A tuple of:
+            - haplotypes: Extended list of haplotypes, with the reference haplotype at index 0.
+            - alleles: List of sets of (variant_id, allele) tuples for each haplotype, parallel to `haplotypes`.
+            - true_haplotype_idxs: The sample's genotype as indices into `haplotypes`/`alleles`, one per
+              ploidy index (in ploidy order), with `None` for any ploidy index whose path isn't present in
+              the graph. Empty if none of the sample's "true" haplotype paths are present in the graph.
+    """
+    haplotypes = list(haplotypes) # Make copy of haplotypes so we can modify it without affecting the caller
+    alleles = haplotype_alleles(sampler, haplotypes, analysis_variants)
+
+    # Ensure the reference haplotype is present and at index 0
+    ref_alleles = {(variant.variant_id, 0) for variant in analysis_variants}
+    ref_haplotype_idx = next(
+        (i for i, haplotype_alleles_ in enumerate(alleles) if haplotype_alleles_ == ref_alleles), None
+    )
+    if ref_haplotype_idx is None:
+        # Add the reference haplotype to the sampled haplotypes at index 0
+        haplotypes.insert(0, graph.path_nodes(contig))
+        alleles.insert(0, ref_alleles)
+    elif ref_haplotype_idx != 0:
+        # Move the reference haplotype to index 0
+        haplotypes.insert(0, haplotypes.pop(ref_haplotype_idx))
+        alleles.insert(0, alleles.pop(ref_haplotype_idx))
+
+    # For each ploidy index with a fully resolved "true" path in the graph, ensure that haplotype is
+    # present in the haplotype list and report its index (i.e., the sample's genotype).
+    # TODO: Generate a "best" path for ploidy indices without a fully resolved path in the graph.
+    true_hap_names = [f"{sample_name}#{i}#{contig}#0" for i in range(ploidy)]
+    true_hap_allele_idxs, true_hap_paths = tuple(zip(
+        *((i, graph.path_nodes(name)) for i, name in enumerate(true_hap_names) if graph.has_path(name)), strict=True
+    )) or ((), ())
+    if not true_hap_allele_idxs:
+        return haplotypes, alleles, []
+
+    true_hap_alleles = haplotype_alleles(sampler, true_hap_paths, analysis_variants)
+
+    true_hap_idxs: list[int | None] = [None] * ploidy
+    for allele_idx, hap_path, hap_alleles in zip(true_hap_allele_idxs, true_hap_paths, true_hap_alleles, strict=True):
+        hap_idx = next((i for i, haplotype_alleles_ in enumerate(alleles) if haplotype_alleles_ == hap_alleles), None)
+        if hap_idx is None:
+            # Add the true haplotype to the sampled haplotypes
+            haplotypes.append(hap_path)
+            alleles.append(hap_alleles)
+            hap_idx = len(haplotypes) - 1
+        true_hap_idxs[allele_idx] = hap_idx
+
+    return haplotypes, alleles, true_hap_idxs
 
 
 @ray.remote # type: ignore
@@ -360,8 +446,9 @@ def _diplotypes_in_topk_shard(
             haplotypes = sampler.sample_haplotypes(n=max_haplotypes)
             diplotypes = sampler.sample_diplotypes(haplotypes, n=max_diplotypes)
             assert len(haplotypes) > 0, f"No haplotypes sampled for region {region_string} in shard {shard_path}"
+
             # Translate haplotypes to sets of (variant_id, allele) pairs they are compatible with
-            haplotype_paths = _haplotype_paths(sampler, haplotypes, _star_alleles(analysis_variants))
+            haplotype_paths = haplotype_alleles(sampler, haplotypes, analysis_variants)
 
             record_rows = []
             all_matching_haplotypes = []
@@ -446,9 +533,9 @@ def diplotypes_in_topk(
     sample: Sample,
     *,
     min_variant_size=50,
-    filter_kmers=False,
     progress_bar=False,
-    graph_shards=None,
+    graph_shards: Sequence[PathType]|None =None,
+    unique_kmer_path: PathType | None = None,
     filtered_kmer_path: PathType | None = None,
     region: Range | None = None,
 ) -> pd.DataFrame:
@@ -483,25 +570,23 @@ def diplotypes_in_topk(
 
         # Phase 1: Create and serialize graphs for subsequent analysis along with filtered k-mers
         if graph_shards is None:
-            graph_shards, filtered_kmer_path, *_ = _serialize_graph_and_unique_kmers(
+            graph_shards, unique_kmer_path, *_ = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                sample,
                 ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
                 output_dir=tmp_dir,
                 min_variant_size=min_variant_size,
-                filter_kmers=filter_kmers,
+                pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
                 progress_bar=progress_bar,
                 region=region,
             )
         if filtered_kmer_path is None:
-            filtered_kmer_path = sample.kmc_prefix
-        if not graph_shards or not filtered_kmer_path:
-            msg = "No graph shards or filtered k-mer path available for genotype analysis"
-            raise ValueError(msg)
-        if (filter_kmer_k := _kmc_db_kmer_size(filtered_kmer_path)) != cfg.kmer.kmer_size:
-            msg = f"Filtered k-mer database has k={filter_kmer_k} but expected k={cfg.kmer.kmer_size}"
-            raise ValueError(msg)
+            assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered k-mer path is not provided"
+            assert sample.kmc_prefix is not None, "sample must have a KMC database when filtered_kmer_path is not provided"
+            filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
+            kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
+
+        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, f"Filtered k-mer database has k={_kmc_db_kmer_size(filtered_kmer_path)} but expected k={cfg.kmer.kmer_size}"
 
         # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
         pending = [

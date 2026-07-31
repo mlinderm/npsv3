@@ -1,8 +1,13 @@
 #include <algorithm>
+#include <array>
+#include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include <boost/dynamic_bitset.hpp>
+#include <boost/intrusive_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
 #include "graph.hpp"
 #include "kmer.hpp"
@@ -69,8 +74,29 @@ class HaplotypeSamplerOverlay {
   /// Return up to @p n unique highest-scoring distinct paths through the graph using the current k-mer scores.
   std::vector<Haplotype> FindBestPaths(size_t n) const;
 
+  /// Same as FindBestPaths(n), but also reports in @p attempts_used how many forward-pass attempts the
+  /// adaptive widening loop needed (1 == settled on the first, narrowest attempt -- no widening fired).
+  /// Exposed for tests that need to observe whether widening actually triggered, not just its outcome.
+  std::vector<Haplotype> FindBestPaths(size_t n, size_t* attempts_used) const;
+
+  /// Testing-only: return up to @p n distinct highest-scoring paths from a single, non-adaptive forward
+  /// pass at exactly width @p n -- i.e. skip PropagateBestPathStateAdaptively's score_to_go widening
+  /// check entirely. Exposed so tests can directly compare the un-widened result against the certified
+  /// one from FindBestPaths(n).
+  std::vector<Haplotype> FindBestPathsFixedWidth(size_t n) const;
+
   /// Return the top @p n haplotypes, sorted by descending score, sampled greedily from the graph using k-mer coverage.
+  ///
+  /// Each draw runs a single, un-widened forward pass at exactly the requested width (OPTIMIZATION_PROPOSALS.md
+  /// "Proposal 2") rather than PropagateBestPathStateAdaptively's score_to_go-certified doubling loop -- see that
+  /// call site's comment in haplotype.cpp for the empirical justification.
   std::vector<Haplotype> SampleHaplotypes(size_t n);
+
+  /// Testing-only: same as SampleHaplotypes(n), but each draw goes through PropagateBestPathStateAdaptively
+  /// (today's certified/widened DP) instead of the production fixed-width pass. Exposed so tests can compare
+  /// the full multi-draw, UpdateScores-mutating sampling loop's actual output against the pre-"Proposal 2"
+  /// adaptive behavior end to end, not just a single forward pass in isolation.
+  std::vector<Haplotype> SampleHaplotypesAdaptive(size_t n);
 
   /// Return the top @p n highest-scoring diplotypes from all pairs of the @p candidate haplotypes, sorted by descending score.
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n = 1) const;
@@ -78,9 +104,11 @@ class HaplotypeSamplerOverlay {
   /// Score @p haplotype under the current k-mer scores, i.e. the same score used to rank haplotypes while sampling.
   double Score(const Haplotype& haplotype) const;
 
-  /// Return the variant_id-allele pairs a @p haplotype traversed by a haplotype or is corresponding @p covered_paths set
+  ///@{
+  /// Return the variant_id-allele pairs traversed by a @p haplotype or its corresponding @p covered_paths set
   std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Haplotype& haplotype) const;
   std::vector<std::pair<std::string, size_t>> DecodeHaplotype(const Graph::PathIdSet& covered_paths) const;
+  ///@}
 
   /// Number of unique k-mers used in sampling
   size_t NumKmers() const { return kmers_.size(); }
@@ -90,39 +118,104 @@ class HaplotypeSamplerOverlay {
 
   /// Current score for k-mer @p idx (as used in Score()/PropagateBestPathState).
   double KmerScoreAt(size_t idx) const { return kmers_[idx].score; }
+  
   /// Sequence for k-mer @p idx.
   const std::string& KmerSequenceAt(size_t idx) const { return kmer_sequences_[idx]; }
 
   using AutomatonIndex = size_t;
   static constexpr size_t kAutomatonRoot = 0;
 
+  /// Purpose-implemented replacement "small" map optimized for nodes with small number of outgoing edges.
+  /// The narrow case uses linear scan in a fixed inline array, while wide states fall back to an unordered
+  /// map.
+  ///
+  /// Profiling indicated most non-root states have <= 2 goto_ entries, however attempts to use generic
+  /// flat_map with small_vector regressed performance due to their generic indirection and binary search
+  /// overhead. Exposed here to facilitate testing.
+  class GotoMap {
+   public:
+    static constexpr size_t kInlineCapacity = 4;
+
+    GotoMap() = default;
+    GotoMap(GotoMap&&) = default;
+    GotoMap& operator=(GotoMap&&) = default;
+    // unique_ptr makes the implicit copy operations deleted; restore value semantics (deep-copying
+    // overflow_ when present) so AutomatonState/HaplotypeSamplerOverlay remain copyable.
+    GotoMap(const GotoMap& other);
+    GotoMap& operator=(const GotoMap& other);
+
+    /// Return a pointer to the child state for @p node_id, or nullptr if there is no such edge.
+    const AutomatonIndex* find(odgi::nid_t node_id) const;
+
+    /// Insert @p node_id -> @p child. Precondition: no edge for node_id already exists (matches trie
+    /// construction, which only inserts after a failed find()).
+    void emplace(odgi::nid_t node_id, AutomatonIndex child);
+
+    size_t size() const;
+
+    /// Visit every (node_id, child) edge. Construction-only use (BFS over goto_ to build fail links);
+    /// not on the query-time hot path.
+    template <typename Fn>
+    void for_each(Fn&& fn) const;
+
+   private:
+    std::array<odgi::nid_t, kInlineCapacity> inline_keys_{};
+    std::array<AutomatonIndex, kInlineCapacity> inline_values_{};
+    size_t size_ = 0;
+    std::unique_ptr<std::unordered_map<odgi::nid_t, AutomatonIndex>> overflow_;
+  };
+
   /// A state in the Aho-Corasick automaton mapping k-mer locations (path snippets) to k-mer indices.
   /// Exposed for direct unit testing of goto/fail/output construction.
   struct AutomatonState {
-    std::unordered_map<odgi::nid_t, AutomatonIndex> goto_; ///< Trie edges: node id -> child state
+    GotoMap goto_; ///< Trie edges: node id -> child state
     AutomatonIndex fail = kAutomatonRoot; ///< Failure link: state for the longest proper suffix of this state's path that is still a live prefix
-    KmerIdSet output_kmers_; ///< Every k-mer whose location ends exactly here, including via failure links
-    explicit AutomatonState(size_t kmer_count = 0) : output_kmers_(kmer_count) {}
+    /// K-mer indices whose location ends exactly here, including via failure links, in ascending order.
+    /// Stored as a flat sparse list rather than a per-state KmerIdSet as output sets are extremely sparse in
+    /// practice (median 1 set bit, ~9 mean, measured on a dense 30k-k-mer/25k-state automaton). Empty for
+    /// states with no pending/completing k-mer match.
+    std::vector<uint32_t> output_kmer_indices_;
   };
 
   const std::vector<AutomatonState>& Automaton() const { return automaton_; }
 
  private:
 
+  struct HaplotypeSamplerCommonCtor {};
+  inline static constexpr HaplotypeSamplerCommonCtor kCommonCtor{};
+
+  HaplotypeSamplerOverlay(HaplotypeSamplerCommonCtor, const Graph& graph, const std::vector<std::string>& sequences,
+                          const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params);
+
   struct KmerScore {
     KmerZygosity zygosity;
     double score;
   };
 
+  /// Immutable covered_paths bitset plus its hash, computed once when the set is finalized, to enable DP transitions
+  /// that don't add any new path bits to share their predecessor's bitset via pointer copy (instead of a deep copy).
+  ///
+  /// Reference counted via boost::intrusive_ptr using a thread unsafe counter. We assume this will only be used
+  /// in a single-threaded context (e.g., distinct Ray worker processes).
+  struct PathIdSetHolder : public boost::intrusive_ref_counter<PathIdSetHolder, boost::thread_unsafe_counter> {
+    Graph::PathIdSet bits;
+    size_t hash;
+
+    explicit PathIdSetHolder(Graph::PathIdSet b) : bits(std::move(b)), hash(boost::hash_value(bits)) {}
+  };
+  using SharedPathIdSet = boost::intrusive_ptr<const PathIdSetHolder>;
+
+  /// Backpointer for a single haplotype path at a settlement point (graph node + automaton state) in the 
+  /// DP sampling algorithm.
   struct Backpointer {
     double score;
     odgi::nid_t pred_node;
     AutomatonIndex pred_automaton_state; ///< Automaton state pool at pred_node this entry backtracks into
     size_t pred_path_idx; ///< Index within that (pred_node, pred_automaton_state) pool
-    Graph::PathIdSet covered_paths;
+    SharedPathIdSet covered_paths; ///< Immutable; shared across backpointers
   };
 
-  /// For haplotype sampling, maintain G x (AutomationIndex -> N x Backpointer), where G is number of graph nodes.
+  /// For sampling N haplotypes, maintain G x (AutomationIndex -> N x Backpointer), where G is number of graph nodes.
   using StatePool = std::vector<Backpointer>;
   using NodeState = std::unordered_map<AutomatonIndex, StatePool>;
   using BestPathState = std::vector<NodeState>;
@@ -146,8 +239,16 @@ class HaplotypeSamplerOverlay {
 
   /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
   /// for the current k-mer scores, using adaptive beam search (increasing @p n up to a factor of @p max_widening)
-  /// to guarantee that the top scoring paths are returned.                                      
-  BestPathState PropagateBestPathStateAdaptively(size_t n, size_t max_widening = 8) const;
+  /// to guarantee that the top scoring paths are returned. When @p attempts_used is non-null, it's set to
+  /// the number of forward-pass attempts made (1 == no widening was needed).
+  ///
+  /// No longer on SampleHaplotypes' hot path (see OPTIMIZATION_PROPOSALS.md "Proposal 2" -- widening was
+  /// empirically found to never change the sampled result, only to certify it); retained as the certified
+  /// reference implementation used by FindBestPaths(n) and by tests that check the fixed-width DP against it.
+  BestPathState PropagateBestPathStateAdaptively(size_t n, size_t max_widening = 8, size_t* attempts_used = nullptr) const;
+
+  /// Extract the final top-n distinct paths (applying the path filter, if active) from a completed @p path_state.
+  std::vector<Haplotype> ExtractBestPaths(const BestPathState& path_state) const;
 
   /// Compute best achievable *additional* score [v][s] from Graph node v with pending automaton state s
   /// to the sink for the current k-mer scores. Used as an admissible bound in adaptive beam search.
@@ -157,11 +258,15 @@ class HaplotypeSamplerOverlay {
   PathWithCoverage BacktrackPath(const BestPathState& path_state, AutomatonIndex back_automaton_state,
                                  size_t back_idx) const;
 
-  /// Return the additive score delta for every k-mer in @p set
-  double KmerSetScoreDelta(const KmerIdSet& set) const;
+  /// Return the additive score delta for every k-mer output at automaton state @p state
+  double KmerSetScoreDelta(AutomatonIndex state) const;
 
   /// Update the scores of k-mers having sampled @p path
   void UpdateScores(const Graph::NodeIdSeq& path);
+
+  /// Shared multi-draw greedy sampling loop behind SampleHaplotypes(n)/SampleHaplotypesAdaptive(n); differs
+  /// only in how each draw's BestPathState is computed, via @p propagate(width).
+  std::vector<Haplotype> SampleHaplotypesImpl(size_t n, const std::function<BestPathState(size_t)>& propagate);
 
   const Graph& graph_;
   Params params_;
@@ -173,7 +278,20 @@ class HaplotypeSamplerOverlay {
   std::vector<std::string> kmer_sequences_; ///< k-mer sequences
   std::vector<KmerScore> kmers_; ///< k-mer zygosity and score information (parallel to kmer_sequences_)
 
-  std::vector<AutomatonState> automaton_; ///< Aho-Corasick automaton over every k-mer's recorded location, rooted at automaton_[kAutomatonRoot]
+  /// Aho-Corasick automaton over every k-mer's recorded location, rooted at `automaton_[kAutomatonRoot]`
+  std::vector<AutomatonState> automaton_;
+
+  /// Node ids that appear *anywhere* in some k-mer's recorded location, i.e., the automaton's full symbol
+  /// alphabet across every state. If a node_id is absent here, `AutomatonGoto(state, node_id) == kAutomatonRoot`
+  /// for *every* state and we can skip the fail-chasing walk and its associated costs.
+  Graph::NodeIdSet trie_symbol_mask_;
+
+  /// Node ids whose arrival actually changes a path's covered_paths set, i.e. `graph_.node_variant_paths_[id]`
+  /// (masked by `inference_path_mask_`/`inference_node_mask_` when `apply_path_filter_` is set) is non-empty.
+  /// Computed once and then used for propagate `covered_paths` via cheap pointer copy when it doesn't change.
+  Graph::NodeIdSet contributes_paths_mask_;
+
+  void InitializeContributesPathsMask();
 };
 
 }

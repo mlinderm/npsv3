@@ -159,7 +159,20 @@ NB_MODULE(_native_graph, m) {
     }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
     .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
-    .def("find_best_paths", &npsv3::HaplotypeSamplerOverlay::FindBestPaths, "n"_a)
+    .def("find_best_paths",
+         static_cast<std::vector<npsv3::HaplotypeSamplerOverlay::Haplotype> (npsv3::HaplotypeSamplerOverlay::*)(size_t) const>(
+             &npsv3::HaplotypeSamplerOverlay::FindBestPaths),
+         "n"_a)
+    // Testing-only: bypasses the adaptive score_to_go widening loop entirely (a single, fixed-width
+    // forward pass), to let tests compare against find_best_paths' certified/adaptive result directly.
+    .def("find_best_paths_fixed_width", &npsv3::HaplotypeSamplerOverlay::FindBestPathsFixedWidth, "n"_a)
+    // Testing-only: same as find_best_paths, but also reports how many forward-pass attempts the
+    // adaptive widening loop needed (1 == settled on the first, narrowest attempt -- no widening fired).
+    .def("find_best_paths_with_attempts", [](const npsv3::HaplotypeSamplerOverlay& self, size_t n) {
+      size_t attempts = 0;
+      auto paths = self.FindBestPaths(n, &attempts);
+      return std::make_pair(std::move(paths), attempts);
+    }, "n"_a)
     .def("sample_diplotypes", &npsv3::HaplotypeSamplerOverlay::SampleDiplotypes, "candidates"_a, "n"_a)
     .def("score", &npsv3::HaplotypeSamplerOverlay::Score, "haplotype"_a)
     .def("decode_haplotype", nb::overload_cast<const npsv3::HaplotypeSamplerOverlay::Haplotype&>(&npsv3::HaplotypeSamplerOverlay::DecodeHaplotype, nb::const_), "haplotype"_a)
@@ -399,6 +412,6 @@ NB_MODULE(_native_graph, m) {
       }
       return graph.PathSequence(handles.begin(), handles.end());
     }, "nodes"_a)
-    .def("haplotype_paths", &npsv3::Graph::HaplotypePaths, "prefix"_a)
+    .def_prop_ro("region", &npsv3::Graph::region)
     ;
 }

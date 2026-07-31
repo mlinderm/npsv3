@@ -14,6 +14,8 @@ import pandas as pd
 import pybedtools.bedtool as bed
 import pysam
 
+from npsv3.types import PathType
+
 _REQUIRED_STATS_FIELDS = ("sequencer", "read_length", "mean_coverage", "mean_insert_size", "std_insert_size")
 
 
@@ -455,144 +457,79 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
 
     return stats
 
-def _kmc_build_and_intersect(
-    fasta_path: str | os.PathLike[str] | list[str | os.PathLike[str]],
-    genome_db_prefix: str | os.PathLike[str],
+def kmc_build_from_fasta(
+    fasta_path: PathType | list[PathType],
     k: int,
-    output_db_prefix: str | os.PathLike[str],
+    output_db_prefix: PathType,
     work_dir: str,
     *,
     canonicalize: bool = False,
     threads: int = 1,
     max_memory: int = 12,
-) -> None:
-    """Build a KMC database from fasta_path and intersect it with genome_db_prefix."""
-    graph_db = os.path.join(work_dir, "graph_kmers")
+) -> PathType:
+    with tempfile.TemporaryDirectory(dir=work_dir, ignore_cleanup_errors=True) as kmc_tmp:
+        kmc_input_list = os.path.join(kmc_tmp, "graph_kmers_input.txt")
+        with open(kmc_input_list, "w") as f:
+            for path in (fasta_path if isinstance(fasta_path, list) else [fasta_path]):
+                f.write(str(path))
+                f.write("\n")
+        subprocess.check_call(
+            f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci1 -cs255 -fa @{quote(str(kmc_input_list))} {quote(str(output_db_prefix))} {quote(kmc_tmp)}",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return output_db_prefix
 
-    kmc_tmp = os.path.join(work_dir, "graph_kmers_tmp")
-    os.makedirs(kmc_tmp)
 
-    kmc_input_list = os.path.join(work_dir, "graph_kmers_input.txt")
-    with open(kmc_input_list, "w") as f:
-        for path in (fasta_path if isinstance(fasta_path, list) else [fasta_path]):
-            f.write(str(path))
-            f.write("\n")
-
+def kmc_filter(
+    source_db_prefix: PathType,
+    filter_db_prefix: PathType,
+    output_db_prefix: PathType,
+    *,
+    threads: int = 1,
+) -> PathType:
     subprocess.check_call(
-        f"kmc -t{threads} -m{max_memory} -sm -k{k} {'-b' if not canonicalize else ''} -ci1 -cs255 -fa @{quote(str(kmc_input_list))} {quote(graph_db)} {quote(kmc_tmp)}",
+        f"kmc_tools -t{threads} -hp simple {quote(str(source_db_prefix))} {quote(str(filter_db_prefix))} intersect {quote(str(output_db_prefix))} -ocleft",
         shell=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
-    parent = os.path.dirname(output_db_prefix)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    subprocess.check_call(
-        f"kmc_tools -t{threads} -hp simple {quote(str(genome_db_prefix))} {quote(str(graph_db))} intersect {quote(str(output_db_prefix))} -ocleft",
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return output_db_prefix
 
 
-def filter_kmc_database(
-    genome_db_prefix: str | os.PathLike[str],
-    unique_kmers: "UniqueKmersOverlay",
+def filter_kmers_by_unique_kmers(
+    sample_kmer_path: PathType,
+    unique_kmers,
     k: int,
-    output_db_prefix: str | os.PathLike[str],
+    filtered_kmer_path: PathType,
     *,
     canonicalize: bool = False,
     tmp_dir: str | None = None,
     threads: int = 1,
     max_memory: int = 12,
-) -> str | os.PathLike[str]:
-    """Create a KMC database containing only the subset of genome_db_prefix with unique k-mers from the graph
+) -> PathType:
+    """Create a KMC database containing only the subset of sample_kmer_path with unique k-mers from the graph
 
     Args:
-        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
+        sample_kmer_path: Path prefix for the sample KMC database (without suffixes).
         unique_kmers: UniqueKmersOverlay object containing the unique k-mers.
         k: K-mer length used when building the graph unique k-mers.
-        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
+        filtered_kmer_prefix: Path prefix for the filtered KMC database (without suffixes).
         tmp_dir: Directory for temporary files, Python default directory if None.
         threads: Number of threads for KMC tools. Defaults to 1.
         max_memory: Maximum memory to use for KMC tools. Defaults to 12.
     Returns:
-        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
+        str|os.PathLike[str]: filtered_kmer_prefix, pointing to the filtered KMC database.
     """
-    if (genome_db_k := _kmc_db_kmer_size(genome_db_prefix)) != k:
-        msg = f"Genome k-mer database has k={genome_db_k} but expected k={k}"
+    if (sample_kmer_k := _kmc_db_kmer_size(sample_kmer_path)) != k:
+        msg = f"Sample k-mer database has k={sample_kmer_k} but expected k={k}"
         raise ValueError(msg)
-    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
+    with tempfile.TemporaryDirectory(dir=tmp_dir, ignore_cleanup_errors=True) as work_dir:
         fasta_path = os.path.join(work_dir, "graph_kmers.fa")
+        unique_kmc_prefix = os.path.join(work_dir, "graph_kmers")
         unique_kmers.save_fasta(fasta_path)
-        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
-                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
-    return output_db_prefix
+        kmc_build_from_fasta(fasta_path, k, unique_kmc_prefix, work_dir, canonicalize=canonicalize, threads=threads, max_memory=max_memory)
+        kmc_filter(sample_kmer_path, unique_kmc_prefix, filtered_kmer_path, threads=threads)
 
-
-def filter_kmc_database_from_fasta(
-    genome_db_prefix: str | os.PathLike[str],
-    fasta_path: str | os.PathLike[str] | list[str | os.PathLike[str]],
-    k: int,
-    output_db_prefix: str | os.PathLike[str],
-    *,
-    canonicalize: bool = False,
-    tmp_dir: str | None = None,
-    threads: int = 1,
-    max_memory: int = 12,
-) -> str | os.PathLike[str]:
-    """Create a KMC database by intersecting genome_db_prefix with k-mers in an existing FASTA file.
-
-    Compared to filter_kmc_database, the FASTA has already been written by the caller — useful
-    when k-mers from multiple regions have been collected incrementally during a first pass.
-
-    Args:
-        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
-        fasta_path: Path to a FASTA file containing the k-mer sequences to filter by.
-        k: K-mer length.
-        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
-        tmp_dir: Directory for temporary files, Python default directory if None.
-        threads: Number of threads for KMC tools. Defaults to 1.
-        max_memory: Maximum memory to use for KMC tools. Defaults to 12.
-    Returns:
-        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
-    """
-    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
-        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
-                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
-    return output_db_prefix
-
-
-def filter_kmc_database_for_regions(
-    genome_db_prefix: str | os.PathLike[str],
-    unique_kmers_list,
-    k: int,
-    output_db_prefix: str | os.PathLike[str],
-    canonicalize: bool = False,
-    tmp_dir: str | None = None,
-    threads: int = 1,
-    max_memory: int = 12,
-) -> str | os.PathLike[str]:
-    """Create a KMC database from the union of unique k-mers across multiple regions in a single pass.
-
-    Args:
-        genome_db_prefix: Path prefix for the genome KMC database (without suffixes).
-        unique_kmers_list: Sequence of UniqueKmersOverlay objects, one per region.
-        k: K-mer length.
-        output_db_prefix: Path prefix for the filtered KMC database (without suffixes).
-        tmp_dir: Directory for temporary files, Python default directory if None.
-        threads: Number of threads for KMC tools. Defaults to 1.
-        max_memory: Maximum memory to use for KMC tools. Defaults to 12.
-    Returns:
-        str|os.PathLike[str]: output_db_prefix, pointing to the filtered KMC database.
-    """
-    with tempfile.TemporaryDirectory(dir=tmp_dir) as work_dir:
-        fasta_path = os.path.join(work_dir, "graph_kmers.fa")
-        with open(fasta_path, "w") as f:
-            for region_idx, uk in enumerate(unique_kmers_list):
-                for kmer_idx, seq in enumerate(uk.sequences):
-                    f.write(f">r{region_idx}_{kmer_idx}\n{seq}\n")
-        _kmc_build_and_intersect(fasta_path, genome_db_prefix, k, output_db_prefix, work_dir,
-                                 canonicalize=canonicalize, threads=threads, max_memory=max_memory)
-    return output_db_prefix
+        return filtered_kmer_path
