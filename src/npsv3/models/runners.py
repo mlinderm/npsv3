@@ -2,6 +2,7 @@ import hydra
 import lightning as L
 import torch
 from omegaconf import OmegaConf
+import os
 
 from npsv3.models.paired import WorstLossCallback
 
@@ -22,6 +23,8 @@ def load_model_from_checkpoint(cfg, *, strict=True):
     )
 
 def train(cfg, output_dir=None, **kw_args):
+
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True" # AI RECOMMENDED TO PREVENT MEMORY FRAGMENTATION.
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
