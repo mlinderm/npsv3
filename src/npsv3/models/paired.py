@@ -23,110 +23,12 @@ from npsv3.models.metrics import (
     GenotypingNonRefRecall,
 )
 from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoImageProcessor, AutoModel
 
-'''
-def modify_dino_patch_embedding(backbone, new_in_channels=7):
-    """Replaces standard 3-channel Conv2d with a 7-channel initialized layer."""
-    # Handle PEFT wrapper if present
-    base_backbone = backbone.base_model.model if hasattr(backbone, "base_model") else backbone
-    
-    old_patch_embed = base_backbone.embeddings.patch_embeddings.projection
-    old_out_channels = old_patch_embed.out_channels
-    kernel_size = old_patch_embed.kernel_size
-    stride = old_patch_embed.stride
-
-    new_patch_embed = nn.Conv2d(
-        in_channels=new_in_channels,
-        out_channels=old_out_channels,
-        kernel_size=kernel_size,
-        stride=stride,
-        bias=(old_patch_embed.bias is not None),
-    )
-
-    with torch.no_grad():
-        old_weights = old_patch_embed.weight.data
-        new_patch_embed.weight.data[:, :3, :, :] = old_weights
-        
-        # Tile remaining channels from RGB channels
-        for c in range(3, new_in_channels):
-            new_patch_embed.weight.data[:, c : c + 1, :, :] = (
-                old_weights[:, c % 3 : c % 3 + 1, :, :]
-            )
-        new_patch_embed.weight.data *= 3.0 / new_in_channels
-
-        if old_patch_embed.bias is not None:
-            new_patch_embed.bias.data = old_patch_embed.bias.data.clone()
-
-    base_backbone.embeddings.patch_embeddings.projection = new_patch_embed
-    
-    # Enable gradients explicitly for the input layer
-    for param in base_backbone.embeddings.patch_embeddings.projection.parameters():
-        param.requires_grad = True
-
-    return backbone
-'''
-def modify_dino_patch_embedding(backbone, new_in_channels=7):
-    """Replaces standard 3-channel Conv2d patch embedding with a 7-channel layer."""
-    
-    # 1. Drill down through PEFT wrapper if present
-    base_backbone = backbone.base_model.model if hasattr(backbone, "base_model") else backbone
-
-    # 2. Safely locate the Conv2d layer regardless of DINO/ViT variant
-    embeddings_node = base_backbone.embeddings.patch_embeddings
-    
-    if isinstance(embeddings_node, nn.Conv2d):
-        # DINOv3 architecture: patch_embeddings IS the Conv2d layer directly
-        old_patch_embed = embeddings_node
-        parent_module = base_backbone.embeddings
-        attr_name = "patch_embeddings"
-    elif hasattr(embeddings_node, "projection") and isinstance(embeddings_node.projection, nn.Conv2d):
-        # Legacy ViT / DINOv1 / DINOv2: Conv2d is nested inside .projection
-        old_patch_embed = embeddings_node.projection
-        parent_module = embeddings_node
-        attr_name = "projection"
-    else:
-        raise AttributeError(f"Could not locate Conv2d patch embedding in {type(embeddings_node)}")
-
-    # 3. Extract dimensions
-    old_out_channels = old_patch_embed.out_channels  # e.g., hidden_size (1024)
-    kernel_size = old_patch_embed.kernel_size        # e.g., (16, 16)
-    stride = old_patch_embed.stride                  # e.g., (16, 16)
-
-    # 4. Instantiate a new Conv2d layer with new_in_channels
-    new_patch_embed = nn.Conv2d(
-        in_channels=new_in_channels,
-        out_channels=old_out_channels,
-        kernel_size=kernel_size,
-        stride=stride,
-        bias=(old_patch_embed.bias is not None),
-    )
-
-    # 5. Initialize weights (copy RGB weights, extend across extra channels, and scale)
-    with torch.no_grad():
-        old_weights = old_patch_embed.weight.data  # Shape: (1024, 3, 16, 16)
-
-        # Copy original RGB weights to the first 3 channels
-        new_patch_embed.weight.data[:, :3, :, :] = old_weights
-
-        # Tile RGB weights across remaining channels
-        for c in range(3, new_in_channels):
-            new_patch_embed.weight.data[:, c : c + 1, :, :] = (
-                old_weights[:, c % 3 : c % 3 + 1, :, :]
-            )
-        new_patch_embed.weight.data *= 3.0 / new_in_channels
-
-        if old_patch_embed.bias is not None:
-            new_patch_embed.bias.data = old_patch_embed.bias.data.clone()
-
-    # 6. Replace the module on the parent
-    setattr(parent_module, attr_name, new_patch_embed)
-
-    # 7. Unfreeze the newly allocated layer
-    for param in getattr(parent_module, attr_name).parameters():
-        param.requires_grad = True
-
-    return backbone
 
 class PostDinoConvLayer(nn.Module):
     def __init__(self, input_dim, output_dim=None):
@@ -189,87 +91,56 @@ class InOutEncoder(nn.Module):
 
         # 2. Base Backbone Setup
         self.backbone = AutoModel.from_pretrained(dino_model)
+        self.backbone.eval()
         self.backbone.config.use_cache = False
 
-        # 3. LoRA Insertion (Targeted to Attention Query/Value for speed and memory)
-        if use_lora:
-            lora_config = LoraConfig(
-                r=lora_r,
-                lora_alpha=lora_alpha,
-                target_modules= "all-linear", # Potentially find way to target just query and value layers
-                lora_dropout=lora_dropout,
-                bias="none",
-            )
-            self.backbone = get_peft_model(self.backbone, lora_config)
+        self.backbone.requires_grad_(False)
+        self.backbone.eval()
 
-            if self.use_direct_7ch:
-                self.backbone = modify_dino_patch_embedding(
-                    self.backbone, new_in_channels=num_channels
-                )
-            
-            self.backbone.print_trainable_parameters()
-        else:
-            if self.use_direct_7ch:
-                self.backbone = modify_dino_patch_embedding(
-                    self.backbone, new_in_channels=num_channels
-                )
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-
-        # 4. Projection Head
+        # --------------------------------------------------
+        # Projection head
+        # --------------------------------------------------
         self.post_dino_layer = PostDinoConvLayer(
             input_dim=self.backbone.config.hidden_size,
             output_dim=projection_size,
         )
 
-    def train(self, mode=True):
-        super().train(mode)
-        if not self.use_lora:
-            self.backbone.eval()
+    def no_weight_decay(self):
+        return set()
 
-    def _run_dino(self, inputs):
-        outputs = self.backbone(pixel_values=inputs).pooler_output
-        return F.normalize(outputs.float(), p=2, dim=1)
-
-    def preprocess(self, x):
-        # Format check: (B, H, W, C) -> (B, C, H, W)
-        if x.ndim == 4 and x.shape[-1] == self.num_channels:
-            x = x.permute(0, 3, 1, 2).contiguous()
-
-        x = x.to(dtype=torch.float32)
-
-        if not self.use_direct_7ch:
-            x = self.adapter(x)
-            x = torch.sigmoid(x)
-            x = F.interpolate(x, size=(128, 128), mode="bilinear", align_corners=False)
-            return (x - self.mean) / self.std
-        else:
-            x = F.interpolate(x, size=(128, 128), mode="bilinear", align_corners=False)
-            return x
+    @torch.no_grad()
+    def _run_backbone(self, x):
+        outputs = self.backbone(pixel_values=x)
+        return outputs.last_hidden_state[:, 0]
 
     def forward(self, x):
-
-        # Should not be triggered? (4d?)
-        is_5d = (x.ndim == 5)
-        if is_5d:
-            bs, G, H, W, C = x.shape
-            x = x.reshape(bs * G, H, W, C)
-
-        x_processed = self.preprocess(x)
-
-        dino_embeddings = []
-        for i in range(0, x_processed.shape[0], self.chunk_size):
-            chunk = x_processed[i : i + self.chunk_size]
-            emb = checkpoint(
-                self._run_dino, 
-                chunk, 
-                use_reentrant=False, 
-                preserve_rng_state=True
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected input of shape (B,C,H,W), got {tuple(x.shape)}"
             )
-            dino_embeddings.append(emb)
 
-        dino_embeddings = torch.cat(dino_embeddings, dim=0)
-        embeddings = self.post_dino_layer(dino_embeddings)
+        # Convert arbitrary channel count to RGB
+        x = self.adapter(x)
+
+        # Resize to DINO resolution
+        x = F.interpolate(
+            x,
+            size=(128, 128),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # ImageNet normalization expected by DINO
+        x = (x - self.mean) / self.std
+
+        embeddings = []
+
+        for chunk in x.split(self.chunk_size):
+            embeddings.append(self._run_backbone(chunk))
+
+        embeddings = torch.cat(embeddings, dim=0)
+
+        return self.post_dino_layer(embeddings)
 
         if is_5d:
             embeddings = embeddings.view(bs, G, -1)
@@ -559,6 +430,8 @@ class PackedVariant(L.LightningModule):
         # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
         labels_nt = torch.nested.nested_tensor_from_jagged(labels, offsets=offsets, max_seqlen=max_support)
 
+        # print("End of PackedVariant forward")
+
         return (metrics, preds, labels_nt, *metadata)
 
     # def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
@@ -645,20 +518,15 @@ class PackedVariant(L.LightningModule):
         '''
         # FILTER WHERE GRAD
         if self.hparams.scheduler is None:
-            print("NO SCHEDULER")
-            optimizer = self.hparams.optimizer(params = filter(lambda p: p.requires_grad, self.trainer.model.parameters()))
-            #print(list(filter(lambda p: p.requires_grad, self.trainer.model.parameters())))
-            #optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
             return { "optimizer": optimizer }
 
         # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
-        #optimizer = create_optimizer_v2(self.trainer.model, "adamw")
-        optimizer = create_optimizer_v2(filter(lambda p: p.requires_grad, self.trainer.model.parameters()), "adamw")
-        print(list(filter(lambda p: p.requires_grad, self.trainer.model.parameters())))
-        print("SCHEDULER")
+        optimizer = create_optimizer_v2(self.trainer.model, "adamw")
         # TODO: Revise for current timm implementation
         #optimizer = self.hparams.optimizer(self.trainer.model)
         scheduler= self.hparams.scheduler(optimizer=optimizer)
+        print("COnfigured optimizer with scheduler")
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
         '''
 

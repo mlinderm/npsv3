@@ -1,3 +1,5 @@
+import functools
+
 import hydra
 import lightning as L
 import torch
@@ -5,9 +7,11 @@ from omegaconf import OmegaConf
 import os
 
 from npsv3.models.paired import WorstLossCallback
+from lightning.pytorch.profilers import PyTorchProfiler
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 
-def load_model_from_checkpoint(cfg, *, strict=True):
+def load_model_from_checkpoint(cfg, *, strict=True, weights_only=True):
     # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
     model_cls = hydra.utils.get_class(cfg.model._target_)
 
@@ -19,6 +23,7 @@ def load_model_from_checkpoint(cfg, *, strict=True):
     return model_cls.load_from_checkpoint(
         cfg.model.checkpoint,
         strict=strict,
+        weights_only=weights_only,
         **model_args,
     )
 
@@ -31,9 +36,13 @@ def train(cfg, output_dir=None, **kw_args):
 
     dm = hydra.utils.instantiate(cfg.data)
 
+    # torch.serialization.add_safe_globals([functools.partial])
+
     if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+        print("loading from new")
         model = hydra.utils.instantiate(cfg.model)
     else:
+        print("loading from checkpoint")
         model = load_model_from_checkpoint(cfg, strict=False)
 
     # Compile the model (if requested) to attempt to speed up training
@@ -55,6 +64,11 @@ def train(cfg, output_dir=None, **kw_args):
 
     # Skip testing if no testing data provided
     limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if cfg.data.test_urls else 0
+
+    profiler = PyTorchProfiler(
+        on_trace_ready=torch.profiler.tensorboard_trace_handler("./logs/profiler"),
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+    )
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,
@@ -83,7 +97,8 @@ def test(cfg, **kw_args):
     if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
        model = hydra.utils.instantiate(cfg.model)
     else:
-       model = load_model_from_checkpoint(cfg)
+    #    torch.serialization.add_safe_globals([ModelCheckpoint])
+       model = load_model_from_checkpoint(cfg, weights_only=False)
 
 
     trainer_args = {
@@ -105,7 +120,7 @@ def predict(cfg, return_predictions=None, **kw_args):
     if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
        model = hydra.utils.instantiate(cfg.model)
     else:
-       model = load_model_from_checkpoint(cfg)
+       model = load_model_from_checkpoint(cfg, weights_only=False)
 
     trainer_args = {
         "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50), WorstLossCallback()],
