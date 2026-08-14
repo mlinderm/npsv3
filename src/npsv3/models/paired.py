@@ -1,7 +1,6 @@
 import heapq
 from turtle import mode
 from typing import Callable, Optional
-
 import hydra
 import lightning as L
 import torch
@@ -12,9 +11,9 @@ from torch.utils.checkpoint import checkpoint
 from torchvision import models
 from torchvision.transforms import v2 as transforms
 from timm.optim import create_optimizer_v2
-
 from peft import LoraConfig, get_peft_model, TaskType
-
+from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
+from transformers import AutoImageProcessor, AutoModel
 from npsv3.models.metrics import (
     GenotypingConcordance,
     GenotypingNonRefConcordance,
@@ -22,13 +21,6 @@ from npsv3.models.metrics import (
     GenotypingNonRefPrecision,
     GenotypingNonRefRecall,
 )
-from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoImageProcessor, AutoModel
-
 
 class PostDinoConvLayer(nn.Module):
     def __init__(self, input_dim, output_dim=None):
@@ -40,7 +32,6 @@ class PostDinoConvLayer(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(input_dim, output_dim),
         )
-
     def forward(self, x):
         x = self.mlp(x)
         return F.normalize(x, p=2, dim=1, eps=1e-6)
@@ -93,7 +84,6 @@ class InOutEncoder(nn.Module):
         self.backbone = AutoModel.from_pretrained(dino_model)
         self.backbone.eval()
         self.backbone.config.use_cache = False
-
         self.backbone.requires_grad_(False)
         self.backbone.eval()
 
