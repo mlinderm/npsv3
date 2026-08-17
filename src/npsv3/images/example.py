@@ -439,7 +439,7 @@ def vcf_to_region_examples(
             regions.append(variant.reference_region.expand(cfg.pileup.variant_padding))
 
     os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
         # To ensure Ray worker processes know about our custom resolvers, we set up the runtime environment with a worker process hook.
@@ -473,7 +473,7 @@ def vcf_to_variant_examples(
     regions = [region for region, *_ in overlapping_records(inference_vcf, flank=group_padding)]
 
     os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
         # to avoid conflicts between clusters running on the same node.
         ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))

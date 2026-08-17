@@ -535,7 +535,7 @@ class Graph:
             try:
                 constructor = GraphConstructor(region, merged_graph_vcf)
             except:
-                shutil.copy(merged_graph_vcf, "/home/mlinderman/error.vcf.gz")
+                #shutil.copy(merged_graph_vcf, "/home/mlinderman/error.vcf.gz")
                 raise
             constructor.to_gfa(reference_fasta, gfa_path)
 

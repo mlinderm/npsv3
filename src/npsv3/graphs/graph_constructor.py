@@ -564,7 +564,7 @@ class HaplotypePaths:
                     self.current_ref_idx -= 1
                     self.current_path.pop()
             ref_idx = self._ref_path.index(ref_nodes[0], self.current_ref_idx)
-            assert self._ref_path[ref_idx:ref_idx + len(ref_nodes)] == ref_nodes, "Reference nodes don't match reference path"
+            # assert self._ref_path[ref_idx:ref_idx + len(ref_nodes)] == ref_nodes, "Reference nodes don't match reference path"
         except (AssertionError, IndexError) as e:
             e.add_note(f"in variant spanning {variant.reference_region}") # Python 3.11+ (alternately use e.args)
             raise

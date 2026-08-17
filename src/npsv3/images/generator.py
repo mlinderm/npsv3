@@ -151,9 +151,12 @@ class ImageGenerator:
         return region.expand(left_padding, right_padding)
 
     def image_region_variable(self, region) -> Range:
-        # May need something to prevent padding when larger than the maximum image width
+        max_width = self._cfg.pileup.max_image_width
         # Pads the image by at least 96 pixels and rounds up to the nearest value divisible by 16
         to_pad = 2 * self._cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1))
+        # If the image is smaller than the maximum width but padding would push it over the edge, pad only up to the maximum width to avoid compression
+        if region.length < max_width and to_pad + region.length > max_width:
+            to_pad = max_width - region.length
         # print("rounded padding:", (16 - (((region.length-1) % 16) + 1)))
         # print("region length:", region.length)
         # print("to pad:",to_pad)

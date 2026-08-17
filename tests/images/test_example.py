@@ -164,7 +164,7 @@ class TestVariableWidthImages:
         assert os.path.exists(png_path)
 
     def test_compress_del(self, tmp_path, cfg, hg002_sample):
-        OmegaConf.update(cfg, "pileup", {"max_image_width": 288}, merge = True)
+        OmegaConf.update(cfg, "pileup", {"max_image_width": 960}, merge = True)
 
         # 823 length deletion
         region = Range("12", 22129564, 22130387)
@@ -183,7 +183,7 @@ class TestVariableWidthImages:
         img_width = 2 * cfg.pileup.variant_padding + (16 - (((region.length-1) % 16) + 1)) + region.length
         img_width = cfg.pileup.max_image_width if img_width > cfg.pileup.max_image_width else img_width
         assert example["image"].shape == (cfg.pileup.image_height, img_width, len(cfg.pileup.image_channels))
-        assert example["image"].shape[1] <= cfg.pileup.max_image_width
+        assert example["image"].shape[1] == cfg.pileup.max_image_width
         assert example["label"] == 3  # 1/1 genotype
 
         assert example["sim.images"].shape == (
