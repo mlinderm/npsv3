@@ -1,15 +1,21 @@
 import atexit
+import contextlib
 import copy
+import glob
 import json
 import logging
 import os
+import pathlib
 import random
+import re
 import subprocess
 import tempfile
 from shlex import quote
 
 import portalocker
+import pysam
 
+from npsv3.types import PathType
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
 
@@ -71,8 +77,6 @@ def _bwa_index_load(reference, lock_file="/var/tmp/npsv2/bwa.lock") -> str | Non
                 # if other references are in use
                 if current_counts.get(shared_name, 0) > 0 or _is_bwa_index_loaded(shared_name):
                     logging.info("Incrementing reference count for %s", shared_name)
-                    # logging.info("Count: %d", current_counts.get(shared_name, 0))
-                    # logging.info("Loaded: %d", _is_bwa_index_loaded(shared_name))
                     assert _is_bwa_index_loaded(shared_name)
                     current_counts[shared_name] += 1
                 else:
@@ -129,9 +133,9 @@ def simulate_variant_sequencing(
     sample: Sample,
     reference: str,
     shared_reference=None,
-    dir=tempfile.gettempdir(),
+    dir=None,
     stats_path: str | None = None,
-    region: Range = None,
+    region: Range | None = None,
     phase_vcf_path: str | None = None,
     aligner: str = "bwa",
 ):
@@ -141,8 +145,8 @@ def simulate_variant_sequencing(
         f"-r {quote(str(region))} -v {quote(phase_vcf_path)} -N {sample.name}" if region and phase_vcf_path else ""
     )
 
-    replicate_bam = tempfile.NamedTemporaryFile(delete=False, suffix=".bam", dir=dir)
-    replicate_bam.close()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".bam", dir=dir) as replicate_bam_file:
+        replicate_bam = replicate_bam_file.name
 
     synth_commandline = f"synthBAM \
         -t {quote(dir)} \
@@ -158,15 +162,14 @@ def simulate_variant_sequencing(
         -i 1 \
         -a {aligner} \
         {quote(fasta_path)} \
-        {quote(replicate_bam.name)}"
+        {quote(replicate_bam)}"
 
     synth_result = subprocess.run(synth_commandline, shell=True, stderr=subprocess.PIPE, check=False)
-    if synth_result.returncode != 0 or not os.path.exists(replicate_bam.name):
-        print(synth_result.stderr)
+    if synth_result.returncode != 0 or not os.path.exists(replicate_bam):
         msg = "Synthesis script failed to generate BAM"
         raise RuntimeError(msg)
 
-    return replicate_bam.name
+    return replicate_bam
 
 
 def augment_sample(original_sample: Sample, n, keep_original=True):
@@ -177,7 +180,7 @@ def augment_sample(original_sample: Sample, n, keep_original=True):
     for _ in range(n - len(new_samples)):
         new_sample = copy.copy(original_sample)
 
-        new_sample.mean_coverage = random.uniform(
+        new_sample.mean_coverage = random.uniform(  # noqa: S311
             max(original_sample.mean_coverage * 0.5, 0), original_sample.mean_coverage + 0
         )
         # new_sample.mean_insert_size = random.uniform(original_sample.mean_insert_size - 75, original_sample.mean_insert_size + 75)
@@ -186,3 +189,30 @@ def augment_sample(original_sample: Sample, n, keep_original=True):
         new_samples.append(new_sample)
 
     return new_samples
+
+def split_bam_by_tag(bam_path: PathType, output_dir: PathType, tag: str) -> dict[str, PathType]:
+    """Split BAM file into distinct files by tag
+
+    Args:
+        bam_path (PathType): Merged BAM path
+        output_dir (PathType): Directory to write split BAM files
+        tag (str): BAM tag (must be string or integer)
+
+    Returns:
+        dict[str, PathType]: Tag->Path mapping
+    """
+    bam_path = pathlib.Path(bam_path)
+    output_dir = pathlib.Path(output_dir)
+    with contextlib.chdir(output_dir):
+        pysam.split("-d", tag, str(bam_path.absolute()), catch_stdout=False)
+
+    # Extract tag from samtools split output files, e.g., <basename>_<tag>.bam, to { tag: path } mapping
+    tag_pattern = fr"{bam_path.stem}_([^.]+)\.bam"
+
+    tag_paths = {}
+    for path in output_dir.iterdir():
+        if match := path.is_file() and re.fullmatch(tag_pattern, path.name):
+            pysam.index(str(path))
+            tag_paths[match.group(1)] = path
+    return tag_paths
+

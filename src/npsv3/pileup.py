@@ -5,6 +5,7 @@ from enum import Enum
 
 import pysam
 
+from npsv3.types import PathType
 from npsv3.util.range import Range
 
 CIGAR_ADVANCE_PILEUP = frozenset(
@@ -403,9 +404,9 @@ class ReadPileup:
             self.add_insert(fragment.insert_region, phase=read1.phase, **attributes)
 
 
-def fetch_reads(read_path: str, fetch_region: Range, reference: str | None = None) -> FragmentTracker:
+def fetch_reads(read_path: PathType, fetch_region: Range, reference: str | None = None) -> FragmentTracker:
     fragments = FragmentTracker()
-    with pysam.AlignmentFile(read_path, reference_filename=reference) as alignment_file:
+    with pysam.AlignmentFile(str(read_path), reference_filename=reference) as alignment_file:
         for read in alignment_file.fetch(**fetch_region.pysam_fetch):
             if read.is_duplicate or read.is_qcfail or read.is_unmapped or read.is_secondary or read.is_supplementary:
                 # TODO: Potentially recover secondary/supplementary alignments if primary is outside pileup region

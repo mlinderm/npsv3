@@ -22,12 +22,10 @@
 namespace npsv3 {
 
 namespace {
-// Ad hoc, opt-in (NPSV3_HAPLOTYPE_PROFILE=1) timing breakdown for PropagateBestPathStateAdaptively, to separate
-// the higher-level algorithmic cost drivers documented in PERFORMANCE_NOTES.md: (1) the per-sampled-haplotype
-// repeat of the *entire* DP (SampleHaplotypes calls this once per haplotype), (2) adaptive-widening retries
-// within a single call (each a full extra forward pass), (3) beam-width growth's effect on a single forward
-// pass's cost, and (4) ComputeScoreToGo's fixed backward-sweep cost, paid once per call regardless of width.
-// Negligible overhead when disabled (one getenv call, cached in a function-local static).
+// Ad hoc, opt-in (NPSV3_HAPLOTYPE_PROFILE=1) timing/memory breakdown for SampleHaplotypes, documented in
+// PERFORMANCE_NOTES.md: since it re-runs the DP from scratch once per sampled haplotype, per-draw wall time
+// and resident memory (rss_kb/hwm_kb) are printed to stderr as one HAP_PROFILE line per draw. Negligible
+// overhead when disabled (one getenv call, cached in a function-local static).
 bool HaplotypeProfilingEnabled() {
   static const bool enabled = std::getenv("NPSV3_HAPLOTYPE_PROFILE") != nullptr;
   return enabled;
@@ -40,7 +38,7 @@ double ElapsedMs(ProfileClock::time_point start) {
 
 // Process-wide resident memory, sampled from /proc/self/status. rss_kb is the *current* resident set
 // (drops when the allocator returns freed pages to the OS, which it often doesn't promptly -- so this can
-// stay elevated after a discarded widening attempt's C++ objects are destroyed); hwm_kb ("high water mark")
+// stay elevated for a while after a large draw's C++ objects are destroyed); hwm_kb ("high water mark")
 // is the peak resident set since process start and is monotonically non-decreasing, i.e. the number that
 // actually predicts OOM-kill risk. Linux-only (matches this project's documented environment); returns
 // zeros if /proc/self/status is unavailable rather than failing the (opt-in, diagnostic-only) measurement.
@@ -365,29 +363,20 @@ namespace {
     backtrack.resize(std::distance(backtrack.begin(), last));
   }
 
-  /// Apply the settlement-point rule. 
+  /// Apply the settlement-point rule.
   ///
   /// At the automaton root (or the final sink, where no k-mer match can still be pending), it's safe to collapse
   /// to the top @p n *distinct* covered_paths classes. At any other (pending-match) automaton state, collapsing
   /// to @p n classes could discard a class that would have gone on to have a better score when its pending match
   /// resolves, so only exact-duplicate merging (node, automaton_state, covered_paths) is applied there.
-  ///
-  /// When @p max_discarded_score is non-null and this trim actually discards entries (settled and
-  /// backtrack.size() > n), it is updated to the highest score among the discarded entries -- the caller
-  /// combines this with an admissible score_to_go bound to certify whether widening @p n could still matter.
   template <typename T>
-  void SortAndTrimBacktrack(T& backtrack, size_t n, bool settled = true, double* max_discarded_score = nullptr) {
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool settled = true) {
     DedupCoveredPaths(backtrack);
     if (!settled) return;
 
     size_t new_size = std::min(n, backtrack.size());
     std::partial_sort(backtrack.begin(), backtrack.begin() + new_size, backtrack.end(),
                       [](const auto& a, const auto& b) { return a.score > b.score; });
-    if (max_discarded_score && backtrack.size() > new_size) {
-      auto discarded_best = std::max_element(backtrack.begin() + new_size, backtrack.end(),
-                                             [](const auto& a, const auto& b) { return a.score < b.score; });
-      *max_discarded_score = std::max(*max_discarded_score, discarded_best->score);
-    }
     backtrack.resize(new_size);
   }
 }
@@ -429,24 +418,10 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::Extract
 }
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
-  return FindBestPaths(n, nullptr);
-}
-
-std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n, size_t* attempts_used) const {
-  auto result = ExtractBestPaths(PropagateBestPathStateAdaptively(n, /*max_widening=*/8, attempts_used));
-  // The adaptive loop's settled width can exceed n (widening enlarges the beam to *certify* the top n,
-  // not to deliberately return more); trim back to the documented "up to n" contract. Safe because
-  // ExtractBestPaths' backing pool is already sorted by descending score, so this keeps the best n.
-  if (result.size() > n) result.resize(n);
-  return result;
-}
-
-std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPathsFixedWidth(size_t n) const {
   return ExtractBestPaths(PropagateBestPathState(n));
 }
 
-HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(
-    size_t n, const std::vector<std::vector<double>>* score_to_go, double* max_escaped_bound) const {
+HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(size_t n) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
   const size_t covered_paths_size = graph_.node_variant_paths_[min_id].size(); // All nodes should have the same size path sets
@@ -503,12 +478,7 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     // to n classes could discard a class that would have gone on to have a better score when its pending match
     // resolves, so only exact-duplicate merging (node, automaton_state, covered_paths) is applied there.    
     for (auto& [automaton_state, pool] : node_state) {
-      double discarded = -std::numeric_limits<double>::infinity();
-      SortAndTrimBacktrack(pool, n, /*settled=*/automaton_state == kAutomatonRoot,
-                            score_to_go ? &discarded : nullptr);
-      if (score_to_go && std::isfinite(discarded)) {
-        *max_escaped_bound = std::max(*max_escaped_bound, discarded + (*score_to_go)[i - min_id][automaton_state]);
-      }
+      SortAndTrimBacktrack(pool, n, /*settled=*/automaton_state == kAutomatonRoot);
     }
 
     // Propagate along every real forward graph edge
@@ -555,137 +525,11 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
   for (auto& [automaton_state, pool] : sink_state) {
     merged.insert(merged.end(), std::make_move_iterator(pool.begin()), std::make_move_iterator(pool.end()));
   }
-  {
-    double discarded = -std::numeric_limits<double>::infinity();
-    SortAndTrimBacktrack(merged, n, /*settled=*/true, score_to_go ? &discarded : nullptr);
-    // No k-mer match can complete after the sink, so score_to_go is 0 there regardless of automaton state.
-    if (score_to_go && std::isfinite(discarded)) {
-      *max_escaped_bound = std::max(*max_escaped_bound, discarded);
-    }
-  }
+  SortAndTrimBacktrack(merged, n, /*settled=*/true);
   sink_state.clear();
   sink_state.emplace(kAutomatonRoot, std::move(merged));
 
   return dp;
-}
-
-HaplotypeSamplerOverlay::ScoreToGoTable HaplotypeSamplerOverlay::ComputeScoreToGo() const {
-  const odgi::nid_t min_id = graph_.min_node_id();
-  const odgi::nid_t max_id = graph_.max_node_id();
-  const size_t num_states = automaton_.size();
-
-  // score_to_go[v - min_id][s] mirrors PropagateBestPathState's forward transitions exactly, but
-  // backward: since node ids are topologically sorted, every real edge / automaton transition only ever
-  // points to a strictly higher node id, so a single reverse pass over node id suffices.
-  ScoreToGoTable score_to_go(max_id - min_id + 1, std::vector<double>(num_states, 0.0));
-
-  for (odgi::nid_t i = max_id - 1; i >= min_id; --i) {
-    if (!graph_.has_node(i)) continue;
-
-    auto& row = score_to_go[i - min_id];
-    std::fill(row.begin(), row.end(), -std::numeric_limits<double>::infinity());
-
-    graph_.follow_edges(graph_.get_handle(i), false /* forward */, [&](const handlegraph::handle_t& next) {
-      auto next_node = graph_.get_id(next);
-      const auto& next_row = score_to_go[next_node - min_id];
-      if (!trie_symbol_mask_.test(next_node)) {
-        // next_node never appears in any k-mer location, so AutomatonGoto(s, next_node) == kAutomatonRoot
-        // (and KmerSetScoreDelta(kAutomatonRoot) == 0.0, since output_kmer_indices_ is always empty at the root)
-        // for *every* state s -- every row[s] is max'd with the identical constant. Skip the per-state
-        // AutomatonGoto/KmerSetScoreDelta calls (the dominant cost of this function, since it otherwise
-        // runs them for every state on every edge) in favor of a plain branchless max sweep.
-        double val = next_row[kAutomatonRoot];
-        for (size_t s = 0; s < num_states; ++s) row[s] = std::max(row[s], val);
-        return true;
-      }
-      for (size_t s = 0; s < num_states; ++s) {
-        size_t new_state = AutomatonGoto(s, next_node);
-        double weight_delta = KmerSetScoreDelta(new_state);
-        row[s] = std::max(row[s], weight_delta + next_row[new_state]);
-      }
-      return true;
-    });
-  }
-
-  return score_to_go;
-}
-
-HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathStateAdaptively(size_t n, size_t max_widening, size_t* attempts_used) const {
-  const bool profiling = HaplotypeProfilingEnabled();
-  static size_t call_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
-  size_t this_call = profiling ? call_index++ : 0;
-  auto call_start = ProfileClock::now();
-  RssSample call_start_rss = profiling ? CurrentRss() : RssSample{};
-
-  if (profiling) {
-    const odgi::nid_t min_id = graph_.min_node_id();
-    const odgi::nid_t max_id = graph_.max_node_id();
-    const size_t num_graph_nodes = max_id - min_id + 1;
-    const size_t num_automaton_states = automaton_.size();
-    const size_t covered_paths_bits = graph_.node_variant_paths_[min_id].size();
-    // ScoreToGoTable is vector<vector<double>> (haplotype.hpp): num_graph_nodes separate heap allocations
-    // (one per row), each holding num_automaton_states doubles. Payload bytes below is just the doubles;
-    // it excludes each row's own std::vector control-block + allocator bookkeeping, which a single flat
-    // allocation would avoid entirely (num_graph_nodes-1 fewer allocations).
-    const size_t score_to_go_payload_bytes = num_graph_nodes * num_automaton_states * sizeof(double);
-    // A single PathIdSetHolder's boost::dynamic_bitset block storage alone (excludes the holder's own
-    // hash/refcount/dynamic_bitset-object overhead) -- one of these is allocated per DP transition where
-    // contributes_paths_mask_ is set (see PropagateBestPathState), shared thereafter via intrusive_ptr.
-    const size_t covered_paths_bitset_bytes = ((covered_paths_bits + 63) / 64) * 8;
-    fmt::print(stderr,
-               "HAP_PROFILE call={} n={} stage=sizes graph_nodes={} automaton_states={} "
-               "score_to_go_payload_bytes={} covered_paths_bits={} covered_paths_bitset_bytes={} "
-               "rss_kb={} hwm_kb={}\n",
-               this_call, n, num_graph_nodes, num_automaton_states, score_to_go_payload_bytes,
-               covered_paths_bits, covered_paths_bitset_bytes, call_start_rss.rss_kb, call_start_rss.hwm_kb);
-  }
-
-  auto score_to_go_start = ProfileClock::now();
-  auto score_to_go = ComputeScoreToGo();
-  if (profiling) {
-    RssSample rss = CurrentRss();
-    fmt::print(stderr, "HAP_PROFILE call={} n={} stage=score_to_go ms={:.3f} rss_kb={} hwm_kb={} rss_delta_kb={}\n",
-               this_call, n, ElapsedMs(score_to_go_start), rss.rss_kb, rss.hwm_kb, rss.rss_kb - call_start_rss.rss_kb);
-  }
-
-  // Adaptive beam search. Start by maintaining n backpointers, then double with the width until the top scoring paths
-  // are guaranteed to be included. max_escaped_bound reports an admissible upper bound on what a discarded branch
-  // could still have scored. If the weakest_kept_score is >= that bound, no discarded branch could have beaten the
-  // worst kept result, so the top-n set must contain the true top-n and the search can stop. Otherwise, some discarded
-  // branch *might* have beaten the worst kept result, so the width is doubled and the search is redone from scratch at
-  // the wider beam.
-  for (size_t width = n, attempt = 0; ; width *= 2, ++attempt) {
-    auto forward_start = ProfileClock::now();
-    double max_escaped_bound = -std::numeric_limits<double>::infinity();
-    auto path_state = PropagateBestPathState(width, &score_to_go, &max_escaped_bound);
-
-    const auto& results = path_state.back().at(kAutomatonRoot);
-    double weakest_kept_score = results.empty() ? -std::numeric_limits<double>::infinity() : results.back().score;
-    bool settled = weakest_kept_score >= max_escaped_bound || width > max_widening * std::max<size_t>(n, 1);
-    if (profiling) {
-      // Sampled with path_state (this attempt's full BestPathState, i.e. its backpointer pools/PathIdSetHolders)
-      // still alive: reflects this attempt's own footprint. Any *previous* attempt's path_state was already
-      // destroyed when that loop iteration's scope ended, before this attempt's PropagateBestPathState call --
-      // so rss_delta_kb isolates this attempt, but if the allocator doesn't return freed pages to the OS
-      // promptly, rss_kb/hwm_kb can still show elevated (non-dropping) memory carried over from earlier,
-      // already-destroyed attempts in this same call.
-      RssSample rss = CurrentRss();
-      fmt::print(stderr,
-                 "HAP_PROFILE call={} n={} stage=forward attempt={} width={} ms={:.3f} settled={} weakest={:.4f} bound={:.4f} "
-                 "rss_kb={} hwm_kb={} rss_delta_kb={}\n",
-                 this_call, n, attempt, width, ElapsedMs(forward_start), settled ? 1 : 0, weakest_kept_score, max_escaped_bound,
-                 rss.rss_kb, rss.hwm_kb, rss.rss_kb - call_start_rss.rss_kb);
-    }
-    if (settled) {
-      if (attempts_used) *attempts_used = attempt + 1;
-      if (profiling) {
-        RssSample rss = CurrentRss();
-        fmt::print(stderr, "HAP_PROFILE call={} n={} stage=total ms={:.3f} final_width={} attempts={} rss_kb={} hwm_kb={}\n",
-                   this_call, n, ElapsedMs(call_start), width, attempt + 1, rss.rss_kb, rss.hwm_kb);
-      }
-      return path_state;
-    }
-  }
 }
 
 HaplotypeSamplerOverlay::KmerIdSet HaplotypeSamplerOverlay::KmersOnPath(const Haplotype& path) const {
@@ -755,45 +599,47 @@ HaplotypeSamplerOverlay::PathWithCoverage HaplotypeSamplerOverlay::BacktrackPath
 }
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
-  // OPTIMIZATION_PROPOSALS.md "Proposal 2": run each draw as a single forward pass at exactly the requested
-  // width instead of going through PropagateBestPathStateAdaptively's score_to_go-certified doubling loop.
-  // Empirically validated (see that doc's "Empirical validation of Proposal 2") across 450 synthetic + 60
-  // real-small-region + 21 real worst-case-region trials to never change the sampled result versus the
-  // certified/widened result: every discard SortAndTrimBacktrack performs compares entries within a single
-  // (node, automaton_state) pool, and score_to_go is a pure function of that same pair, so a same-pool
-  // comparison of current score is already exact, not an approximation -- widening was only ever needed to
-  // *certify* that, never to find a different answer. This also drops the ~43%-of-runtime ComputeScoreToGo
-  // sweep (PERFORMANCE_NOTES.md "Higher-level timing breakdown") and the memory-compounding effect of
-  // discarded widening attempts (PERFORMANCE_NOTES.md "Memory consumption by driver") entirely, since
-  // neither ever runs here now. See SampleHaplotypesAdaptive(n) for the pre-Proposal-2 behavior, kept for
-  // comparison in tests.
+  // Each draw runs PropagateBestPathState as a single forward pass at exactly the requested width
+  // (OPTIMIZATION_PROPOSALS.md "Proposal 2"), rather than the score_to_go-certified doubling/widening loop
+  // this replaced. Empirically validated (see that doc's "Empirical validation of Proposal 2") across 450
+  // synthetic + 60 real-small-region + 21 real worst-case-region trials to never change the sampled result
+  // versus the certified/widened result: every discard SortAndTrimBacktrack performs compares entries
+  // within a single (node, automaton_state) pool, and score_to_go was a pure function of that same pair, so
+  // a same-pool comparison of current score is already exact, not an approximation -- widening was only
+  // ever needed to *certify* that, never to find a different answer.
   const bool profiling = HaplotypeProfilingEnabled();
-  static size_t draw_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
-  return SampleHaplotypesImpl(n, [&](size_t width) {
-    auto draw_start = ProfileClock::now();
-    auto path_state = PropagateBestPathState(width);
-    if (profiling) {
-      RssSample rss = CurrentRss();
-      fmt::print(stderr, "HAP_PROFILE call={} n={} width={} stage=fixed_width ms={:.3f} rss_kb={} hwm_kb={}\n",
-                 draw_index++, n, width, ElapsedMs(draw_start), rss.rss_kb, rss.hwm_kb);
-    }
-    return path_state;
-  });
-}
+  static size_t call_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
+  size_t this_call = profiling ? call_index++ : 0;
+  RssSample call_start_rss = profiling ? CurrentRss() : RssSample{};
+  if (profiling) {
+    const odgi::nid_t min_id = graph_.min_node_id();
+    const odgi::nid_t max_id = graph_.max_node_id();
+    const size_t covered_paths_bits = graph_.node_variant_paths_[min_id].size();
+    // A single PathIdSetHolder's boost::dynamic_bitset block storage alone (excludes the holder's own
+    // hash/refcount/dynamic_bitset-object overhead) -- one of these is allocated per DP transition where
+    // contributes_paths_mask_ is set (see PropagateBestPathState), shared thereafter via intrusive_ptr.
+    const size_t covered_paths_bitset_bytes = ((covered_paths_bits + 63) / 64) * 8;
+    fmt::print(stderr,
+               "HAP_PROFILE call={} n={} stage=sizes graph_nodes={} automaton_states={} "
+               "covered_paths_bits={} covered_paths_bitset_bytes={} rss_kb={} hwm_kb={}\n",
+               this_call, n, max_id - min_id + 1, automaton_.size(), covered_paths_bits,
+               covered_paths_bitset_bytes, call_start_rss.rss_kb, call_start_rss.hwm_kb);
+  }
 
-std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypesAdaptive(size_t n) {
-  return SampleHaplotypesImpl(n, [this](size_t width) { return PropagateBestPathStateAdaptively(width); });
-}
-
-std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypesImpl(
-    size_t n, const std::function<BestPathState(size_t)>& propagate) {
   std::vector<PathWithCoverage> samples;
   samples.reserve(n);
 
   while (samples.size() < n) {
     // Request more paths than already selected. Since we could select a path with no covered paths, we sample the
     // top (|selected|+2) paths to ensure we can find a new distinct path that covers at least one inference path.
-    auto path_state = propagate(samples.size() + 2);
+    size_t width = samples.size() + 2;
+    auto draw_start = ProfileClock::now();
+    auto path_state = PropagateBestPathState(width);
+    if (profiling) {
+      RssSample rss = CurrentRss();
+      fmt::print(stderr, "HAP_PROFILE call={} n={} width={} stage=fixed_width ms={:.3f} rss_kb={} hwm_kb={}\n",
+                 this_call, n, width, ElapsedMs(draw_start), rss.rss_kb, rss.hwm_kb);
+    }
     const auto & candidates = path_state.back().at(kAutomatonRoot);
 
     size_t back_idx = candidates.size();

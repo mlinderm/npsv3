@@ -2,7 +2,6 @@
 #include <filesystem>
 #include <memory>
 #include <random>
-#include <sys/resource.h>
 
 #include <fmt/std.h>
 #include <fmt/ranges.h>
@@ -624,7 +623,7 @@ TEST_F(OverlappingKeyTest, HaplotypeSamplerCreditsBothOverlappingMultiNodeKeys) 
   EXPECT_DOUBLE_EQ(sampler.Score(paths[0]), true_ref_score);
 }
 
-// Verification tests for adaptive beam search
+// Verification that an aggressively narrow beam (width 1) still finds the true global optimum.
 class BeamMissStressTest : public ::testing::Test {
 public:
   static constexpr const char* kFastaContent = R"FASTA(>chr1
@@ -731,9 +730,9 @@ TEST_F(BeamMissStressTest, HaplotypeSamplerFindsGlobalOptimumUnderAggressiveTrim
   // uniform "always ref" or "always alt" choice.
   EXPECT_EQ(best_path, build_path(0, 1, 1));
 
-  // FindBestPaths(1) forces n=1, the narrowest possible beam, at every single node throughout the
-  // DP. Per the Markovian-future argument above, PropagateCertifiedBestPathState should certify this on
-  // its very first attempt (no widening needed) and return exactly the brute-forced optimum.
+  // FindBestPaths(1) forces n=1, the narrowest possible beam, at every single node throughout the DP --
+  // it should still return exactly the brute-forced optimum (see OPTIMIZATION_PROPOSALS.md's "Empirical
+  // validation of Proposal 2": same-pool score comparisons are exact regardless of beam width).
   auto paths = sampler.FindBestPaths(1);
   ASSERT_EQ(paths.size(), 1u);
   EXPECT_EQ(paths[0], best_path);
@@ -741,15 +740,14 @@ TEST_F(BeamMissStressTest, HaplotypeSamplerFindsGlobalOptimumUnderAggressiveTrim
 }
 
 // -----------------------------------------------------------------------------------------------
-// Empirical check for OPTIMIZATION_PROPOSALS.md's Proposal 2 (drop the adaptive/score_to_go
-// widening guarantee, run once at a fixed width): does widening ever actually change the final
-// answer, versus a single non-adaptive PropagateBestPathState pass at the same width?
+// Correctness check for HaplotypeSamplerOptimalityTest below (OPTIMIZATION_PROPOSALS.md's Proposal 2
+// made FindBestPaths(n) a single, fixed-width forward pass -- no widening/certification loop -- so this
+// is what actually proves it still finds the true optimum, not merely a self-consistency check).
 //
 // Generalizes BeamMissStressTest to an arbitrary-length chain of biallelic SNPs, then across many
 // random adversarial per-SNP score assignments (including exact ties, which stress the beam's
 // tie-breaking as directly as any margin does), brute-forces the true global optimum (2^K
-// combinations) and compares it against both FindBestPathsFixedWidth(n) (a single pass, no
-// widening -- what Proposal 2 would ship) and FindBestPaths(n) (today's certified/adaptive result).
+// combinations) and compares it against FindBestPaths(n).
 class SNPChainFixture {
  public:
   explicit SNPChainFixture(size_t num_snps)
@@ -861,7 +859,7 @@ class SNPChainFixture {
   std::vector<handlegraph::handle_t> h_ref_, h_alt_, h_mid_;
 };
 
-TEST(AdaptiveWideningEquivalenceTest, FixedWidthOneMatchesCertifiedAndBruteForceAcrossRandomAdversarialScores) {
+TEST(HaplotypeSamplerOptimalityTest, MatchesBruteForceWidthOneAcrossRandomAdversarialScores) {
   constexpr size_t kNumSnps = 9;  // 2^9 = 512 combinations, cheap to brute force
   constexpr int kNumTrials = 300;
 
@@ -872,7 +870,6 @@ TEST(AdaptiveWideningEquivalenceTest, FixedWidthOneMatchesCertifiedAndBruteForce
   std::mt19937 rng(12345);  // fixed seed: deterministic, reproducible across runs
   std::uniform_int_distribution<int> zyg_dist(0, 2);
 
-  size_t widening_fired = 0;
   for (int trial = 0; trial < kNumTrials; ++trial) {
     std::vector<KmerZygosity> zygosities(2 * kNumSnps);
     for (auto& z : zygosities) z = kZygosities[zyg_dist(rng)];
@@ -881,30 +878,14 @@ TEST(AdaptiveWideningEquivalenceTest, FixedWidthOneMatchesCertifiedAndBruteForce
 
     const double brute_force_best = fixture.BruteForceBestScore(*sampler);
 
-    auto fixed = sampler->FindBestPathsFixedWidth(1);
-    ASSERT_EQ(fixed.size(), 1u) << "trial " << trial;
-    const double fixed_score = sampler->Score(fixed[0]);
-
-    size_t attempts = 0;
-    auto adaptive = sampler->FindBestPaths(1, &attempts);
-    ASSERT_EQ(adaptive.size(), 1u) << "trial " << trial;
-    const double adaptive_score = sampler->Score(adaptive[0]);
-    if (attempts > 1) ++widening_fired;
-
-    EXPECT_DOUBLE_EQ(adaptive_score, brute_force_best)
-        << "certified/adaptive result diverged from brute-force ground truth; trial " << trial;
-    EXPECT_DOUBLE_EQ(fixed_score, brute_force_best)
-        << "single non-adaptive width-1 pass diverged from ground truth (widening would have mattered); trial "
-        << trial;
-    EXPECT_DOUBLE_EQ(fixed_score, adaptive_score)
-        << "single non-adaptive pass diverged from the certified/adaptive result; trial " << trial;
+    auto found = sampler->FindBestPaths(1);
+    ASSERT_EQ(found.size(), 1u) << "trial " << trial;
+    EXPECT_DOUBLE_EQ(sampler->Score(found[0]), brute_force_best)
+        << "FindBestPaths(1) diverged from brute-force ground truth; trial " << trial;
   }
-
-  std::cerr << "AdaptiveWideningEquivalenceTest(n=1): widening fired in " << widening_fired << "/" << kNumTrials
-            << " trials; the un-widened single pass's answer never differed from the certified result.\n";
 }
 
-TEST(AdaptiveWideningEquivalenceTest, FixedWidthTwoMatchesCertifiedAndBruteForceAcrossRandomAdversarialScores) {
+TEST(HaplotypeSamplerOptimalityTest, MatchesBruteForceWidthTwoAcrossRandomAdversarialScores) {
   constexpr size_t kNumSnps = 6;  // 2^6 = 64 combinations
   constexpr int kNumTrials = 150;
 
@@ -915,7 +896,6 @@ TEST(AdaptiveWideningEquivalenceTest, FixedWidthTwoMatchesCertifiedAndBruteForce
   std::mt19937 rng(67890);  // different fixed seed than the n=1 test
   std::uniform_int_distribution<int> zyg_dist(0, 2);
 
-  size_t widening_fired = 0;
   for (int trial = 0; trial < kNumTrials; ++trial) {
     std::vector<KmerZygosity> zygosities(2 * kNumSnps);
     for (auto& z : zygosities) z = kZygosities[zyg_dist(rng)];
@@ -925,45 +905,25 @@ TEST(AdaptiveWideningEquivalenceTest, FixedWidthTwoMatchesCertifiedAndBruteForce
     auto brute_top2 = fixture.BruteForceTopScores(*sampler, 2);
     ASSERT_EQ(brute_top2.size(), 2u) << "trial " << trial;
 
-    auto fixed = sampler->FindBestPathsFixedWidth(2);
-    size_t attempts = 0;
-    auto adaptive = sampler->FindBestPaths(2, &attempts);
-    if (attempts > 1) ++widening_fired;
+    auto found = sampler->FindBestPaths(2);
+    ASSERT_EQ(found.size(), 2u) << "trial " << trial;
 
-    ASSERT_EQ(fixed.size(), 2u) << "trial " << trial;
-    ASSERT_EQ(adaptive.size(), 2u) << "trial " << trial;
-
-    // FindBestPaths(n)/FindBestPathsFixedWidth(n) already return results sorted by descending score.
+    // FindBestPaths(n) already returns results sorted by descending score.
     for (size_t i = 0; i < 2; ++i) {
-      EXPECT_DOUBLE_EQ(sampler->Score(adaptive[i]), brute_top2[i])
-          << "certified/adaptive top-" << i << " diverged from brute-force ground truth; trial " << trial;
-      EXPECT_DOUBLE_EQ(sampler->Score(fixed[i]), brute_top2[i])
-          << "single non-adaptive width-2 pass's top-" << i << " diverged from ground truth; trial " << trial;
+      EXPECT_DOUBLE_EQ(sampler->Score(found[i]), brute_top2[i])
+          << "FindBestPaths(2)'s top-" << i << " diverged from brute-force ground truth; trial " << trial;
     }
   }
-
-  std::cerr << "AdaptiveWideningEquivalenceTest(n=2): widening fired in " << widening_fired << "/" << kNumTrials
-            << " trials; the un-widened single pass's top-2 answer never differed from the certified result.\n";
 }
 
-// The two tests above check a single FindBestPaths(n)/FindBestPathsFixedWidth(n) call in isolation. This one
-// exercises what actually changed in production (OPTIMIZATION_PROPOSALS.md "Proposal 2"): SampleHaplotypes'
-// full multi-draw loop, where each draw's UpdateScores call mutates k-mer scores before the next draw runs.
-// Drives two independent samplers -- one through SampleHaplotypesAdaptive(n) (pre-Proposal-2 behavior, kept
-// for this comparison) and one through the production SampleHaplotypes(n) (fixed-width) -- from the same
-// random adversarial initial scores.
-//
-// Unlike the single-call tests above, this compares the *sorted multiset of scores* each trajectory reaches,
-// not per-index haplotypes or per-index scores: InitializeScores maps each zygosity to one canonical score
-// (haplotype.cpp), so whenever a SNP's ref/alt k-mers draw the same zygosity, their contributions tie exactly,
-// making multiple distinct haplotypes equally optimal -- two *independently evolving* trajectories can then
-// legitimately branch onto different (but equally valid) tied choices at any draw, which cascades through
-// UpdateScores into every later draw too. That's expected nondeterminism from ties, not a bug (the file's own
-// existing single-call tests already tolerate it by comparing scores, not paths, for exactly this reason);
-// this test additionally avoids the *dominant* tie source by drawing each SNP's ref/alt from two distinct
-// zygosities, then falls back to a reordering-tolerant score-multiset check for whatever residual/incidental
-// ties remain, so the check stays meaningful without assuming an identical decision at every branch point.
-TEST(AdaptiveWideningEquivalenceTest, SampleHaplotypesFixedWidthMatchesAdaptiveAcrossRandomAdversarialScores) {
+// The two tests above check a single FindBestPaths(n) call in isolation. This one exercises
+// SampleHaplotypes' full multi-draw loop, where each draw's UpdateScores call mutates k-mer scores before
+// the next draw runs: two freshly-constructed samplers given identical initial scores must produce
+// identical draws (the algorithm is deterministic, not order-dependent on anything outside graph/scores).
+// Note: haplotype-by-haplotype Score() calls made *after* the loop finishes reflect the final,
+// fully-mutated k-mer scores, not each draw's scores at selection time, so those can't be used to check a
+// "scores non-increasing across draws" property after the fact -- only equality between two runs is checked.
+TEST(SampleHaplotypesSanityTest, DeterministicAcrossRandomAdversarialScores) {
   constexpr size_t kNumSnps = 9;
   constexpr int kNumTrials = 100;
   constexpr size_t kMaxHaplotypes = 6;  // matches haplotype.py's max_haplotypes default
@@ -971,65 +931,50 @@ TEST(AdaptiveWideningEquivalenceTest, SampleHaplotypesFixedWidthMatchesAdaptiveA
   SNPChainFixture fixture(kNumSnps);
 
   static const KmerZygosity kZygosities[] = {KmerZygosity::ABSENT, KmerZygosity::HETEROZYGOUS, KmerZygosity::HOMOZYGOUS};
-  std::mt19937 rng(24680);  // different fixed seed than the single-call equivalence tests above
+  std::mt19937 rng(24680);  // different fixed seed than the single-call optimality tests above
   std::uniform_int_distribution<int> zyg_dist(0, 2);
-  std::uniform_int_distribution<int> offset_dist(1, 2);  // 1 or 2, to pick a *distinct* second zygosity
-  std::uniform_int_distribution<int> order_dist(0, 1);
 
   for (int trial = 0; trial < kNumTrials; ++trial) {
     std::vector<KmerZygosity> zygosities(2 * kNumSnps);
-    for (size_t i = 0; i < kNumSnps; ++i) {
-      int a = zyg_dist(rng);
-      int b = (a + offset_dist(rng)) % 3;  // always != a
-      if (order_dist(rng)) std::swap(a, b);
-      zygosities[2 * i] = kZygosities[a];      // ref
-      zygosities[2 * i + 1] = kZygosities[b];  // alt
-    }
+    for (auto& z : zygosities) z = kZygosities[zyg_dist(rng)];
     IndexedKmerClassify counts(zygosities);
 
-    // Two independent samplers over the identical graph/initial scores -- each must be driven through its
-    // own full multi-draw loop (not just one forward pass) since UpdateScores mutates per-sampler state
-    // draw over draw.
-    auto adaptive_sampler = fixture.MakeSampler();
-    adaptive_sampler->InitializeScores(counts);
-    auto adaptive_haplotypes = adaptive_sampler->SampleHaplotypesAdaptive(kMaxHaplotypes);
-    std::vector<double> adaptive_scores;
-    for (const auto& h : adaptive_haplotypes) adaptive_scores.push_back(adaptive_sampler->Score(h));
-    std::sort(adaptive_scores.begin(), adaptive_scores.end(), std::greater<double>());
+    // Two independent samplers over the identical graph/initial scores -- each is driven through its own
+    // full multi-draw loop (UpdateScores mutates per-sampler state draw over draw), so this checks that
+    // the algorithm itself is deterministic, not dependent on anything outside (graph, scores) that differs.
+    auto sampler_a = fixture.MakeSampler();
+    sampler_a->InitializeScores(counts);
+    auto haplotypes_a = sampler_a->SampleHaplotypes(kMaxHaplotypes);
 
-    auto fixed_sampler = fixture.MakeSampler();
-    fixed_sampler->InitializeScores(counts);
-    auto fixed_haplotypes = fixed_sampler->SampleHaplotypes(kMaxHaplotypes);
-    std::vector<double> fixed_scores;
-    for (const auto& h : fixed_haplotypes) fixed_scores.push_back(fixed_sampler->Score(h));
-    std::sort(fixed_scores.begin(), fixed_scores.end(), std::greater<double>());
+    auto sampler_b = fixture.MakeSampler();
+    sampler_b->InitializeScores(counts);
+    auto haplotypes_b = sampler_b->SampleHaplotypes(kMaxHaplotypes);
 
-    ASSERT_EQ(fixed_scores.size(), adaptive_scores.size()) << "trial " << trial;
-    for (size_t i = 0; i < fixed_scores.size(); ++i) {
-      EXPECT_DOUBLE_EQ(fixed_scores[i], adaptive_scores[i])
-          << "sorted score " << i << " diverged between fixed-width SampleHaplotypes and "
-          << "SampleHaplotypesAdaptive; trial " << trial;
+    ASSERT_EQ(haplotypes_a.size(), haplotypes_b.size()) << "trial " << trial;
+    for (size_t i = 0; i < haplotypes_a.size(); ++i) {
+      EXPECT_EQ(haplotypes_a[i], haplotypes_b[i])
+          << "draw " << i << " differed between two identically-initialized samplers; trial " << trial;
     }
   }
 }
 
 // -----------------------------------------------------------------------------------------------
-// Same equivalence check as above, but on real, production-scale graphs instead of a synthetic SNP
-// chain: the two benchmark regions from PERFORMANCE_NOTES.md, built from the actual HG00733
-// population VCF -- a "small" region (159 nodes / 1,714 k-mers) and the worst-case dense-variant
-// "large" region (9,560 nodes / 30,099 k-mers / 25,099 automaton states, 3,786 merged overlapping
-// variants). Unlike the SNP chain, there's no tractable brute force here (thousands of variants), so
-// this only checks self-consistency: does FindBestPathsFixedWidth(n) (no widening) ever diverge from
-// FindBestPaths(n) (today's certified/adaptive result)? Real k-mer coverage counts aren't needed to
-// stress the beam search itself, so scores are assigned via RandomKmerClassify instead of a KMC
-// database, matching this file's existing no-KMC-required test pattern.
+// Smoke/sanity test on real, production-scale graphs instead of a synthetic SNP chain: the two
+// benchmark regions from PERFORMANCE_NOTES.md, built from the actual HG00733 population VCF -- a
+// "small" region (159 nodes / 1,714 k-mers) and the worst-case dense-variant "large" region (9,560
+// nodes / 30,099 k-mers / 25,099 automaton states, 3,786 merged overlapping variants). There's no
+// tractable brute force here (thousands of variants), so this checks that FindBestPaths(n) returns up
+// to n valid, distinct, descending-sorted paths without crashing/hanging at real production scale. Real
+// k-mer coverage counts aren't needed to stress the beam search itself, so scores are assigned via
+// RandomKmerClassify instead of a KMC database, matching this file's existing no-KMC-required test
+// pattern.
 namespace {
 const char* const kHG00733PopulationVCF =
     "/storage/mlinderman/projects/sv/npsv3-experiments/resources/"
     "HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz";
 }  // namespace
 
-class RealRegionAdaptiveWideningTest : public GraphConstructionTest {
+class RealRegionSanityTest : public GraphConstructionTest {
  protected:
   void SetUp() override {
     GraphConstructionTest::SetUp();
@@ -1039,42 +984,34 @@ class RealRegionAdaptiveWideningTest : public GraphConstructionTest {
     }
   }
 
-  /// Compare FindBestPathsFixedWidth(n) against FindBestPaths(n) across @p num_trials random
-  /// score assignments, for each width in @p widths. Logs how often widening actually fired.
-  void CheckEquivalence(HaplotypeSamplerOverlay& sampler, const std::vector<size_t>& widths, int num_trials,
-                        unsigned seed, const std::string& label) {
+  /// Run FindBestPaths(n) across @p num_trials random score assignments, for each width in @p widths,
+  /// asserting it returns up to n valid, distinct, descending-sorted paths with no crash/hang.
+  void CheckSane(HaplotypeSamplerOverlay& sampler, const std::vector<size_t>& widths, int num_trials,
+                unsigned seed, const std::string& label) {
     for (size_t n : widths) {
-      size_t widening_fired = 0;
       for (int trial = 0; trial < num_trials; ++trial) {
         RandomKmerClassify counts(seed + static_cast<unsigned>(n) * 100000u + static_cast<unsigned>(trial));
         sampler.InitializeScores(counts);
 
-        struct rusage ru0; getrusage(RUSAGE_SELF, &ru0);
-        std::cerr << "  before FindBestPathsFixedWidth: maxrss_kb=" << ru0.ru_maxrss << "\n";
-        auto fixed = sampler.FindBestPathsFixedWidth(n);
-        struct rusage ru1; getrusage(RUSAGE_SELF, &ru1);
-        std::cerr << "  after  FindBestPathsFixedWidth: maxrss_kb=" << ru1.ru_maxrss << "\n";
-        size_t attempts = 0;
-        auto adaptive = sampler.FindBestPaths(n, &attempts);
-        struct rusage ru2; getrusage(RUSAGE_SELF, &ru2);
-        std::cerr << "  after  FindBestPaths(adaptive): maxrss_kb=" << ru2.ru_maxrss << " attempts=" << attempts << "\n";
-        if (attempts > 1) ++widening_fired;
-
-        ASSERT_EQ(fixed.size(), adaptive.size())
-            << label << ": n=" << n << " trial " << trial << ": returned different numbers of distinct paths";
-        for (size_t i = 0; i < fixed.size(); ++i) {
-          EXPECT_DOUBLE_EQ(sampler.Score(fixed[i]), sampler.Score(adaptive[i]))
-              << label << ": n=" << n << " trial " << trial << ": rank " << i
-              << " diverged between the un-widened pass and the certified/adaptive result";
+        auto paths = sampler.FindBestPaths(n);
+        ASSERT_LE(paths.size(), n)
+            << label << ": n=" << n << " trial " << trial << ": returned more than n paths";
+        for (size_t i = 1; i < paths.size(); ++i) {
+          // Tolerance for floating-point summation-order noise between two near-tied paths' scores
+          // (e.g. 58.400000000000404 vs. 58.400000000000432) -- not a meaningful ordering violation.
+          EXPECT_GE(sampler.Score(paths[i - 1]), sampler.Score(paths[i]) - 1e-6)
+              << label << ": n=" << n << " trial " << trial << ": rank " << i << " scored higher than rank "
+              << (i - 1);
+          EXPECT_NE(paths[i - 1], paths[i])
+              << label << ": n=" << n << " trial " << trial << ": ranks " << (i - 1) << "/" << i
+              << " are the same path";
         }
       }
-      std::cerr << label << "(n=" << n << "): widening fired in " << widening_fired << "/" << num_trials
-                << " trials; the un-widened single pass's answer never differed from the certified result.\n";
     }
   }
 };
 
-TEST_F(RealRegionAdaptiveWideningTest, FixedWidthMatchesCertifiedOnSmallBenchmarkRegion) {
+TEST_F(RealRegionSanityTest, FindBestPathsSaneOnSmallBenchmarkRegion) {
   auto region = Range("chr1", 148538120, 148538280);
   Graph graph(HG38FastaPath_, kHG00733PopulationVCF, region);
 
@@ -1083,15 +1020,15 @@ TEST_F(RealRegionAdaptiveWideningTest, FixedWidthMatchesCertifiedOnSmallBenchmar
   HaplotypeSamplerOverlay sampler(graph, unique_kmers);
   ASSERT_GT(sampler.NumKmers(), 0u);
 
-  CheckEquivalence(sampler, /*widths=*/{1, 8}, /*num_trials=*/30, /*seed=*/1, "SmallBenchmarkRegion");
+  CheckSane(sampler, /*widths=*/{1, 8}, /*num_trials=*/30, /*seed=*/1, "SmallBenchmarkRegion");
 }
 
-TEST_F(RealRegionAdaptiveWideningTest, DISABLED_FixedWidthMatchesCertifiedOnWorstCaseDenseRegion) {
+TEST_F(RealRegionSanityTest, DISABLED_FindBestPathsSaneOnWorstCaseDenseRegion) {
   // DISABLED: RandomKmerClassify at this region's full scale (9,560 nodes / 30,099 k-mers / 25,099
-  // automaton states) reliably exhausts >20GB inside FindBestPathsFixedWidth(1) alone -- i.e. in the
-  // plain forward DP, unrelated to widening/ComputeScoreToGo (confirmed via getrusage instrumentation:
-  // the crash happens before FindBestPathsFixedWidth even returns). Independently-random per-k-mer
-  // scores are apparently not a fair/representative stress input at this scale -- see conversation.
+  // automaton states) reliably exhausts >20GB inside FindBestPaths(1) alone -- i.e. in the plain forward
+  // DP itself (confirmed via getrusage instrumentation: the crash happens before FindBestPaths even
+  // returns). Independently-random per-k-mer scores are apparently not a fair/representative stress
+  // input at this scale -- see OPTIMIZATION_PROPOSALS.md's "Future work: unbounded pending-state pools".
   auto region = Range("chr1", 148531170, 148577610);
   Graph graph(HG38FastaPath_, kHG00733PopulationVCF, region);
 
@@ -1100,7 +1037,5 @@ TEST_F(RealRegionAdaptiveWideningTest, DISABLED_FixedWidthMatchesCertifiedOnWors
   HaplotypeSamplerOverlay sampler(graph, unique_kmers);
   ASSERT_GT(sampler.NumKmers(), 0u);
 
-  // Fewer trials than the small-region test: ComputeScoreToGo alone costs ~3s/call at this scale
-  // (per PERFORMANCE_NOTES.md), and each trial pays for it once via FindBestPaths' adaptive call.
-  CheckEquivalence(sampler, /*widths=*/{1}, /*num_trials=*/1, /*seed=*/2, "WorstCaseDenseRegion");
+  CheckSane(sampler, /*widths=*/{1}, /*num_trials=*/1, /*seed=*/2, "WorstCaseDenseRegion");
 }

@@ -122,6 +122,54 @@ uv run --no-sync gdb -args build/cp312-abi3-linux_x86_64/graph_test "--gtest_fil
 
 To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE_ARGS="--fresh"`.
 
+### Benchmarking
+
+`tests/benchmarks/` holds repeatable benchmarks for `HaplotypeSamplerOverlay` sampling meant to be driven by external profilers rather than instrumented with logging or ad hoc timing code. Two fixed regions from the HG00733 population VCF are used: `small` (~160 nodes/1.7k k-mers) and worst-case `large` (a dense 3,786-variant cluster, ~9.5k nodes/30k k-mers) merged into a single graph via direct construction (`_create_graph_and_sampler`, not `serialize_graph_and_unique_kmers`'s per-cluster splitting -- that would fragment the `large` region into ~21 unrelated smaller graphs instead of the one worst-case automaton it's meant to exercise). No Ray is involved: graph/sampler construction takes a few seconds even for the `large` region and isn't cached; the (slower, subprocess-based `kmc_tools`) filtered k-mer database is cached under `tests/results/` and reused on subsequent runs.
+
+**Quick timing**, standalone (must run as a module so the package's relative imports resolve):
+```
+uv run python3 -m tests.benchmarks.bench_haplotype_sampling --region small
+```
+`--region large`, `--iterations`, `--warmup`, and `--json <path>` (to save per-iteration timings + git commit for later comparison) are also available; see `--help`.
+
+**CPU flamegraph** (Python + native frames), using the already-installed `py-spy`:
+```
+uv run py-spy record --native --rate 100 -f speedscope -o profile.json -- \
+    python3 -m tests.benchmarks.bench_haplotype_sampling --region large --iterations 3
+```
+Open the output at [speedscope.app](https://www.speedscope.app/). A plain `Release` build is fully stripped and leaves a large fraction of native leaf frames as unresolved addresses; rebuild with `--config-settings=cmake.build-type="RelWithDebInfo"` first (same optimization level, keeps debug symbols) and switch back to a plain `Release` build afterward.
+
+**Allocations** (Python + native frames), using `memray` (added to the `dev` dependency group):
+```
+uv run memray run --native -o memray-small.bin -m tests.benchmarks.bench_haplotype_sampling --region small --iterations 60
+uv run memray flamegraph memray-small.bin   # writes memray-flamegraph-memray-small.html
+uv run memray stats memray-small.bin
+```
+Same `RelWithDebInfo` caveat as `py-spy --native` applies for resolving native frames.
+
+**Native heap profile**, using the already-installed `valgrind` (note this imposes 10-50x slowdown, so use `--region small` and a handful of iterations, not `large`):
+```
+uv run valgrind --tool=massif --massif-out-file=massif.out \
+    python3 -m tests.benchmarks.bench_haplotype_sampling --region small --iterations 5
+ms_print massif.out | less
+```
+Do not `LD_PRELOAD` jemalloc for this run (see `CLAUDE.md`). jemalloc and valgrind's tools both intercept `malloc`/`free`, and the two are not compatible.
+
+**Statistical A/B across commits/build flags**, using `hyperfine` (install via `conda install -c conda-forge hyperfine`; not a Python package, so not in `pyproject.toml`):
+```
+uv run hyperfine --warmup 1 --min-runs 5 \
+    'python3 -m tests.benchmarks.bench_haplotype_sampling --region small --iterations 20'
+```
+Each invocation rebuilds the graph/sampler from scratch, so this measures process-level (not just DP-loop) variance. It is useful as an outer check around the finer-grained numbers `bench_haplotype_sampling.py --json` or pytest-benchmark report.
+
+**Regression tracking**, using `pytest-benchmark` (added to the `dev` dependency group), which calibrates its own round count per test and can save/compare baselines:
+```
+uv run pytest tests/benchmarks --benchmark-only
+uv run pytest tests/benchmarks --benchmark-only --benchmark-autosave
+uv run pytest tests/benchmarks --benchmark-only --benchmark-compare=0001 --benchmark-compare-fail=mean:10%
+```
+Prefer the standalone script for profiler-driven sessions (`py-spy`/`memray`/`valgrind`). Its iteration count is fixed and known in advance, which is easier to reason about in profiler output than pytest-benchmark's auto-calibrated round count.
+
 ### Developing on arm64 with Docker
 
 Build the container using the provided Docker file:

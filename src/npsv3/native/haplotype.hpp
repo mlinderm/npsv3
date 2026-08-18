@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -71,32 +70,13 @@ class HaplotypeSamplerOverlay {
   /// Initialize (or reset) scores prior to sampling based on k-mer @p counts without reconstructing the overlay.
   void InitializeScores(const KmerClassify& counts);
 
-  /// Return up to @p n unique highest-scoring distinct paths through the graph using the current k-mer scores.
+  /// Return up to @p n unique highest-scoring distinct paths through the graph using the current k-mer
+  /// scores, via a single forward pass at exactly width @p n (OPTIMIZATION_PROPOSALS.md "Proposal 2" --
+  /// empirically validated to find the same result a certified/adaptively-widened search would).
   std::vector<Haplotype> FindBestPaths(size_t n) const;
 
-  /// Same as FindBestPaths(n), but also reports in @p attempts_used how many forward-pass attempts the
-  /// adaptive widening loop needed (1 == settled on the first, narrowest attempt -- no widening fired).
-  /// Exposed for tests that need to observe whether widening actually triggered, not just its outcome.
-  std::vector<Haplotype> FindBestPaths(size_t n, size_t* attempts_used) const;
-
-  /// Testing-only: return up to @p n distinct highest-scoring paths from a single, non-adaptive forward
-  /// pass at exactly width @p n -- i.e. skip PropagateBestPathStateAdaptively's score_to_go widening
-  /// check entirely. Exposed so tests can directly compare the un-widened result against the certified
-  /// one from FindBestPaths(n).
-  std::vector<Haplotype> FindBestPathsFixedWidth(size_t n) const;
-
   /// Return the top @p n haplotypes, sorted by descending score, sampled greedily from the graph using k-mer coverage.
-  ///
-  /// Each draw runs a single, un-widened forward pass at exactly the requested width (OPTIMIZATION_PROPOSALS.md
-  /// "Proposal 2") rather than PropagateBestPathStateAdaptively's score_to_go-certified doubling loop -- see that
-  /// call site's comment in haplotype.cpp for the empirical justification.
   std::vector<Haplotype> SampleHaplotypes(size_t n);
-
-  /// Testing-only: same as SampleHaplotypes(n), but each draw goes through PropagateBestPathStateAdaptively
-  /// (today's certified/widened DP) instead of the production fixed-width pass. Exposed so tests can compare
-  /// the full multi-draw, UpdateScores-mutating sampling loop's actual output against the pre-"Proposal 2"
-  /// adaptive behavior end to end, not just a single forward pass in isolation.
-  std::vector<Haplotype> SampleHaplotypesAdaptive(size_t n);
 
   /// Return the top @p n highest-scoring diplotypes from all pairs of the @p candidate haplotypes, sorted by descending score.
   std::vector<Diplotype> SampleDiplotypes(const std::vector<Haplotype>& candidates, size_t n = 1) const;
@@ -221,38 +201,16 @@ class HaplotypeSamplerOverlay {
   using BestPathState = std::vector<NodeState>;
   
   using PathWithCoverage = std::pair<Haplotype, Graph::PathIdSet>;
-  
-  /// Num nodes by Num automaton states table 
-  using ScoreToGoTable = std::vector<std::vector<double>>;
 
   /// Return the Aho-Corasick automaton state reached from @p state on @p node_id.
   AutomatonIndex AutomatonGoto(AutomatonIndex state, odgi::nid_t node_id) const;
 
   /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
-  /// for the current k-mer scores.
-  ///
-  /// When @p score_to_go, a nodes by automaton states table of possible future scores, is non-null, every entry
-  /// discarded at a settlement point updates @p max_escaped_bound with an admissible upper bound on what that
-  /// discarded branch could have gone on to score.
-  BestPathState PropagateBestPathState(size_t n, const std::vector<std::vector<double>>* score_to_go = nullptr,
-                                       double* max_escaped_bound = nullptr) const;
-
-  /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
-  /// for the current k-mer scores, using adaptive beam search (increasing @p n up to a factor of @p max_widening)
-  /// to guarantee that the top scoring paths are returned. When @p attempts_used is non-null, it's set to
-  /// the number of forward-pass attempts made (1 == no widening was needed).
-  ///
-  /// No longer on SampleHaplotypes' hot path (see OPTIMIZATION_PROPOSALS.md "Proposal 2" -- widening was
-  /// empirically found to never change the sampled result, only to certify it); retained as the certified
-  /// reference implementation used by FindBestPaths(n) and by tests that check the fixed-width DP against it.
-  BestPathState PropagateBestPathStateAdaptively(size_t n, size_t max_widening = 8, size_t* attempts_used = nullptr) const;
+  /// for the current k-mer scores, via a single forward pass at exactly width @p n.
+  BestPathState PropagateBestPathState(size_t n) const;
 
   /// Extract the final top-n distinct paths (applying the path filter, if active) from a completed @p path_state.
   std::vector<Haplotype> ExtractBestPaths(const BestPathState& path_state) const;
-
-  /// Compute best achievable *additional* score [v][s] from Graph node v with pending automaton state s
-  /// to the sink for the current k-mer scores. Used as an admissible bound in adaptive beam search.
-  ScoreToGoTable ComputeScoreToGo() const;
 
   /// Return complete path using @p path_state starting at (max_node, @p back_automaton_state), at index @p back_idx
   PathWithCoverage BacktrackPath(const BestPathState& path_state, AutomatonIndex back_automaton_state,
@@ -263,10 +221,6 @@ class HaplotypeSamplerOverlay {
 
   /// Update the scores of k-mers having sampled @p path
   void UpdateScores(const Graph::NodeIdSeq& path);
-
-  /// Shared multi-draw greedy sampling loop behind SampleHaplotypes(n)/SampleHaplotypesAdaptive(n); differs
-  /// only in how each draw's BestPathState is computed, via @p propagate(width).
-  std::vector<Haplotype> SampleHaplotypesImpl(size_t n, const std::function<BestPathState(size_t)>& propagate);
 
   const Graph& graph_;
   Params params_;

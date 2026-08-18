@@ -1,4 +1,3 @@
-import glob
 import os
 import subprocess
 import tempfile
@@ -8,14 +7,12 @@ from typing import ClassVar, cast
 
 import pandas as pd
 import pytest
-import webdataset as wds
 
 from npsv3.graphs.graph import Graph
 from npsv3.graphs.haplotype import (
     HaplotypeSamplerOverlay,
     KmerClassify,
     KmerCounts,
-    UniqueKmersOverlay,
     _create_graph_and_sampler,
     _sample_diplotypes_from_counts,
     diplotypes_in_topk,
@@ -27,7 +24,7 @@ from npsv3.util.range import Range
 from npsv3.util.sample import kmc_filter
 from npsv3.util.variant import Variant
 
-from .. import HG00731_HG38_BAM, HG38_REF_FASTA, cache_filter_kmc_database, create_vcf, data_path, result_path
+from .. import HG38_REF_FASTA, cache_filter_kmc_database, create_vcf, data_path, result_path
 
 
 @dataclass(frozen=True)
@@ -695,111 +692,3 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
             ref_kmer_counts=ref_kmer_counts,
         )
 
-
-    @pytest.mark.usefixtures("ray_setup")
-    @pytest.mark.cfg_overrides(
-        f"reference={HG38_REF_FASTA}",
-        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz",
-        f"reads={HG00731_HG38_BAM}",
-        "kmer.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}",
-    )
-    def test_sampling_performance(self, cfg, hg00733_sample, tmp_path):
-        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.kmer.ref_kmer_counts_kmc_prefix}.kmc_pre")):
-            pytest.skip("Missing necessary inputs")
-
-        #region = Range("chr1:148531170-148577610")
-        region = Range("chr1:148538120-148538280")
-
-        # Use cached files to focus on haplotype sampling performance
-        results_directory = result_path(f"{region.slug}.HG00733.k{cfg.kmer.kmer_size}")
-        os.makedirs(results_directory, exist_ok=True)
-        filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
-        graph_shards = [os.path.join(results_directory, "graphs-00000.tar.gz")]
-        if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not all(os.path.exists(shard) for shard in graph_shards):
-            graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(
-                cfg,
-                cfg.input,
-                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
-                output_dir=results_directory,
-                pool_kmers=True,
-                region=region,
-            )
-            kmc_filter(hg00733_sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)  # type: ignore
-
-        statistics = diplotypes_in_topk(cfg, cfg.input, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
-        print(statistics)
-
-
-class TestAdaptiveWideningRealData:
-    """Empirically checks whether PropagateBestPathStateAdaptively's score_to_go widening ever changes
-    the sampled result versus a single, non-adaptive pass at the same width -- see
-    OPTIMIZATION_PROPOSALS.md's "Empirical validation of Proposal 2".
-
-    Reuses the same precomputed graph shard + filtered-kmer database PERFORMANCE_NOTES.md's
-    "Higher-level timing breakdown" session used (`chr1:148531170-148577610`, HG00733 population VCF,
-    21 per-cluster graphs, largest `graph.bytes=10,076,234` at `chr1:148544977-148574123`, 18,738
-    k-mers) instead of synthetic scores: a native-only stress test using independently-random per-k-mer
-    scores at this same graph scale defeated the natural covered_paths convergence real (correlated)
-    k-mer coverage relies on and exhausted >20GB in the plain forward DP alone (unrelated to widening;
-    see the disabled `RealRegionAdaptiveWideningTest.DISABLED_FixedWidthMatchesCertifiedOnWorstCaseDenseRegion`
-    in tests/native/test_haplotype.cpp) -- real KMC-scored data shouldn't hit that, since it's exactly
-    what `sample_haplotypes(n=6)` already ran successfully over in that same benchmarking session.
-    """
-
-    REGION_CACHE_DIR = result_path("chr1_148531169_148577610.HG00733.k31")
-    VCF_PATH = "/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.population.passing.hg38.vcf.gz"
-    KMER_COVERAGE = 14  # matches tests/conftest.py::hg00733_sample's kmer_coverage
-    MIN_VARIANT_SIZE = 50
-
-    def test_fixed_width_matches_certified_across_real_kmer_scored_clusters(self):
-        filtered_kmer_path = os.path.join(self.REGION_CACHE_DIR, "filtered_kmers")
-        shard_paths = sorted(glob.glob(os.path.join(self.REGION_CACHE_DIR, "graphs-*.tar.gz")))
-        if not os.path.exists(f"{filtered_kmer_path}.kmc_pre") or not shard_paths:
-            pytest.skip(f"Cached graph shard(s)/filtered k-mer DB not found under {self.REGION_CACHE_DIR}")
-        if not os.path.exists(self.VCF_PATH):
-            pytest.skip("HG00733 population VCF not found")
-
-        counts = KmerClassify(filtered_kmer_path, self.KMER_COVERAGE)
-
-        records = []
-        for shard_path in shard_paths:
-            records.extend(wds.WebDataset([shard_path], shardshuffle=False))
-        # Largest (most adversarial) clusters first, per PERFORMANCE_NOTES.md's own reproduction guidance.
-        records.sort(key=lambda r: len(r["graph.bytes"]), reverse=True)
-
-        widths = (1, 8)  # 1 = narrowest possible beam; 8 matches cfg.kmer.max_haplotypes' production default
-        widening_fired = dict.fromkeys(widths, 0)
-        num_checked = dict.fromkeys(widths, 0)
-        for record in records:
-            region_string = record["region.txt"].decode()
-            region = Range(region_string)
-            graph = Graph.load_bytes(record["graph.bytes"])
-            unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
-            sampler = HaplotypeSamplerOverlay(graph, unique_kmers, self.VCF_PATH, region, self.MIN_VARIANT_SIZE)
-            if sampler.num_kmers() == 0:
-                continue
-            sampler.initialize_scores(counts)
-
-            for n in widths:
-                num_checked[n] += 1
-                fixed = sampler.find_best_paths_fixed_width(n)
-                adaptive, attempts = sampler.find_best_paths_with_attempts(n)
-                if attempts > 1:
-                    widening_fired[n] += 1
-
-                assert len(fixed) == len(adaptive), (
-                    f"{region_string}: n={n}: un-widened and certified passes returned different numbers "
-                    f"of distinct paths ({len(fixed)} vs {len(adaptive)})"
-                )
-                for i, (fixed_path, adaptive_path) in enumerate(zip(fixed, adaptive, strict=True)):
-                    assert sampler.score(fixed_path) == pytest.approx(sampler.score(adaptive_path)), (
-                        f"{region_string}: n={n}: rank {i} diverged between the un-widened pass and the "
-                        "certified/adaptive result"
-                    )
-
-        assert sum(num_checked.values()) > 0, "No non-empty cached graphs found to check"
-        for n in widths:
-            print(
-                f"TestAdaptiveWideningRealData(n={n}): widening fired in {widening_fired[n]}/{num_checked[n]} "
-                "real, KMC-scored graph clusters; the un-widened pass never diverged from the certified result."
-            )

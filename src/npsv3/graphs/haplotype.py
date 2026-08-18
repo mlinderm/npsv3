@@ -17,7 +17,6 @@ from npsv3._native_graph import KmerClassify as KmerClassify
 from npsv3._native_graph import KmerCounts as KmerCounts
 from npsv3._native_graph import UniqueKmersOverlay as UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
-from npsv3.images.population import overlapping_variants
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmers_by_unique_kmers, kmc_build_from_fasta, kmc_filter
@@ -122,6 +121,48 @@ def _filter_variants(variants, min_variant_size):
             result.append(variant)  # noqa: PERF401
     return result
 
+def overlapping_variants(vcf_file: VariantFileReader|PathType, region: Range|None = None, flank=0, min_variant_size=0):
+    """Yield separated (non-overlapping) regions and corresponding variants
+
+    Args:
+        vcf_file (VariantFileReader | str): VCF file
+        region (Range | None, optional): Region to fetch variants from. Defaults to None.
+        flank (int, optional): Required separation between variants to define region. Defaults to 0.
+        min_variant_size (int, optional): Minimum size of variant to include. Defaults to 0.
+
+    Yields:
+        tuple[Region, list[Variant]]: Region and a list of overlapping variants
+    """
+    # We assume VCF is in sorted order
+    current_range = None
+    current_variants = []
+
+    if not isinstance(vcf_file, VariantFileReader):
+        vcf_file = VariantFileReader.open(str(vcf_file))
+        # TODO: Automatically close this file when done
+    assert isinstance(vcf_file, VariantFileReader)
+
+    for variant in vcf_file.fetch(region=region):
+        if min_variant_size > 0 and not any(abs(variant.allele_length_change(i) or 0) >= min_variant_size for i in range(1, variant.num_alleles)):
+            continue  # Skip variants that don't meet the minimum size requirement
+
+        variant_range = variant.reference_region().expand(flank)
+        if current_range is None:
+            current_range = variant_range
+            current_variants = [variant]
+        elif current_range.overlaps(variant_range):
+            current_range.union_with(variant_range)
+            current_variants.append(variant)
+        else:
+            # Next variant doesn't overlap, so yield current variants and then reset
+            yield current_range, current_variants
+            current_range = variant_range
+            current_variants = [variant]
+
+    # yield any remaining records
+    if current_variants:
+        yield current_range, current_variants
+
 @ray.remote
 class _SerializeGraphAndUniqueKmers:
     """Ray actor to construct a Graph and UniqueKmersOverlay for a region and return as serialized payload."""
@@ -152,7 +193,10 @@ class _SerializeGraphAndUniqueKmers:
         else:
             self.kmer_fasta = None
 
-    def __ray_shutdown__(self):
+    def close(self):
+        # `__ray_shutdown__` would eventually close the fasta file on actor termination, but that runs
+        # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
+        # remote method before using the fasta files.
         if self.kmer_fasta and not self.kmer_fasta.closed:
             self.kmer_fasta.close()
 
@@ -255,16 +299,12 @@ def serialize_graph_and_unique_kmers(
 
         logging.info("Generating all graphs and unique k-mers to %s", shard_pattern)
         region_count = 0
-        for variants_region, variants in tqdm(
-            overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region),
+        for variants_region, _ in tqdm(
+            overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size),
             disable=not progress_bar,
             desc="Pre-generating graphs and associated k-mers",
             mininterval=1.0,
         ):
-            analysis_variants = _filter_variants(variants, min_variant_size)
-            if not analysis_variants:
-                continue
-
             # Utilize _pending_submits to implement back pressure on the number of regions in-flight
             # to avoid excessive memory usage (ActorPool doesn't provide a public API to implement back pressure)
             if len(pool._pending_submits) >= cfg.threads and pool.has_next(): # noqa: SLF001
@@ -275,11 +315,15 @@ def serialize_graph_and_unique_kmers(
 
         while pool.has_next():
             _consume_region()
-        del pool, actors # Clean up actors (i.e., ensure files are closed)
+
+        # Explicitly close (and wait for) each actor's webdataset writer before deleting the actor handles and
+        # reading the files actors produced.
+        ray.get([actor.close.remote() for actor in actors]) # type: ignore
+        del pool, actors
         logging.info("Created and saved graphs for %d region(s)", region_count)
 
         if region_count > 0 and pool_kmers:
-            assert all(kmer_fasta_paths), "All kmer_fasta_paths must be non-None when filter_kmers is True"
+            assert all(kmer_fasta_paths), "All kmer_fasta_paths must be defined when filter_kmers is True"
             # Combine all k-mers into a single KMC database for subsequent filtering
             unique_kmer_path = os.path.join(output_dir, "unique_kmers")
             kmc_build_from_fasta(
@@ -583,10 +627,11 @@ def diplotypes_in_topk(
         if filtered_kmer_path is None:
             assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered k-mer path is not provided"
             assert sample.kmc_prefix is not None, "sample must have a KMC database when filtered_kmer_path is not provided"
+
             filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
             kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
 
-        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, f"Filtered k-mer database has k={_kmc_db_kmer_size(filtered_kmer_path)} but expected k={cfg.kmer.kmer_size}"
+        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, "Filtered k-mer database has unexpected k"
 
         # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
         pending = [

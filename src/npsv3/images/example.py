@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+import contextlib
 import itertools
 import logging
 import math
@@ -8,26 +8,37 @@ import shutil
 import sys
 import tempfile
 import typing
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 import hydra
 import numpy as np
 import pysam
 import ray
 import webdataset as wds
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from tqdm import tqdm
 
 from npsv3.graphs.graph import Graph
+from npsv3.graphs.haplotype import (
+    HaplotypeSamplerOverlay,
+    KmerClassify,
+    UniqueKmersOverlay,
+    _filter_variants,
+    prepare_genotyping_haplotypes,
+    serialize_graph_and_unique_kmers,
+)
 from npsv3.images.generator import ImageGenerator
 from npsv3.realigner import FragmentRealigner
-from npsv3.simulation import augment_sample, simulate_variant_sequencing
+from npsv3.simulation import augment_sample, simulate_variant_sequencing, split_bam_by_tag
+from npsv3.types import PathType
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
-from npsv3.util.sample import Sample
+from npsv3.util.sample import Sample, _kmc_db_kmer_size, kmc_filter
 from npsv3.util.timeout import Timeout
-from npsv3.util.variant import Variant, overlapping_records
+from npsv3.util.variant import Variant, VariantFileReader, overlapping_records
 from npsv3.util.vcf import index_variant_file, pysam_write_mode
 
 
@@ -38,14 +49,14 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
 
 
 def example_to_image(
-    cfg, example, out_path: str | None=None, with_simulations=False, margin=10, max_replicates=1, **kwargs
+    cfg, example, out_path: PathType | None=None, *, with_simulations=False, margin=10, max_replicates=1, **kwargs
 ):
     generator = hydra.utils.instantiate(cfg.generator, cfg, _recursive_=False)
 
     image_tensor = example["image"]
     real_image = generator.render(image_tensor, **kwargs)
 
-    genotypes, replicates, *_ = example["sim.images"].shape if with_simulations and "sim.images" in example else (3, 0)
+    replicates, genotypes, *_ = example["sim.images"].shape if with_simulations and "sim.images" in example else (0, 3)
     if replicates > 0:
         width, height = real_image.size
         replicates = min(replicates, max_replicates)
@@ -53,12 +64,12 @@ def example_to_image(
         image = Image.new(real_image.mode, (width + (genotypes - 1) * (width + margin), height + replicates * (height + margin)))
         # Paste the real image overlapping the correct genotype
         label = example.get("label", 0)
-        image.paste(real_image, (label * width + max(label - 1, 0) * margin, 0))
+        image.paste(real_image, (label * (width + margin), 0))
 
         synth_tensor = example["sim.images"]
-        for gt in range(genotypes):
-            for repl in range(replicates):
-                synth_image_tensor = synth_tensor[gt, repl]
+        for repl in range(replicates):
+            for gt in range(genotypes):
+                synth_image_tensor = synth_tensor[repl, gt]
                 synth_image = generator.render(synth_image_tensor, **kwargs)
 
                 coord = (gt * (width + margin), (repl + 1) * (height + margin))
@@ -71,472 +82,382 @@ def example_to_image(
     return image
 
 
-def make_example_from_region(
+def make_graph_example(
     cfg,
+    graph: Graph,
+    sampler: HaplotypeSamplerOverlay,
     region: Range,
-    read_path: str,
+    vcf_path: str,
     sample: Sample,
-    background_vcf: str | None = None,
-    generator: ImageGenerator = None,
-    addl_features: dict | None = None,
-    **kwargs,
-):
-    # Create generator if not provided
-    generator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
-
-    # Construct image for "real" data
-    with tempfile.TemporaryDirectory() as tempdir:
-        local_read_path = read_path
-        if cfg.pileup.downsample < 1.0:
-            # Downsample reads if specified
-            local_read_path = downsample_reads(
-                local_read_path,
-                region.expand(cfg.pileup.fetch_flank),
-                tempdir,
-                downsample=cfg.pileup.downsample,
-            )
-
-        if cfg.pileup.haplotag_reads and background_vcf is not None:
-            # Haplotag reads on the fly using whatshap
-            local_read_path = haplotag_reads(
-                cfg.reference, sample, local_read_path, background_vcf, region.expand(cfg.pileup.fetch_flank), tempdir
-            )
-
-        image_tensor = generator.generate(
-            local_read_path,
-            sample,
-            region,
-            ref_seq=_reference_sequence(cfg.reference, region),
-        )
-
-    example = {"region": str(region), "image": image_tensor}
-    # Add any additional (extension) features
-    if addl_features:
-        example.update(addl_features)
-
-    return example
-
-def make_graph_example_from_region(
-    cfg,
-    region: Range,
-    read_path: str,
-    sample: Sample,
-    background_vcf: str,
-    inference_vcf: str,
-    generator: ImageGenerator = None,
+    read_path: PathType,
+    filtered_kmer_path: str,
+    analysis_variants: Sequence[Variant],
+    generator: ImageGenerator | None = None,
     addl_features: dict | None = None,
     ploidy: int = 2,
     **kwargs,
 ):
-    # Create generator if not provided
-    generator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
+    with contextlib.ExitStack() as stack:
+        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+        example: dict = { "region": str(region) }
 
-    # Generate graph from the VCF(s)
-    graph = Graph.from_vcf(
-        cfg.reference, background_vcf, region.expand(cfg.pileup.graph_flank), inference_vcf=inference_vcf
-    )
-    assert graph.is_bubble_path(region.contig), f"Graph must form bubble for reference background for region {region}"
+        # Sample haplotypes using sample-specific k-mer counts and filtered k-mers (i.e., only those k-mers that are
+        # unique to the graph and present in the sample)
+        counts = KmerClassify(filtered_kmer_path, sample.kmer_coverage)
+        sampler.initialize_scores(counts)
+        haplotypes = sampler.sample_haplotypes(n=cfg.kmer.max_haplotypes)
+        assert len(haplotypes) > 0, f"No haplotypes sampled for region {region} in {sample.name}"
 
-    # Set up image flanks to minimize compression
-    example_region = generator.image_region(region)
+        # Prepare haplotypes for genotyping by ensuring the reference haplotype, and any "true" haplotypes, if present
+        # in the graph, are included with the reference haplotype guaranteed to be at index 0.
+        haplotypes, alleles, true_haplotype_idxs = prepare_genotyping_haplotypes(
+            graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy
+        )
+        assert len(haplotypes) >= 2, f"Fewer than 2 haplotypes for region {region} in {sample.name}"  # noqa: PLR2004
+        assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
-    with tempfile.TemporaryDirectory() as tempdir:
-        # Generate haplotypes for re-alignment, i.e., with reference as the background (as opposed to a specific haplotype)
-        realign_haplotypes = graph.all_haplotypes(inference_vcf, region.contig, region.expand(cfg.pileup.variant_padding))
-        assert len(realign_haplotypes) >= 2, f"Fewer than 2 haplotypes in region {region}"  # noqa: PLR2004
-        assert realign_haplotypes[0].nodes == graph.nodes_on_path(
-            region.contig
-        ), f"First haplotype must be the reference for region {region}"
+        # Allow for all possible genotypes, or TODO: apply sampling here to reduce the potential number considered
+        possible_genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), ploidy))
 
-        realign_fasta_path = os.path.join(tempdir, "realign.fasta")
+        # Generate labels if the true haplotype combination is fully defined (i.e., no missing alleles)
+        if None not in true_haplotype_idxs:
+            norm_true_haplotype_idxs = tuple(sorted(true_haplotype_idxs)) # type: ignore
+            genotype_idx = next((i for i, gt in enumerate(possible_genotypes) if gt == norm_true_haplotype_idxs), -1)
+            assert genotype_idx >= 0, f"True haplotype combination {norm_true_haplotype_idxs} not found in possible genotypes {possible_genotypes}"
+
+            example["label"] = genotype_idx
+
+            # Determined "ranked" positives based on shared inference paths, presence, etc.
+            # TODO: Incorporate shared alleles, allele similarity, etc. into the ranking of positives
+            ranked_positives = np.zeros(len(possible_genotypes), dtype=np.long)
+            ranked_positives[genotype_idx] = 1 # True (or "first-rank") positive
+
+            # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
+            # TODO: Should only variants with the true allele be considered "third-rank" positives? And any presence be "fourth-rank"?
+            if genotype_idx > 0:
+                ranked_positives[(ranked_positives == 0) & (np.arange(len(possible_genotypes)) > 0)] = 3
+
+            example["label.rank"] = ranked_positives
+
+        # The graph (and thus each haplotype's sequence) does not extend beyond `region`, but realignment and simulation need
+        # sequences comfortably longer than the fragment/insert size. Pad with reference sequence out to realigner_flank.
+        sim_region = region.expand(cfg.pileup.realigner_flank)
+        flank_seq = _reference_sequence(cfg.reference, sim_region)
+        left_flank = flank_seq[: region.start - sim_region.start]
+        right_flank = flank_seq[len(flank_seq) - (sim_region.end - region.end) :]
+
+        # Create realigner once for this region. The (flanked) sequences are also reused, unmodified, for the
+        # simulation fasta below.
+        realign_fasta_path = os.path.join(tmp_dir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
-            for i, haplotype in enumerate(realign_haplotypes):
-                fasta.write(f">seq{i}\n")
-                sequence = haplotype.sequence()
-                assert sequence.isupper(), f"Sequence for haplotype {i} is not upper case in region {region}"
-                fasta.write(haplotype.sequence() + "\n")
+            # Extract the reference sequence from the first haplotype
+            ref_seq = graph.path_sequence(haplotypes[0])
+            assert ref_seq.isupper(), f"Sequence for haplotype 0 is not upper case in region {region}"
+            fasta.write(">seq-0\n")
+            fasta.write(left_flank + ref_seq + right_flank + "\n")
 
-        # Construct realigner once for all images for this variant,
-        addl_args = {"num_alts": len(realign_haplotypes) - 1}  # This is needed to prevent C++ errors
+            for i, haplotype in enumerate(itertools.islice(haplotypes, 1, None), start=1):
+                sequence = graph.path_sequence(haplotype)
+                assert sequence.isupper(), f"Sequence for haplotype {i} is not upper case in region {region}"
+                fasta.write(f">seq-{i}\n")
+                fasta.write(left_flank + sequence + right_flank + "\n")
+
+        addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
         realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
 
-        # Extract the reference sequence from the first haplotype
-        ref_seq = realign_haplotypes[0].sequence()[
-            example_region.start - graph.region.start : example_region.end - graph.region.end
-        ]
-        assert len(ref_seq) == example_region.length, f"Reference sequence length does not match the region size for region {region}"
+        # Because the reference sequence may be sampled, it is not guaranteed to be the same length as the region
+        # TODO: Do we need to pad out the shorter sequences so everything has identical length?
 
-    # Construct image for "real" data
-    with tempfile.TemporaryDirectory() as tempdir:
-        local_read_path = read_path
-        if cfg.pileup.downsample < 1.0:
-            # Downsample reads if specified
-            local_read_path = downsample_reads(
-                local_read_path,
-                example_region.expand(cfg.pileup.fetch_flank),
-                tempdir,
-                downsample=cfg.pileup.downsample,
-            )
+        # Create generator if not provided
+        generator: ImageGenerator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
 
-        if cfg.pileup.haplotag_reads:
-            # Haplotag reads on the fly using whatshap
-            local_read_path = haplotag_reads(
-                cfg.reference, sample, local_read_path, background_vcf, graph.region, tempdir
-            )
-
-        image_tensor = generator.generate(
-            local_read_path,
-            sample,
-            example_region,
-            realigner=realigner,
-            ref_seq=ref_seq,
-            compress=True,
-        )
-
-    example = {"region": str(example_region), "image": image_tensor}
-    # Add any additional (extension) features
-    if addl_features:
-        example.update(addl_features)
-
-    # Generate the possible haplotypes for this region on the possible backgrounds
-    # TODO: Check if the backgrounds are identical, if so, we can generate the haplotypes once
-    backgrounds = [
-        graph.all_haplotypes(inference_vcf, f"{sample.name}#{i}#{region.contig}", region.expand(cfg.pileup.variant_padding))
-        for i in range(ploidy)
-    ]
-    total_genotypes = math.prod(len(haplotypes) for haplotypes in backgrounds)
-
-    # For fully labeled data, one of the haplotypes should be the true haplotype
-    labels = []
-    for allele, haplotypes in enumerate(backgrounds):
-        assert len(haplotypes) > 1, f"Fewer than 2 haplotypes for allele {allele} in region {region}"
-        base_path_nodes = graph.shortest_path(f"{sample.name}#{allele}#{region.contig}")
-        for allele_index, haplotype in enumerate(haplotypes):
-            if haplotype.nodes == base_path_nodes:
-                labels.append(allele_index)
-                break
-        else:
-            raise ValueError(f"True haplotype not found in possible haplotypes for region {region}")
-    assert len(labels) == ploidy, f"Expected {ploidy} labels, got {len(labels)} for region {region}"
-    gt_label = np.ravel_multi_index(tuple([i] for i in labels), tuple(len(b) for b in backgrounds)).item()
-    example["label"] = gt_label
-
-    # Determine "ranked" positives based on shared inference paths, presence, etc.
-    ranked_positives = np.zeros(total_genotypes, dtype=np.long)
-    ranked_positives[gt_label] = 1 # True (or "first-rank") positive
-
-    true_inference_paths = set.union(*(backgrounds[i][allele_index].paths for i, allele_index in enumerate(labels)))
-    for g, allele_indices in enumerate(itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds))):
-        if g == gt_label:
-            continue  # Skip the true positive
-        # Diplotypes that have the same inference paths as the true haplotype, but with a different phase, are considered "second-rank" positives
-        inf_paths = set.union(*(backgrounds[i][allele_index].paths for i, allele_index in enumerate(allele_indices)))
-        if inf_paths == true_inference_paths:
-            ranked_positives[g] = 2
-
-    # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
-    # TODO: Should only variants with the true allele be considered "third-rank" positives? And any presence be "fourth-rank"?
-    if gt_label > 0:
-        ranked_positives[(ranked_positives == 0) & (np.arange(total_genotypes) > 0)] = 3
-
-    example["label.rank"] = ranked_positives
-
-    # Create listing of alleles for each genotype
-    genotype_alleles = []
-    for allele_indices in itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds)):
-        genotype_alleles.append(tuple(tuple(backgrounds[i][allele_index].paths) for i, allele_index in enumerate(allele_indices)))  # noqa: PERF401
-    example["label.alleles"] = genotype_alleles
-
-    if cfg.simulation.replicates == 0:
-        # No more work to be done if there are not simulations
-        return example
-
-    # If we are augmenting the simulated data, use the provided statistics for the first example, so it
-    # will hopefully be most similar to the real data and then augment the remaining replicates
-    if cfg.simulation.augment:
-        repl_samples = augment_sample(sample, cfg.simulation.replicates, keep_original=True)
-    else:
-        repl_samples = [sample] * cfg.simulation.replicates
-
-    # Generate the relevant sequences once, which are then combined to create the fasta for simulation.
-    # TODO: Do we need pad out the shorter sequences?
-    sequences = [[haplotype.sequence() for haplotype in background] for background in backgrounds]
-
-    # TODO: Do we want to only have one of 0/1, 1/0?
-    alleles_encoded_images = []
-    for allele_indices in itertools.product(*(range(len(haplotypes)) for haplotypes in backgrounds)):
-        # Get the sequences for this haplotype combination
-        gt_sequences = [sequences[i][allele_index] for i, allele_index in enumerate(allele_indices)]
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tempdir:
-            # Write the fasta file for this haplotype combination
-            fasta_path = os.path.join(tempdir, "haplotypes.fasta")
-            with open(fasta_path, "w") as fasta:
-                for i, sequence in enumerate(gt_sequences):
-                    fasta.write(f">{allele_indices[i]}#{i}#{graph.region.contig}#0\n")
-                    fasta.write(sequence + "\n")
-
-            repl_encoded_images = []
-            for repl, repl_sample in enumerate(repl_samples):
-                # Simulate reads from this haplotype combination
-                try:
-                    sample_coverage = (
-                        repl_sample.chrom_mean_coverage(graph.region.contig)
-                        if cfg.simulation.chrom_norm_covg
-                        else repl_sample.mean_coverage
-                    )
-                    replicate_bam_path = simulate_variant_sequencing(
-                        fasta_path,
-                        (sample_coverage * cfg.pileup.downsample) / ploidy,
-                        repl_sample,
-                        reference=cfg.reference,
-                        shared_reference=cfg.shared_reference,
-                        dir=tempdir,
-                        stats_path=cfg.stats_path if cfg.simulation.gc_norm_covg else None,
-                        region=example_region.expand(cfg.pileup.realigner_flank),
-                        phase_vcf_path=background_vcf if cfg.pileup.haplotag_sim else None,
-                        aligner=cfg.pileup.aligner,
-                    )
-                except ValueError:
-                    logging.exception(
-                        "Failed to synthesize data for alleles (%d,%d) for region %s",
-                        *allele_indices,
-                        str(graph.region),
-                    )
-                    raise
-
-                synth_image_tensor = generator.generate(
-                    replicate_bam_path,
-                    repl_sample,
-                    example_region,
-                    realigner=realigner,
-                    ref_seq=ref_seq,
-                    compress=True,
+        # Construct image for "real" data, possibly downsampling the reads if specified
+        with tempfile.TemporaryDirectory(dir=tmp_dir) as local_read_tmp_dir:
+            local_read_path = read_path
+            if cfg.pileup.downsample < 1.0:
+                # Downsample reads if specified
+                local_read_path = downsample_reads(
+                    local_read_path,
+                    region.expand(cfg.pileup.fetch_flank),
+                    local_read_tmp_dir,
+                    downsample=cfg.pileup.downsample,
                 )
-                repl_encoded_images.append(synth_image_tensor)
 
-                if not OmegaConf.is_missing(cfg.simulation, "save_sim_bam_dir"):
-                    sim_bam_path = os.path.join(cfg.simulation.save_sim_bam_dir, f"{'_'.join(map(str, allele_indices))}_{repl}.bam")
-                    shutil.copy(replicate_bam_path, sim_bam_path)
-                    shutil.copy(f"{replicate_bam_path}.bai", f"{sim_bam_path}.bai")
+            image_tensor = generator.generate(
+                local_read_path,
+                sample,
+                region,
+                realigner=realigner,
+                ref_seq=ref_seq,
+                compress=True,
+            )
 
-            # Stack all of the image replicates into a tensor
-            alleles_encoded_images.append(np.stack(repl_encoded_images))
+        example["image"] = image_tensor
+        if addl_features:
+            # Add any additional (extension) features
+            example.update(addl_features)
 
-        # Stack the replicated images for each genotype into a tensor
-        sim_image_tensor = np.stack(alleles_encoded_images)
-        example["sim.images"] = sim_image_tensor
+        if cfg.simulation.replicates == 0:
+            # No more work to be done if there are no simulations specified
+            return example
+        assert cfg.simulation.replicates == 1, "Multiple replicates not yet supported"
+
+
+        # Simulate reads for `ploidy`` copies of all haplotypes as a single step, then construct genotype images from
+        # subsets of the simulated reads. Copy the (flanked) sequences already written to the realigner fasta above,
+        # just relabeling the headers for downstream splitting by "SQ" tag.
+        simulation_fasta_path = os.path.join(tmp_dir, "simulation.fasta")
+        with pysam.FastxFile(realign_fasta_path) as realign_fasta, open(simulation_fasta_path, "w") as simulation_fasta_file:
+            for i, entry in enumerate(realign_fasta):
+                for p in range(ploidy):
+                    simulation_fasta_file.write(f">seq-{i}-{p}\n")
+                    simulation_fasta_file.write(f"{entry.sequence}\n")
+
+        # TODO: This would be become a loop over replicates with different coverage, etc. For example:
+        # If we are augmenting the simulated data, use the provided statistics for the first example, so it
+        # will hopefully be most similar to the real data and then augment the remaining replicates
+        # if cfg.simulation.augment:
+        #     repl_samples = augment_sample(sample, cfg.simulation.replicates, keep_original=True)
+        # else:
+        #     repl_samples = [sample] * cfg.simulation.replicates
+
+        repl_sample = sample
+        try:
+            sample_coverage = (
+                sample.chrom_mean_coverage(graph.region.contig)
+                if cfg.simulation.chrom_norm_covg
+                else sample.mean_coverage
+            )
+            replicate_bam_path = simulate_variant_sequencing(
+                simulation_fasta_path,
+                (sample_coverage * cfg.pileup.downsample) / ploidy, # Haplotype coverage
+                sample,
+                reference=cfg.reference,
+                shared_reference=cfg.shared_reference,
+                dir=tmp_dir,
+                stats_path=cfg.stats_path if cfg.simulation.gc_norm_covg else None,
+                region=sim_region,
+                #phase_vcf_path=background_vcf if cfg.pileup.haplotag_sim else None,
+                aligner=cfg.pileup.aligner,
+            )
+        except ValueError as e:
+            e.add_note(f"Failed to synthesize data for region {region} in sample {sample.name}")
+            raise
+
+        # Split the single replicate BAM into separate BAMs for each haplotype, which are then used to construct
+        # the images for each genotype
+        replicate_bam_splits = split_bam_by_tag(replicate_bam_path, tmp_dir, tag="SQ")
+
+        # TODO: Save BAMs for debugging
+        # if not OmegaConf.is_missing(cfg.simulation, "save_sim_bam_dir"):
+        #   sim_bam_path = os.path.join(cfg.simulation.save_sim_bam_dir, f"{'_'.join(map(str, allele_indices))}_{repl}.bam")
+        #   shutil.copy(replicate_bam_path, sim_bam_path)
+        #   shutil.copy(f"{replicate_bam_path}.bai", f"{sim_bam_path}.bai")
+
+        # Use the split BAM files to construct images for all genotypes of interest
+        replicate_images = []
+        for possible_genotype in possible_genotypes:
+            # For each possible genotype, use the relevant split BAM file to construct the image
+            replicate_bams = [replicate_bam_splits[f"{h}_{i}"] for i, h in enumerate(possible_genotype)]
+            synth_image_tensor = generator.generate(
+                replicate_bams,
+                repl_sample,
+                region,
+                realigner=realigner,
+                ref_seq=ref_seq,
+                compress=True,
+            )
+            replicate_images.append(synth_image_tensor)
+
+        # Stack all the genotypes into a single tensor (adding singleton replicate dimension)
+        sim_image_tensor = np.stack(replicate_images)
+        example["sim.images"] =  np.expand_dims(sim_image_tensor, axis=0)
 
     return example
 
+
+
 class ExampleActor:
-    def __init__(self, index: int, output_dir: str, cfg, *args, **kwargs):
-        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar")
+    def __init__(self, index: int, output_dir: str, cfg):
+        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar.gz")
         self.cfg = cfg
-        self.args = args
-        self.kwargs = kwargs
 
         self._writer = wds.TarWriter(self.output_path)
 
-    # TODO: Convert this to a finalizer? https://docs.python.org/3/library/weakref.html#comparing-finalizers-with-del-methods
-    def cleanup(self):
+    def close(self):
+        # `__ray_shutdown__` would eventually close the writer on actor termination, but that runs
+        # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
+        # remote method before using the webdataset files.
         self._writer.close()
 
 @ray.remote
-class RegionWriter(ExampleActor):
-    def from_region(self, region: Range):
-        try:
-            # Attempt to timeout long running regions.
-            with Timeout(self.cfg.timeout):
-                example = make_example_from_region(self.cfg, region, *self.args, **self.kwargs)
-            sample = {
-                "__key__": region.slug,
-                "image.npy.gz": example["image"],
-            }
-            self._writer.write(sample)
-        except TimeoutError:
-            logging.exception("Timeout error for region %s", region)
-
-
-@ray.remote
-class VariantWriter(ExampleActor):
-    def from_region(self, region: Range):
-        # Loop through inference VCF in region, creating a new VCF for each variant
-        # Then call make_graph_example_from_region for that variant alone
-        inference_vcf = self.kwargs.get("inference_vcf")
-        assert inference_vcf, "Inference VCF is not provided"
-
-        with pysam.VariantFile(inference_vcf) as src_vcf_file:
-            src_header = src_vcf_file.header
-            for record in src_vcf_file.fetch(**region.pysam_fetch):
-                variant = Variant.from_pysam(record)
-                with tempfile.TemporaryDirectory() as dst_dir:
-                    dst_vcf = os.path.join(dst_dir, "variant.vcf.gz")
-                    with pysam.VariantFile(dst_vcf, mode="wz", header=src_header) as dst_vcf_file:
-                        dst_vcf_file.write(record)
-                    index_variant_file(dst_vcf)
-
-                    kwargs = self.kwargs.copy()
-                    kwargs["inference_vcf"] = dst_vcf
-                    example = make_graph_example_from_region(self.cfg, variant.reference_region, *self.args, **kwargs)
-
-                    sample = {
-                        "__key__": variant.vg_variant_id,
-                        "region.txt": example["region"],
-                        "image.npy.gz": example["image"],
-                    }
-                    if "label" in example:
-                        sample["label.cls"] = example["label"]
-                    if "label.rank" in example:
-                        sample["label.rank.npy"] = example["label.rank"]
-                    if "sim.images" in example:
-                        sample["sim.images.npy.gz"] = example["sim.images"]
-                    self._writer.write(sample)
-
-
-@ray.remote
 class GraphWriter(ExampleActor):
-    def from_region(self, region: Range):
-        try:
-            # Attempt to gracefully timeout long running regions.
-            with Timeout(self.cfg.timeout):
-                example = make_graph_example_from_region(self.cfg, region, *self.args, **self.kwargs)
-            sample = {
-                "__key__": region.slug,
-                "image.npy.gz": example["image"],
-            }
-            if "label" in example:
-                sample["label.cls"] = example["label"]
-            if "label.rank" in example:
-                sample["label.rank.npy"] = example["label.rank"]
-            if "sim.images" in example:
-                sample["sim.images.npy.gz"] = example["sim.images"]
-            self._writer.write(sample)
-        except TimeoutError:
-            logging.exception("Timeout error for region %s", region)
+    def __init__(
+        self,
+        index: int,
+        output_dir: str,
+        cfg,
+        vcf_path: str,
+        read_path: PathType,
+        sample: Sample,
+        filtered_kmer_path: str,
+        *,
+        ploidy: int = 2,
+        min_variant_size: int = 50,
+    ):
+        super().__init__(index, output_dir, cfg)
+        self.vcf_path = vcf_path
+        self.read_path = read_path
+        self.sample = sample
+        self.filtered_kmer_path = filtered_kmer_path
+        self.ploidy = ploidy
+        self.min_variant_size = min_variant_size
+        self.generator = hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
 
+    def from_graph(
+        self,
+        region: Range,
+        graph: Graph,
+        sampler: HaplotypeSamplerOverlay,
+        analysis_variants: Sequence[Variant],
+    ) -> dict:
+        return make_graph_example(
+            self.cfg,
+            graph,
+            sampler,
+            region,
+            self.vcf_path,
+            self.sample,
+            self.read_path,
+            self.filtered_kmer_path,
+            analysis_variants,
+            generator=self.generator,
+            ploidy=self.ploidy,
+        )
 
-def vcf_to_region_examples(
-    cfg,
-    read_path: str,
-    sample: Sample,
-    inference_vcf: str,
-    output_dir: str,
-    background_vcf: str | None = None,
-    progress_bar: bool = False,
-):
+    def from_shard(self, shard_path: PathType) -> int:
+        num_regions = 0
+        with VariantFileReader.open(self.vcf_path) as vcf_file:
+            for record in wds.WebDataset([shard_path], shardshuffle=False):
+                region = Range(record["region.txt"].decode())
+                graph = Graph.load_bytes(record["graph.bytes"])
+                unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
+                sampler = HaplotypeSamplerOverlay(graph, unique_kmers, self.vcf_path, region, self.min_variant_size)
+                analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
 
-    regions = []
-    with pysam.VariantFile(inference_vcf) as vcf_file:
-        for record in vcf_file:
-            variant = Variant.from_pysam(record)
-            regions.append(variant.reference_region.expand(cfg.pileup.variant_padding))
+                try:
+                    # Attempt to gracefully timeout long running regions.
+                    with Timeout(self.cfg.timeout):
+                        example = self.from_graph(region, graph, sampler, analysis_variants)
+                except TimeoutError:
+                    logging.exception("Timeout error for region %s", region)
+                    continue
 
-    os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
-        # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
-        # to avoid conflicts between clusters running on the same node.
-        # To ensure Ray worker processes know about our custom resolvers, we set up the runtime environment with a worker process hook.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
+                sample = {
+                    "__key__": region.slug,
+                    "region.txt": example["region"],
+                    "image.npy.gz": example["image"],
+                }
+                if "label" in example:
+                    sample["label.cls"] = example["label"]
+                if "label.rank" in example:
+                    sample["label.rank.npy"] = example["label.rank"]
+                if "sim.images" in example:
+                    sample["sim.images.npy.gz"] = example["sim.images"]
 
-        actors = [
-            RegionWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf)
-            for i in range(cfg.threads)
-        ]
-        pool = ray.util.ActorPool(actors)
-
-        gen = pool.map_unordered(lambda actor, region: actor.from_region.remote(region), regions)
-        for _ in tqdm(gen, total=len(regions), disable=not progress_bar):
-            pass
-
-        # Make sure all the writers are cleaned up
-        ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))
-
-
-def vcf_to_variant_examples(
-    cfg,
-    read_path: str,
-    sample: Sample,
-    inference_vcf: str,
-    output_dir: str,
-    background_vcf: str | None = None,
-    progress_bar: bool = False,
-    ploidy: int = 2,
-):
-    group_padding = cfg.pileup.variant_padding
-    regions = [region for region, *_ in overlapping_records(inference_vcf, flank=group_padding)]
-
-    os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory() as ray_dir:
-        # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
-        # to avoid conflicts between clusters running on the same node.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
-
-        actors = [
-            VariantWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf, ploidy=ploidy)
-            for i in range(cfg.threads)
-        ]
-        pool = ray.util.ActorPool(actors)
-
-        gen = pool.map_unordered(lambda actor, region: actor.from_region.remote(region), regions)
-
-        for _ in tqdm(gen, total=len(regions), disable=not progress_bar):
-            pass
-
-        # Make sure all the writers are cleaned up
-        ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))
-
+                self._writer.write(sample)
+                num_regions += 1
+        return num_regions
 
 def vcf_to_graph_examples(
     cfg,
     read_path: str,
     sample: Sample,
-    inference_vcf: str,
+    vcf_path: str,
     output_dir: str,
-    background_vcf: str | None = None,
+    *,
     progress_bar: bool = False,
     ploidy: int = 2,
+    graph_shards: Sequence[PathType]| None =None,
+    unique_kmer_path: PathType | None = None,
+    filtered_kmer_path: PathType | None = None,
+    region: Range|None=None,
+    min_variant_size: int = 50,
 ):
-    # Identify regions in the inference with overlapping SVs (i.e., identify bubbles)
-    regions, search_regions = [], []
-    running_total = running_max = 0
-    group_padding = cfg.pileup.variant_padding // 2
-    for region, records in overlapping_records(inference_vcf, flank=group_padding):
-        count = len(records)
-
-        running_total += count
-        running_max = max(running_max, count)
-
-        # We can't exhaustively generate examples for regions with too many records, so we skip any more complex regions
-        (regions if count <= cfg.pileup.max_exhaustive_records else search_regions).append(region.expand(-group_padding))
-
-    logging.info(
-        "Identified %d regions with mean %f and max %d records",
-        running_total,
-        running_total / (len(regions) + len(search_regions)),
-        running_max,
-    )
-    logging.info(
-        "Generating exhaustive images for %d regions (across %d threads)", len(regions), cfg.threads
-    )
-
-    os.makedirs(output_dir, exist_ok=True)
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ray_dir:
+    with contextlib.ExitStack() as stack:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
-        # to avoid conflicts between clusters running on the same node.
-        ray.init(num_cpus=cfg.threads, num_gpus=0, _temp_dir=ray_dir, ignore_reinit_error=True, include_dashboard=False, runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers))
+        # to avoid conflicts between clusters running on the same node. We seem to observe race condition on Ray cleanup of temporary
+        # directories, so we ignore cleanup errors here.
+        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+        if not ray.is_initialized():
+            ray.init(
+                num_cpus=cfg.threads,
+                num_gpus=0,
+                _temp_dir=tmp_dir,
+                include_dashboard=False,
+                runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore
+            )
+            stack.callback(ray.shutdown)
 
+        # Phase 1: Create and serialize graphs for subsequent analysis along with filtered k-mers
+        if graph_shards is None:
+            graph_shards, unique_kmer_path, region_count = serialize_graph_and_unique_kmers(
+                cfg,
+                vcf_path,
+                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
+                output_dir=tmp_dir,
+                min_variant_size=min_variant_size,
+                pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
+                progress_bar=progress_bar,
+                region=region,
+            )
+        else:
+            region_count = None
+
+        if filtered_kmer_path is None:
+            assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered kmer path is not provided"
+            assert sample.kmc_prefix is not None, "Sample must have a KMC database when filtered_kmer_path is not provided"
+
+            filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
+            kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
+
+        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, "Filtered k-mer database has unexpected k"
+
+        if region_count is not None:
+            logging.info("Generating exhaustive images for %d regions (across %d threads)", region_count, cfg.threads)
+        else:
+            logging.info("Generating exhaustive images across %d threads", cfg.threads)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Phase 2: Process each shard as a Ray task in parallel to generate images
         actors = [
-            GraphWriter.remote(i, output_dir, cfg, read_path, sample, background_vcf=background_vcf, inference_vcf=inference_vcf, ploidy=ploidy)
+            GraphWriter.remote(
+                i,
+                output_dir,
+                cfg,
+                str(vcf_path),
+                str(read_path),
+                sample,
+                str(filtered_kmer_path),
+                ploidy=ploidy,
+                min_variant_size=min_variant_size,
+            )
             for i in range(cfg.threads)
         ]
         pool = ray.util.ActorPool(actors)
 
-        gen = pool.map_unordered(lambda actor, region: actor.from_region.remote(region), regions)
-        for _ in tqdm(gen, total=len(regions), disable=not progress_bar):
-            pass
+        gen = pool.map_unordered(lambda actor, shard: actor.from_shard.remote(shard), graph_shards) # type: ignore
+        with tqdm(disable=not progress_bar) as progress:
+            for num_regions in gen:
+                progress.update(num_regions) # type: ignore
 
-        # Make sure all the writers are cleaned up
-        ray.wait([actor.cleanup.remote() for actor in actors], num_returns=len(actors))
+        # Explicitly close (and wait for) each actor's webdataset writer before deleting the actor handles
+        # and reading the files actors produced.
+        ray.get([actor.close.remote() for actor in actors]) # type: ignore
+        del pool, actors
+
+
 
 
 VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG", "FORMAT"])
@@ -689,4 +610,3 @@ def split_and_filter_vcf(
                 sample_stats.dropped_regions,
                 _region_count,
             )
-

@@ -1,4 +1,6 @@
 import math
+import os
+from collections.abc import Sequence
 
 import numpy as np
 import pysam
@@ -9,6 +11,7 @@ from torchvision.transforms import v2 as transforms
 from npsv3.images.annotated_array import AnnotatedArray
 from npsv3.pileup import AlleleAssignment, BaseAlignment, ReadPileup, Strand, fetch_reads
 from npsv3.realigner import AlleleRealignment, realign_fragment
+from npsv3.types import PathType
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
 
@@ -154,7 +157,7 @@ class ImageGenerator:
         assert len(image_tensor.shape) == 3
         return self._flatten_image(image_tensor, **kwargs)
 
-    def generate(self, read_path, sample: Sample, region: Range, compress=False, **kwargs):
+    def generate(self, read_path: PathType | Sequence[PathType], sample: Sample, region: Range, compress=False, **kwargs):
         image = self._generate(read_path, sample, region, **kwargs)
         image_array = image[:, :, self._cfg.pileup.image_channels]
 
@@ -178,7 +181,7 @@ class CoverageImageGenerator(ImageGenerator):
 
     def _generate(
         self,
-        read_path,
+        read_path: PathType | Sequence[PathType],
         sample: Sample,
         region: Range,
         realigner: AlleleRealignment | None = None,
@@ -188,36 +191,40 @@ class CoverageImageGenerator(ImageGenerator):
         image_height = self._cfg.pileup.image_height
         image_tensor = np.zeros((image_height, region.length, MAX_NUM_CHANNELS), dtype=np.uint8)
 
-        fragments = fetch_reads(read_path, region.expand(self._cfg.pileup.fetch_flank), reference=self._cfg.reference)
+        read_paths = [read_path] if isinstance(read_path, (str, os.PathLike)) else list(read_path)
 
-        # Construct the pileup from the fragments
+        # Construct the pileup from the fragments, merging fragments fetched from all of the BAM/CRAM files into a
+        # single pileup so that, e.g., per-haplotype read sets can be rendered as one combined image
         pileup = ReadPileup(region)
 
-        for fragment in fragments:
-            # At present we render reads based on the original alignment so we only realign (and track) fragments that could overlap
-            # the image window. If we render "insert" bases, then we look if any part of the fragment overlaps the region
-            if fragment.fragment_overlaps(region, read_overlap_only=not self._cfg.pileup.insert_bases):
-                insert_zscore = _fragment_zscore(sample, fragment.fragment_length)
+        for path in read_paths:
+            fragments = fetch_reads(path, region.expand(self._cfg.pileup.fetch_flank), reference=self._cfg.reference)
 
-                # Render "insert" bases for overlapping fragments without reads in the region (and thus would not
-                # otherwise be represented)
-                add_insert = self._cfg.pileup.insert_bases and not fragment.reads_overlap(region)
+            for fragment in fragments:
+                # At present we render reads based on the original alignment so we only realign (and track) fragments that could overlap
+                # the image window. If we render "insert" bases, then we look if any part of the fragment overlaps the region
+                if fragment.fragment_overlaps(region, read_overlap_only=not self._cfg.pileup.insert_bases):
+                    insert_zscore = _fragment_zscore(sample, fragment.fragment_length)
 
-                if realigner is not None:
-                    realignment, read1_realignment, read2_realignment = realign_fragment(
-                        realigner, fragment, assign_delta=self._cfg.pileup.assign_delta
+                    # Render "insert" bases for overlapping fragments without reads in the region (and thus would not
+                    # otherwise be represented)
+                    add_insert = self._cfg.pileup.insert_bases and not fragment.reads_overlap(region)
+
+                    if realigner is not None:
+                        realignment, read1_realignment, read2_realignment = realign_fragment(
+                            realigner, fragment, assign_delta=self._cfg.pileup.assign_delta
+                        )
+                        realign_args = { "allele": realignment, "read1_realignment": read1_realignment, "read2_realignment": read2_realignment }
+                    else:
+                        realign_args = {}
+
+                    pileup.add_fragment(
+                        fragment,
+                        add_insert=add_insert,
+                        insert_zscore=insert_zscore,
+                        phase_tag=self._cfg.pileup.phase_tag,
+                        **realign_args,
                     )
-                    realign_args = { "allele": realignment, "read1_realignment": read1_realignment, "read2_realignment": read2_realignment }
-                else:
-                    realign_args = {}
-
-                pileup.add_fragment(
-                    fragment,
-                    add_insert=add_insert,
-                    insert_zscore=insert_zscore,
-                    phase_tag=self._cfg.pileup.phase_tag,
-                    **realign_args,
-                )
 
         # Add pileup bases to the image (downsample reads based on simple coverage-based heuristic)
         max_reads = (region.length * image_height) // sample.read_length

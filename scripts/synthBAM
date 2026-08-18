@@ -18,7 +18,7 @@ LENGTH=150
 PROFILE=HS25
 SAMPLES=1
 
-function add_HP_tag() {
+function add_SQ_HP_tag() {
     python3 -c '
 import pysam
 
@@ -26,10 +26,31 @@ with pysam.AlignmentFile("-", "r") as untagged_file:
     with pysam.AlignmentFile("-", "w", template=untagged_file) as tagged_file:
         for read in untagged_file:
             name = read.query_name
-            read.set_tag("HP", 1 if name[name.find("#") + 1] == "0" else 2)
+            # Extract haplotype sequence ID from read name "seq-0-0-..." to 0_0 or "seq-1-1-..." to 1_1
+            # and set SQ to permit downstream splitting of reads by haplotype.
+            haplotype_id = name.split("-", 3)
+            read.set_tag("SQ", f"{haplotype_id[1]}_{haplotype_id[2]}")
+            read.set_tag("HP", (int(haplotype_id[2]) % 2) + 1)  # Set HP to 1 or 2 based on the parity of the last haplotype ID
             tagged_file.write(read)
 '
 }
+
+function add_SQ_tag() {
+    python3 -c '
+import pysam
+
+with pysam.AlignmentFile("-", "r") as untagged_file:
+    with pysam.AlignmentFile("-", "w", template=untagged_file) as tagged_file:
+        for read in untagged_file:
+            name = read.query_name
+            # Extract haplotype sequence ID from read name "seq-0-0-..." to 0_0 or "seq-1-1-..." to 1_1
+            # and set SQ to permit downstream splitting of reads by haplotype.
+            haplotype_id = name.split("-", 3)
+            read.set_tag("SQ", f"{haplotype_id[1]}_{haplotype_id[2]}")
+            tagged_file.write(read)
+'
+}
+
 
 
 usage()
@@ -46,7 +67,7 @@ Options:
   -c integer    Coverage for every sequence in FASTA (i.e. for each haplotype present), default: $COVERAGE
   -m float      Mean fragment size, default: $FRAGMEAN
   -s float      Standard deviation of fragment size, default: $FRAGSD
-  -t DIRECTORY  Root for temporary directory, default: /data/scratch/\$USER 
+  -t DIRECTORY  Root for temporary directory, default: $TMPDIR_ROOT
   -l integer    Read length, default: $LENGTH
   -p string     ART sequencer profile, default: $PROFILE
   -i integer    Number of samples in output SAM/BAM, default: $SAMPLES
@@ -185,9 +206,9 @@ do
     fi | \
     samblaster -q -M --addMateTags | \
     if [[ -n "$PHASE_VCF" ]]; then
-        cat
+        add_SQ_tag
     else
-        add_HP_tag
+        add_SQ_HP_tag
     fi | \
     samtools view -S -u  - | \
     sambamba -q sort -t 1 -m 512MiB --tmpdir="$TMPDIR" -o "$ALIGNEDBAM" /dev/stdin
