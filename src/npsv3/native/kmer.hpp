@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -144,13 +145,17 @@ class KmerClassify {
    */
   explicit KmerClassify(const std::string& db_path, double coverage, const Params& params = {});
 
-  virtual ~KmerClassify() = default;
+  virtual ~KmerClassify();
 
   /**
-   * @brief Classify k-mers in the globally sorted @p sequences using a merge-like pass of the k-mer DB,
-   * calling @p callback with the index into @p sequences and zygosity.
+   * @brief Classify k-mers in the globally sorted @p sequences against the k-mer DB, calling @p callback
+   * with the index into @p sequences and zygosity.
    *
-   * The callback may be called in any order.
+   * Dispatches per call between a linear merge pass over the whole DB (when @p sequences is comparable to
+   * or larger than the DB) and per-k-mer random-access lookups (when @p sequences is much smaller than the DB).
+   *
+   * The callback may be called in any order. Not safe to call concurrently from multiple threads on the
+   * same instance.
    */
   virtual void ClassifySorted(const std::vector<std::string>& sequences, const ClassificationCallback& callback) const;
 
@@ -165,7 +170,22 @@ class KmerClassify {
   double heterozygous_coverage_;
   double homozygous_coverage_;
 
+  /// Opened for listing once at construction (real subclass only) and reused via RestartListing() on every
+  /// ClassifySorted call, so the *.kmc_pre LUT is parsed once per instance instead of once per call. 
+  mutable CKMCFile db_;
+
+  /// Random-access handle, opened lazily on the first ClassifySorted call whose `sequences` is smaller than
+  /// the DB and reused thereafter. Left null by the protected default constructor.
+  mutable std::unique_ptr<detail::MMapKMCFile> ra_db_;
+
   KmerZygosity ClassifyCount(uint32_t count) const;
+
+  /// Linear merge pass over the whole DB via db_ (listing mode) -- ClassifySorted's original strategy,
+  /// still the best choice when `sequences` is comparable to or larger than the DB.
+  void ClassifySortedScan(const std::vector<std::string>& sequences, const ClassificationCallback& callback) const;
+  /// Per-k-mer random-access lookup via ra_db_ (opened lazily on first use) -- ClassifySorted's strategy
+  /// when `sequences` is much smaller than the DB.
+  void ClassifySortedRandomAccess(const std::vector<std::string>& sequences, const ClassificationCallback& callback) const;
 };
 
 }  // namespace npsv3

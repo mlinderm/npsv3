@@ -739,11 +739,6 @@ TEST_F(BeamMissStressTest, HaplotypeSamplerFindsGlobalOptimumUnderAggressiveTrim
   EXPECT_DOUBLE_EQ(sampler.Score(paths[0]), best_score);
 }
 
-// -----------------------------------------------------------------------------------------------
-// Correctness check for HaplotypeSamplerOptimalityTest below (OPTIMIZATION_PROPOSALS.md's Proposal 2
-// made FindBestPaths(n) a single, fixed-width forward pass -- no widening/certification loop -- so this
-// is what actually proves it still finds the true optimum, not merely a self-consistency check).
-//
 // Generalizes BeamMissStressTest to an arbitrary-length chain of biallelic SNPs, then across many
 // random adversarial per-SNP score assignments (including exact ties, which stress the beam's
 // tie-breaking as directly as any margin does), brute-forces the true global optimum (2^K
@@ -916,13 +911,159 @@ TEST(HaplotypeSamplerOptimalityTest, MatchesBruteForceWidthTwoAcrossRandomAdvers
   }
 }
 
-// The two tests above check a single FindBestPaths(n) call in isolation. This one exercises
-// SampleHaplotypes' full multi-draw loop, where each draw's UpdateScores call mutates k-mer scores before
-// the next draw runs: two freshly-constructed samplers given identical initial scores must produce
+// -----------------------------------------------------------------------------------------------
+// Fixture for pending-pool width-limit stress tests. Structurally similar to SNPChainFixture (a chain
+// of K biallelic SNPs, brute-forceable via 2^K combinations), but with:
+//
+// 1. K-mers are auto-derived from the graph via UniqueKmersOverlay (production-shaped), not hand-listed
+//    one-node-per-allele locations. With k large enough to span more than one SNP's worth of sequence,
+//    this naturally creates overlapping multi-node k-mers whose automaton states stay pending across
+//    multiple SNPs.
+// 2. The inter-SNP spacer is a non-repetitive sequence, not SNPChainFixture's "AAAA" run. UniqueKmersOverlay
+//    only keeps *sequence-unique* k-mers; an all-"AAAA" spacer makes many auto-derived k-mer windows
+//    literally identical text at different genomic offsets (the same period-5 "C,AAAA" pattern repeats
+//    once per SNP), so almost everything gets filtered out as non-unique before it ever reaches the DP.
+class OverlappingSNPClusterFixture {
+ public:
+  explicit OverlappingSNPClusterFixture(size_t num_snps)
+      : fasta_(BuildFasta(num_snps)),
+        vcf_(BuildVCF(num_snps)),
+        graph_(fasta_.file_path_, vcf_.file_path_, Range("chr1", 5, 10 + 5 * num_snps + 15)),
+        num_snps_(num_snps) {
+    auto ref_handles = graph_.PathHandles("chr1");
+    EXPECT_EQ(ref_handles.size(), 2 * num_snps + 1);
+
+    h_prefix_ = ref_handles.front();
+    h_suffix_ = ref_handles.back();
+    h_ref_.resize(num_snps);
+    h_alt_.resize(num_snps);
+    h_mid_.resize(num_snps > 0 ? num_snps - 1 : 0);
+
+    size_t idx = 1;
+    for (size_t i = 0; i < num_snps; ++i) {
+      h_ref_[i] = ref_handles[idx++];
+      if (i + 1 < num_snps) h_mid_[i] = ref_handles[idx++];
+    }
+    for (size_t i = 0; i < num_snps; ++i) {
+      handlegraph::handle_t predecessor = (i == 0) ? h_prefix_ : h_mid_[i - 1];
+      handlegraph::handle_t found = h_ref_[i];
+      graph_.follow_edges(predecessor, false, [&](const handlegraph::handle_t& next) {
+        if (graph_.get_id(next) != graph_.get_id(h_ref_[i])) found = next;
+        return true;
+      });
+      h_alt_[i] = found;
+    }
+  }
+
+  /// Fresh sampler with k-mers auto-derived from the graph
+  std::unique_ptr<HaplotypeSamplerOverlay> MakeSampler(size_t k, size_t max_edges = 5) const {
+    UniqueKmersOverlay unique_kmers(graph_, k, max_edges, /*exclude_universal=*/true, /*canonicalize=*/false);
+    return std::make_unique<HaplotypeSamplerOverlay>(graph_, unique_kmers, HaplotypeSamplerOverlay::Params{});
+  }
+
+  Graph::NodeIdSeq BuildPath(size_t combo) const {
+    Graph::NodeIdSeq path = {graph_.get_id(h_prefix_)};
+    for (size_t i = 0; i < num_snps_; ++i) {
+      bool alt = (combo >> i) & 1u;
+      path.push_back(graph_.get_id(alt ? h_alt_[i] : h_ref_[i]));
+      if (i + 1 < num_snps_) path.push_back(graph_.get_id(h_mid_[i]));
+    }
+    path.push_back(graph_.get_id(h_suffix_));
+    return path;
+  }
+
+  std::vector<double> BruteForceTopScores(const HaplotypeSamplerOverlay& sampler, size_t n) const {
+    std::vector<double> scores;
+    scores.reserve(size_t{1} << num_snps_);
+    for (size_t combo = 0; combo < (size_t{1} << num_snps_); ++combo) {
+      scores.push_back(sampler.Score(BuildPath(combo)));
+    }
+    std::sort(scores.begin(), scores.end(), std::greater<double>());
+    scores.resize(std::min(n, scores.size()));
+    return scores;
+  }
+
+ private:
+  // A long, non-repetitive base sequence sliced into per-SNP spacers below.
+  static constexpr const char* kBase =
+      "GCATGCTAGGATCCAGTGCATCGGATTACAGGTCAAGCTTGGCATTAGGCTGACCATTGGA"
+      "CATGGTACCGAGCTCGAATTCACTGGCCGTCGTTTTACAACGTCGTGACTGGGAAAACCCT";
+
+  static std::string BuildFasta(size_t num_snps) {
+    std::string base(kBase);
+    std::string seq = base.substr(0, 9);  // 9-base left flank
+    size_t offset = 9;
+    for (size_t i = 0; i < num_snps; ++i) {
+      seq += "C";  // REF allele, matches BuildVCF's REF=C below
+      size_t spacer_len = (i + 1 < num_snps) ? 4 : 10;
+      seq += base.substr(offset, spacer_len);
+      offset += spacer_len;
+    }
+    return ">chr1\n" + seq;
+  }
+
+  static std::string BuildVCF(size_t num_snps) {
+    std::string vcf = R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1
+)VCF";
+    for (size_t i = 0; i < num_snps; ++i) {
+      vcf += "chr1\t" + std::to_string(10 + 5 * i) + "\t.\tC\tG\t.\tPASS\t.\tGT\t0/1\n";
+    }
+    return vcf;
+  }
+
+  test::TestFastaFile fasta_;
+  test::TestVCFFile vcf_;
+  Graph graph_;
+  size_t num_snps_;
+  handlegraph::handle_t h_prefix_, h_suffix_;
+  std::vector<handlegraph::handle_t> h_ref_, h_alt_, h_mid_;
+};
+
+// Ground-truth regression test for width-trimming pending automaton-state pools. Uses 
+// OverlappingSNPClusterFixture specifically to put more than n distinct covered_paths
+// classes into a single pending pool before trimming (unlike SNPChainFixture's
+// single-node locations, which only ever produce ephemeral one-hop pending states).
+TEST(PendingPoolWidthLimitTest, MatchesBruteForceAcrossRandomAdversarialScores) {
+  constexpr size_t kNumSnps = 8;      // 2^8 = 256 combinations, cheap to brute force
+  constexpr size_t kKmerLength = 14;  // spans ~2-3 SNPs at this fixture's 5bp-per-SNP spacing
+  constexpr int kNumTrials = 60;
+  constexpr size_t kWidths[] = {1, 2, 3};
+
+  OverlappingSNPClusterFixture fixture(kNumSnps);
+  auto sampler = fixture.MakeSampler(kKmerLength);
+  ASSERT_GT(sampler->NumKmers(), 2 * kNumSnps) << "Expected overlapping multi-node k-mers beyond one per allele";
+
+  for (size_t n : kWidths) {
+    for (int trial = 0; trial < kNumTrials; ++trial) {
+      RandomKmerClassify counts(1000u * static_cast<unsigned>(n) + static_cast<unsigned>(trial));
+      sampler->InitializeScores(counts);
+
+      const auto brute_top = fixture.BruteForceTopScores(*sampler, n);
+      auto found = sampler->FindBestPaths(n);
+
+      // Tolerance for floating-point summation-order noise between near-tied paths (the DP's incremental
+      // score accumulation vs. Score()'s independent summation can legitimately differ in the last few
+      // bits) -- same rationale as RealRegionSanityTest::CheckSane's identical tolerance above.
+      constexpr double kScoreTolerance = 1e-6;
+      for (size_t i = 0; i < brute_top.size(); ++i) {
+        ASSERT_LT(i, found.size()) << "n=" << n << " trial " << trial;
+        EXPECT_NEAR(sampler->Score(found[i]), brute_top[i], kScoreTolerance)
+            << "n=" << n << " trial " << trial << ": FindBestPaths(n) rank " << i << " diverged from brute force";
+      }
+    }
+  }
+}
+
+// Exercise SampleHaplotypes' multi-draw loop, which mutates k-mer scores before
+// the next draw runs. Two freshly-constructed samplers given identical initial scores must produce
 // identical draws (the algorithm is deterministic, not order-dependent on anything outside graph/scores).
 // Note: haplotype-by-haplotype Score() calls made *after* the loop finishes reflect the final,
 // fully-mutated k-mer scores, not each draw's scores at selection time, so those can't be used to check a
-// "scores non-increasing across draws" property after the fact -- only equality between two runs is checked.
+// "scores non-increasing across draws" property after the fact. Only equality between two runs is checked.
 TEST(SampleHaplotypesSanityTest, DeterministicAcrossRandomAdversarialScores) {
   constexpr size_t kNumSnps = 9;
   constexpr int kNumTrials = 100;
@@ -939,8 +1080,7 @@ TEST(SampleHaplotypesSanityTest, DeterministicAcrossRandomAdversarialScores) {
     for (auto& z : zygosities) z = kZygosities[zyg_dist(rng)];
     IndexedKmerClassify counts(zygosities);
 
-    // Two independent samplers over the identical graph/initial scores -- each is driven through its own
-    // full multi-draw loop (UpdateScores mutates per-sampler state draw over draw), so this checks that
+    // Two independent samplers over the identical graph/initial scores. This checks that
     // the algorithm itself is deterministic, not dependent on anything outside (graph, scores) that differs.
     auto sampler_a = fixture.MakeSampler();
     sampler_a->InitializeScores(counts);
@@ -958,16 +1098,12 @@ TEST(SampleHaplotypesSanityTest, DeterministicAcrossRandomAdversarialScores) {
   }
 }
 
-// -----------------------------------------------------------------------------------------------
-// Smoke/sanity test on real, production-scale graphs instead of a synthetic SNP chain: the two
-// benchmark regions from PERFORMANCE_NOTES.md, built from the actual HG00733 population VCF -- a
-// "small" region (159 nodes / 1,714 k-mers) and the worst-case dense-variant "large" region (9,560
-// nodes / 30,099 k-mers / 25,099 automaton states, 3,786 merged overlapping variants). There's no
-// tractable brute force here (thousands of variants), so this checks that FindBestPaths(n) returns up
-// to n valid, distinct, descending-sorted paths without crashing/hanging at real production scale. Real
-// k-mer coverage counts aren't needed to stress the beam search itself, so scores are assigned via
-// RandomKmerClassify instead of a KMC database, matching this file's existing no-KMC-required test
-// pattern.
+// Test on real, production-scale graphs instead of a synthetic SNP chain. The chr1:148538120-148538280
+// regions in HG00733 has 159 nodes and 1,714 k-mers. There's no tractable brute force here, so this
+// test checks that FindBestPaths(n) returns up to n valid, distinct, descending-sorted paths without
+// crashing. Real k-mer coverage counts aren't needed to stress the beam search itself, so scores are
+// assigned via RandomKmerClassify instead of a KMC database, matching this file's existing no-KMC-required
+// test pattern.
 namespace {
 const char* const kHG00733PopulationVCF =
     "/storage/mlinderman/projects/sv/npsv3-experiments/resources/"
@@ -1009,6 +1145,7 @@ class RealRegionSanityTest : public GraphConstructionTest {
       }
     }
   }
+
 };
 
 TEST_F(RealRegionSanityTest, FindBestPathsSaneOnSmallBenchmarkRegion) {
@@ -1021,21 +1158,4 @@ TEST_F(RealRegionSanityTest, FindBestPathsSaneOnSmallBenchmarkRegion) {
   ASSERT_GT(sampler.NumKmers(), 0u);
 
   CheckSane(sampler, /*widths=*/{1, 8}, /*num_trials=*/30, /*seed=*/1, "SmallBenchmarkRegion");
-}
-
-TEST_F(RealRegionSanityTest, DISABLED_FindBestPathsSaneOnWorstCaseDenseRegion) {
-  // DISABLED: RandomKmerClassify at this region's full scale (9,560 nodes / 30,099 k-mers / 25,099
-  // automaton states) reliably exhausts >20GB inside FindBestPaths(1) alone -- i.e. in the plain forward
-  // DP itself (confirmed via getrusage instrumentation: the crash happens before FindBestPaths even
-  // returns). Independently-random per-k-mer scores are apparently not a fair/representative stress
-  // input at this scale -- see OPTIMIZATION_PROPOSALS.md's "Future work: unbounded pending-state pools".
-  auto region = Range("chr1", 148531170, 148577610);
-  Graph graph(HG38FastaPath_, kHG00733PopulationVCF, region);
-
-  const size_t k = 31, max_edges = 5;
-  UniqueKmersOverlay unique_kmers(graph, k, max_edges);
-  HaplotypeSamplerOverlay sampler(graph, unique_kmers);
-  ASSERT_GT(sampler.NumKmers(), 0u);
-
-  CheckSane(sampler, /*widths=*/{1}, /*num_trials=*/1, /*seed=*/2, "WorstCaseDenseRegion");
 }

@@ -413,7 +413,6 @@ class TestTopkHaplotypeSamplingInHG00733:
             filter_kmers=False,
         )
 
-    # @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -448,6 +447,9 @@ class TestTopkHaplotypeSamplingInHG00733:
 
         statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
 
+        # The first 3 haplotypes: [[1, 2, 6, 7, 9, 13, 14, 16], [1, 3, 5, 6, 7, 9, 13, 14, 16], [1, 3, 4, 7, 8, 11, 13, 14, 16]
+        # and have identical scores and thus reported in an implementation-defined order.
+
         # The first variant is 0/1, but overlaps the second (genotype of 1/2 with a star allele), so we correctly
         # sample haplotypes that don't include the full reference allele for the first variant (nodes [3,5]), just node [3].
         # But node [3] is sufficient to uniquely identify that we didn't call the alternate allele (node [2]) for the
@@ -458,10 +460,17 @@ class TestTopkHaplotypeSamplingInHG00733:
 
         assert len(statistics) == 3, "There should be 3 'inference' variants in the region"
         assert all(statistics["haplotypes"] == 6), "With overlapping variants, there should be 6 haplotypes in the region"
-        assert statistics["haplotype_idxs"].equals(pd.Series([(0, 1), (0, 1), (0, 0)]))
+
+        # Since there are haplotypes with identical scores, and implementation-defined tiebreaking, we assert on
+        # the expected zygosity, not the specific haplotype indices.
+        assert all(idx != -1 for idxs in statistics["haplotype_idxs"] for idx in idxs), \
+            "Every allele should have a compatible sampled haplotype"
+        distinct_pattern = [idxs[0] != idxs[1] for idxs in statistics["haplotype_idxs"]]
+        assert distinct_pattern == [True, True, False], (
+            "Variants 1/2 (heterozygous) should match two distinct haplotypes; variant 3 (homozygous) the same one"
+        )
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
-    # @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -496,7 +505,6 @@ class TestTopkHaplotypeSamplingInHG00733:
         statistics = diplotypes_in_topk(cfg, vcf_path, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert all((statistics["all_diplotype_idx"] == -1) | (statistics["diplotype_idx"] <= statistics["all_diplotype_idx"]))
 
-    # @pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -532,8 +540,6 @@ class TestTopkHaplotypeSamplingInHG00733:
         assert len(statistics) == 0, "There should be no fully genotyped analysis variants in this region"
         # TODO: Test that an info message was logged about this region
 
-
-    #@pytest.mark.skip(reason="Skip unless debugging")
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
     )

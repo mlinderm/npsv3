@@ -1,3 +1,5 @@
+import glob
+import itertools
 import json
 import logging
 import os
@@ -188,16 +190,52 @@ def main(cfg: DictConfig) -> None:
             hydra.utils.to_absolute_path(cfg.input),
             output,
         )
+    elif cfg.command == "graphs":
+        # Pre-generate graphs for a given VCF (since it doesn't depend on any particular sample)
+        from npsv3.graphs.haplotype import serialize_graph_and_unique_kmers
+
+        _make_paths_absolute(cfg, ["reference", "input", "kmer.ref_kmer_counts_kmc_prefix"])
+         # If no output directory is specified, use the Hydra output directory (the current working directory)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        serialize_graph_and_unique_kmers(
+            cfg,
+            cfg.input,
+            output,
+            pool_kmers=True,
+            ref_kmer_counts_path=OmegaConf.select(cfg, "kmer.ref_kmer_counts_kmc_prefix"),
+            progress_bar=True
+       )
+
     elif cfg.command == "diplotype_topk":
         from npsv3.graphs.haplotype import diplotypes_in_topk
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "stats_path", "input"])
+        _make_paths_absolute(cfg, ["reference", "stats_path", "input", "unique_kmer_path", "filtered_kmer_path"])
         # If no output file is specified, create a fixed file in the Hydra output directory
         output = "topk_statistics.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
+        # Collect pre-generated graph shards if specified, otherwise generate them on-the-fly (slower)
+        graph_shards = None
+        if not OmegaConf.is_missing(cfg, "graph_shards") and OmegaConf.select(cfg, "graph_shards") is not None:
+            # Pre-expand shard patterns using the '::' separator also used by WebDataset, and glob each pattern to find matching files
+            graph_shards = list(
+                itertools.chain.from_iterable(
+                    glob.glob(hydra.utils.to_absolute_path(shard)) for shard in cfg.graph_shards.split("::")
+                )
+            )
+            graph_shards.sort()  # Sort for deterministic order, since glob order is arbitrary
+
         sample = Sample.from_json(cfg.stats_path)
-        statistics = diplotypes_in_topk(cfg, cfg.input, sample, progress_bar=True)
+        statistics = diplotypes_in_topk(
+            cfg,
+            cfg.input,
+            sample,
+            progress_bar=True,
+            graph_shards=graph_shards,
+            unique_kmer_path=OmegaConf.select(cfg, "unique_kmer_path"),
+            filtered_kmer_path=OmegaConf.select(cfg, "filtered_kmer_path"),
+        )
         statistics.to_pickle(output)
 
     else:

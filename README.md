@@ -124,13 +124,13 @@ To force a CMAKE to perform a fresh build, prepend the build command with `CMAKE
 
 ### Benchmarking
 
-`tests/benchmarks/` holds repeatable benchmarks for `HaplotypeSamplerOverlay` sampling meant to be driven by external profilers rather than instrumented with logging or ad hoc timing code. Two fixed regions from the HG00733 population VCF are used: `small` (~160 nodes/1.7k k-mers) and worst-case `large` (a dense 3,786-variant cluster, ~9.5k nodes/30k k-mers) merged into a single graph via direct construction (`_create_graph_and_sampler`, not `serialize_graph_and_unique_kmers`'s per-cluster splitting -- that would fragment the `large` region into ~21 unrelated smaller graphs instead of the one worst-case automaton it's meant to exercise). No Ray is involved: graph/sampler construction takes a few seconds even for the `large` region and isn't cached; the (slower, subprocess-based `kmc_tools`) filtered k-mer database is cached under `tests/results/` and reused on subsequent runs.
+`tests/benchmarks/` holds repeatable benchmarks for `HaplotypeSamplerOverlay` sampling meant to be driven by external profilers rather than instrumented with logging or ad hoc timing code. Two fixed regions from the HG00733 population VCF are used by default: `small` (~160 nodes/1.7k k-mers) and worst-case `large` (a dense 3,786-variant cluster, ~9.5k nodes/30k k-mers) merged into a single graph via direct construction. `--region` also accepts any literal region string (e.g. `chr1:31431661-31432319`), not just `small`/`large`, for investigating a specific candidate. No parallelism is employed. graph/sampler construction takes a few seconds even for the `large` region and isn't cached; the (slower, subprocess-based `kmc_tools`) filtered k-mer database is cached under `tests/results/` and reused on subsequent runs.
 
 **Quick timing**, standalone (must run as a module so the package's relative imports resolve):
 ```
 uv run python3 -m tests.benchmarks.bench_haplotype_sampling --region small
 ```
-`--region large`, `--iterations`, `--warmup`, and `--json <path>` (to save per-iteration timings + git commit for later comparison) are also available; see `--help`.
+`--region large` (or any literal region string), `--iterations`, `--warmup`, and `--json <path>` (to save per-iteration timings + git commit for later comparison) are also available; see `--help`. A region suspected of pathological memory use should be wrapped in a `ulimit -v` (e.g. `( ulimit -v 64000000; exec uv run python3 -m tests.benchmarks.bench_haplotype_sampling --region <region> --iterations 1 --warmup 0 )`) and run with `NPSV3_HAPLOTYPE_PROFILE=1` for stage-by-stage `rss_kb`/`hwm_kb`.
 
 **CPU flamegraph** (Python + native frames), using the already-installed `py-spy`:
 ```

@@ -1,5 +1,6 @@
 import contextlib
 import glob
+import itertools
 import logging
 import os
 import tempfile
@@ -12,6 +13,7 @@ import webdataset as wds
 from tqdm import tqdm
 
 from npsv3 import PathType
+from npsv3._native_graph import Diplotype
 from npsv3._native_graph import HaplotypeSamplerOverlay as HaplotypeSamplerOverlay
 from npsv3._native_graph import KmerClassify as KmerClassify
 from npsv3._native_graph import KmerCounts as KmerCounts
@@ -170,17 +172,20 @@ class _SerializeGraphAndUniqueKmers:
         self,
         reference: str,
         vcf_path: str,
-        *,
         kmer_size: int,
+        graph_shard: str,
+        *,
         max_edges=5,
         exclude_universal=True,
         canonicalize=False,
         ref_kmer_counts_path: str | None = None,
         filter_kmer_fasta_path: str | None = None,
+        max_size_shard=200*1024*1024, # 200 MB
     ):
         self.reference = reference
         self.vcf_path = vcf_path
         self.kmer_size = kmer_size
+        self._graph_writer = wds.ShardWriter(graph_shard, maxsize=max_size_shard, verbose=False)
         self.max_edges = max_edges
         self.exclude_universal = exclude_universal
         self.canonicalize = canonicalize
@@ -197,6 +202,7 @@ class _SerializeGraphAndUniqueKmers:
         # `__ray_shutdown__` would eventually close the fasta file on actor termination, but that runs
         # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
         # remote method before using the fasta files.
+        self._graph_writer.close()
         if self.kmer_fasta and not self.kmer_fasta.closed:
             self.kmer_fasta.close()
 
@@ -221,17 +227,12 @@ class _SerializeGraphAndUniqueKmers:
         if self.kmer_fasta is not None:
             for i, seq in enumerate(unique_kmers.sequences):
                 self.kmer_fasta.write(f">{slug}_{i}\n{seq}\n")
-
-        return {
-            "slug": slug,
-            "region_str": region_str,
-            # Wrap the already-produced bytes as uint8 arrays (a zero-copy view, not a
-            # copy) so Ray returns them to the driver as zero-copy views into the object
-            # store on `ray.get()`, instead of allocating and copying a fresh `bytes`
-            # object as it would for a plain `bytes`/`str` return value.
-            "graph_bytes": np.frombuffer(graph.save_bytes(), dtype=np.uint8),
-            "unique_kmer_bytes": np.frombuffer(unique_kmers.save_bytes(), dtype=np.uint8),
-        }
+        self._graph_writer.write({
+            "__key__": slug,
+            "region.txt": region_str,
+            "graph.bytes": graph.save_bytes(),
+            "unique_kmer_overlay.bytes": unique_kmers.save_bytes(),
+        })
 
 
 def serialize_graph_and_unique_kmers(
@@ -264,40 +265,28 @@ def serialize_graph_and_unique_kmers(
 
     with contextlib.ExitStack() as stack:
         tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+        vcf_file = stack.enter_context(VariantFileReader.open(str(vcf_path)))
 
-        vcf_file = stack.enter_context(VariantFileReader.open(vcf_path))
-
-        shard_pattern = os.path.join(output_dir, "graphs-%05d.tar.gz")
-        sink = stack.enter_context(wds.ShardWriter(shard_pattern, maxsize=max_size_shard, verbose=False))
-
+        # Create thread-specific graph shards and k-mer fasta files to avoid contention on a single file handle across threads.
+        graph_shards = [os.path.join(output_dir, f"graphs-{i:05d}-%05d.tar.gz") for i in range(cfg.threads)]
         kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if pool_kmers else None for i in range(cfg.threads)]
         actors = [
             # Convert all arguments to easily serializable types, e.g, paths to str
             _SerializeGraphAndUniqueKmers.remote(
                 str(cfg.reference),
                 str(vcf_path),
-                kmer_size=cfg.kmer.kmer_size,
+                cfg.kmer.kmer_size,
+                graph_shard,
                 max_edges=cfg.kmer.max_edges,
                 canonicalize=cfg.kmer.canonicalize,
                 ref_kmer_counts_path=str(ref_kmer_counts_path) if ref_kmer_counts_path is not None else None,
                 filter_kmer_fasta_path=kmer_fasta_path,
-            ) for kmer_fasta_path in kmer_fasta_paths
+                max_size_shard=max_size_shard,
+            ) for graph_shard, kmer_fasta_path in zip(graph_shards, kmer_fasta_paths, strict=True)
         ]
         pool = ray.util.ActorPool(actors)
 
-        def _consume_region():
-            result = pool.get_next_unordered()  # noqa: F821
-            sink.write({
-                "__key__": result["slug"],
-                "region.txt": result["region_str"],
-                # `.tobytes()` copies, but the FASTA/tar path already needs an owned buffer
-                # here (and the shard is gzip-compressed downstream, touching every byte
-                # regardless), so there's nothing left to gain by avoiding this last copy.
-                "graph.bytes": result["graph_bytes"].tobytes(),
-                "unique_kmer_overlay.bytes": result["unique_kmer_bytes"].tobytes(),
-            })
-
-        logging.info("Generating all graphs and unique k-mers to %s", shard_pattern)
+        logging.info("Generating all graphs and unique k-mers to graphs-%%05d-%%05d.tar.gz")
         region_count = 0
         for variants_region, _ in tqdm(
             overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size),
@@ -308,13 +297,13 @@ def serialize_graph_and_unique_kmers(
             # Utilize _pending_submits to implement back pressure on the number of regions in-flight
             # to avoid excessive memory usage (ActorPool doesn't provide a public API to implement back pressure)
             if len(pool._pending_submits) >= cfg.threads and pool.has_next(): # noqa: SLF001
-                _consume_region()
+                pool.get_next_unordered()
 
             pool.submit(lambda a, v: a.construct_from_region.remote(str(v)), variants_region)
             region_count += 1
 
         while pool.has_next():
-            _consume_region()
+            pool.get_next_unordered()
 
         # Explicitly close (and wait for) each actor's webdataset writer before deleting the actor handles and
         # reading the files actors produced.
@@ -457,6 +446,24 @@ def prepare_genotyping_haplotypes(
 
     return haplotypes, alleles, true_hap_idxs
 
+def _find_matching_diplotype(diplotypes: Sequence[Diplotype], matching_haplotypes: np.ndarray) -> int:
+    """Return the index of the first diplotype that matches the genotype in `matching_halotypes` or -1
+
+    Assumes `diplotypes` are not globally phased, but `matching_haplotypes` might be. All permutations of haplotype
+    indices in diplotypes are considered when checking for a match.
+
+    Args:
+        diplotypes (Sequence[Diplotype]): Sequence of genotypes as ploidy-length tuple of haplotype indices
+        matching_haplotypes (np.ndarray): ploidy x haplotype boolean array indicating compatible haplotypes for each allele
+
+    Returns:
+        int: Matching index or -1 if no matching diplotype is found
+    """
+    for diplotype_idx, diplotype in enumerate(diplotypes):
+        for haplotype in itertools.permutations(diplotype.haplotypes):
+            if all(matching_haplotypes[j][h] for j, h in enumerate(haplotype)):
+                return diplotype_idx
+    return -1
 
 @ray.remote # type: ignore
 def _diplotypes_in_topk_shard(
@@ -512,15 +519,11 @@ def _diplotypes_in_topk_shard(
                 # Compute the rank (0-indexed) of the true haplotypes, or -1 if no sampled haplotype match for this variant
                 haplotype_idxs = np.where(np.any(matching_haplotypes, axis=1), np.argmax(matching_haplotypes, axis=1), -1)
 
-                if -1 not in haplotype_idxs:
-                    # Find the first diplotype that matches both haplotypes, which may not the be the same as the diplotype
-                    # with the first matching haplotypes.
-                    diplotype_idx = next((
-                        i for i, diplotype in enumerate(diplotypes)
-                        if all(matching_haplotypes[j][h] for j, h in enumerate(diplotype.haplotypes))
-                    ), -1)
-                else:
-                    diplotype_idx = -1
+                # Find the first diplotype that matches both haplotypes, which may not the be the same as the diplotype
+                # with the first matching haplotypes (if they don't co-occur). The diplotypes are sampled in sorted order,
+                # i.e., (0,1) can be observed, but (1,0) will not be observed. Thus we are reporting the first matching diplotype
+                # independent of phase, i.e., for any permutation of haplotype indices in a given diplotype.
+                diplotype_idx = _find_matching_diplotype(diplotypes, matching_haplotypes) if -1 not in haplotype_idxs else -1
 
                 record_rows.append({
                     "region": region_string,
@@ -539,10 +542,7 @@ def _diplotypes_in_topk_shard(
             # Find the first diplotype that matches both haplotypes across all variants
             all_matching_haplotypes = np.all(np.stack(all_matching_haplotypes), axis=0)
             all_haplotype_idxs = tuple(np.where(np.any(all_matching_haplotypes, axis=1), np.argmax(all_matching_haplotypes, axis=1), -1))
-            all_diplotype_idx = next((
-                i for i, diplotype in enumerate(diplotypes)
-                if all(all_matching_haplotypes[j][h] for j, h in enumerate(diplotype.haplotypes))
-            ), -1)
+            all_diplotype_idx = _find_matching_diplotype(diplotypes, all_matching_haplotypes) if -1 not in all_haplotype_idxs else -1
 
             # Determine if we match the the complete haplotype, including all variants.
             # TODO: We assume fully phased haplotypes here, but that may not be the case.
@@ -594,6 +594,7 @@ def diplotypes_in_topk(
         filter_kmers (bool, optional): _description_. Defaults to False.
         ref_kmer_counts (KmerClassify | None, optional): Reference k-mer counts. Defaults to None.
         graph_shards (list, optional): List of graph shard paths. Defaults to None.
+        unique_kmer_path (str, optional): Path to the unique k-mer database. Defaults to None.
         filtered_kmer_path (str, optional): Path to the filtered k-mer database. Defaults to None.
         region (Range | None, optional): Region to analyze. Defaults to None.
     """
@@ -624,12 +625,16 @@ def diplotypes_in_topk(
                 progress_bar=progress_bar,
                 region=region,
             )
+        else:
+            logging.info("Using %d pre-generated graph shards", len(graph_shards))
         if filtered_kmer_path is None:
             assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered k-mer path is not provided"
             assert sample.kmc_prefix is not None, "sample must have a KMC database when filtered_kmer_path is not provided"
 
             filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
             kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
+        else:
+            logging.info("Using pre-generated filtered k-mer database at %s", filtered_kmer_path)
 
         assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, "Filtered k-mer database has unexpected k"
 

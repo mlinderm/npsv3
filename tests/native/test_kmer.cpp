@@ -426,3 +426,141 @@ TEST(MMapKMCFileTest, MatchesUpstreamCKMCFile) {
   upstream.Close();
   mmapped.Close();
 }
+
+namespace {
+// Runs KmerClassify::ClassifySorted via the public API and returns a map from k-mer string to
+// reported zygosity, for comparing results across calls that take different internal strategies.
+std::unordered_map<std::string, npsv3::KmerZygosity> ClassifyAll(const npsv3::KmerClassify& classify,
+                                                                   const std::vector<std::string>& sequences) {
+  std::unordered_map<std::string, npsv3::KmerZygosity> results;
+  classify.ClassifySorted(sequences, [&](size_t idx, npsv3::KmerZygosity zyg) {
+    results[sequences[idx]] = zyg;
+  });
+  return results;
+}
+
+// Builds a KMC database from a random sequence of the given length, returning its prefix path and
+// total k-mer count (KmerCount()). `k` matches the project's own default kmer_size where not specified.
+struct SyntheticDb {
+  std::string prefix;
+  uint64_t kmer_count;
+  bool is_kmc2;
+};
+
+SyntheticDb BuildSyntheticDb(test::TempDir& dir, const std::string& seq, uint32_t k, const char* name) {
+  auto fasta_path = (dir / (std::string(name) + ".fa")).string();
+  {
+    std::ofstream fasta(fasta_path);
+    fasta << ">1\n" << seq << "\n";
+  }
+  auto kmc_prefix = (dir / name).string();
+  // -b: no canonicalization, matching every real KMC database this project builds/queries (KmerClassify's
+  // callers always query literal, un-canonicalized k-mer strings -- see kmc_build_from_fasta/kmc_filter in
+  // sample.py, both "both_strands: no"). Without -b, ClassifySorted's scan path (which compares literal
+  // query strings against ReadNextKmer's *stored* form) would spuriously miss whenever a k-mer's canonical
+  // form differs from its literal form, which is a synthetic-test-setup mismatch, not a real one.
+  std::string cmd = fmt::format("kmc -t1 -k{} -b -ci1 -fa {} {} {} > /dev/null 2>&1", k, fasta_path, kmc_prefix,
+                                 dir.path_.string());
+  if (std::system(cmd.c_str()) != 0) {
+    ADD_FAILURE() << "kmc command failed: " << cmd;
+    return {};
+  }
+  CKMCFile info;
+  if (!info.OpenForListing(kmc_prefix)) {
+    ADD_FAILURE() << "Failed to open synthetic DB for listing: " << kmc_prefix;
+    return {};
+  }
+  SyntheticDb result{kmc_prefix, info.KmerCount(), info.IsKMC2()};
+  info.Close();
+  return result;
+}
+
+// Builds a DB the way production actually builds KmerClassify's real inputs: kmc_filter/cache_filter_kmc_
+// database (sample.py) both run `kmc_tools ... intersect ... -ocleft`, not plain `kmc` counting directly.
+// That distinction matters here: plain `kmc` picks KMC2 (signature-binned) format even for databases as
+// small as 40 k-mers on this machine's kmc build, while `kmc_tools intersect`'s *output* came out KMC1 at
+// every real project scale checked (752 to 5,669,389 k-mers, see PERFORMANCE_NOTES.md) -- so a plain-`kmc`
+// DB isn't a representative way to exercise the KMC1 branch. Uses the same sequence as both the "source"
+// and "filter" side, so the intersection is just that sequence's own k-mer set (source's counts are kept
+// via -ocleft, matching kmc_filter's own flag).
+SyntheticDb BuildFilteredSyntheticDb(test::TempDir& dir, const std::string& seq, uint32_t k, const char* name) {
+  auto source = BuildSyntheticDb(dir, seq, k, (std::string(name) + "_source").c_str());
+  if (source.prefix.empty()) return {};
+
+  auto output_prefix = (dir / name).string();
+  std::string cmd = fmt::format("kmc_tools -t1 -hp simple {} {} intersect {} -ocleft > /dev/null 2>&1",
+                                 source.prefix, source.prefix, output_prefix);
+  if (std::system(cmd.c_str()) != 0) {
+    ADD_FAILURE() << "kmc_tools intersect command failed: " << cmd;
+    return {};
+  }
+  CKMCFile info;
+  if (!info.OpenForListing(output_prefix)) {
+    ADD_FAILURE() << "Failed to open synthetic filtered DB for listing: " << output_prefix;
+    return {};
+  }
+  SyntheticDb result{output_prefix, info.KmerCount(), info.IsKMC2()};
+  info.Close();
+  return result;
+}
+
+// Runs the scan-vs-random-access equivalence check shared by the KMC1- and KMC2-scale tests below:
+// classifies every distinct k-mer of `seq` (plus a few absent ones) in one large call -- big enough
+// relative to the DB to take KmerClassify::ClassifySorted's scan path -- then classifies a small slice
+// of the same k-mers in a second call on the same instance, small enough to take the random-access path.
+// The two calls must agree on every k-mer they share.
+void CheckScanMatchesRandomAccess(const SyntheticDb& db, const std::string& seq, uint32_t k) {
+  ASSERT_GT(db.kmer_count, 20u) << "Test setup should produce a nontrivial DB";
+
+  std::vector<std::string> present_kmers;
+  for (size_t i = 0; i + k <= seq.size(); ++i) present_kmers.push_back(seq.substr(i, k));
+  std::sort(present_kmers.begin(), present_kmers.end());
+  present_kmers.erase(std::unique(present_kmers.begin(), present_kmers.end()), present_kmers.end());
+
+  std::vector<std::string> all_query = present_kmers;
+  for (uint32_t seed = 9000; seed < 9010; ++seed) all_query.push_back(RandomSequence(k, seed));
+  std::sort(all_query.begin(), all_query.end());
+  ASSERT_GE(all_query.size(), db.kmer_count) << "Querying every present k-mer should reach the scan threshold";
+
+  // Every entry here must also appear in all_query above, so the two maps are directly comparable --
+  // present_kmers is a subset of all_query by construction, so this stays a subset too.
+  std::vector<std::string> subset_query(present_kmers.begin(), present_kmers.begin() + std::min<size_t>(10, present_kmers.size()));
+  std::sort(subset_query.begin(), subset_query.end());
+  ASSERT_LT(subset_query.size(), db.kmer_count) << "Querying a small slice should stay under the RA threshold";
+
+  npsv3::KmerClassify classify(db.prefix, /*coverage=*/1.0);
+  auto all_results = ClassifyAll(classify, all_query);           // exercises the scan path
+  auto subset_results = ClassifyAll(classify, subset_query);     // same instance, exercises the RA path
+
+  ASSERT_FALSE(subset_results.empty());
+  for (const auto& [kmer_str, zyg] : subset_results) {
+    auto it = all_results.find(kmer_str);
+    ASSERT_NE(it, all_results.end()) << "k-mer " << kmer_str << " missing from scan-path results";
+    EXPECT_EQ(it->second, zyg) << "Scan vs random-access disagree for k-mer " << kmer_str;
+  }
+}
+}  // namespace
+
+TEST(KmerClassifyAdaptiveDispatchTest, ScanMatchesRandomAccess_KMC1Scale) {
+  test::TempDir dir;
+  const uint32_t k = 21;
+  std::string seq = RandomSequence(400, /*seed=*/7);
+  auto db = BuildFilteredSyntheticDb(dir, seq, k, "kmc1_scale");
+  ASSERT_FALSE(db.prefix.empty());
+  ASSERT_FALSE(db.is_kmc2) << "This test is meant to exercise a KMC1-format DB; adjust sequence length if kmc_tools' format heuristic changed";
+  CheckScanMatchesRandomAccess(db, seq, k);
+}
+
+TEST(KmerClassifyAdaptiveDispatchTest, ScanMatchesRandomAccess_KMC2Scale) {
+  test::TempDir dir;
+  const uint32_t k = 25;
+  // Same construction as MMapKMCFileTest.MatchesUpstreamCKMCFile above, which this file's own comment
+  // notes is large enough to produce a real KMC2 (signature-binned) database.
+  std::string seq = RandomSequence(2000, /*seed=*/42);
+  seq += seq.substr(0, 500);
+  auto db = BuildSyntheticDb(dir, seq, k, "kmc2_scale");
+  ASSERT_FALSE(db.prefix.empty());
+  ASSERT_TRUE(db.is_kmc2) << "This test is meant to exercise a KMC2-format DB; adjust sequence length if kmc's format heuristic changed";
+  CheckScanMatchesRandomAccess(db, seq, k);
+}
+

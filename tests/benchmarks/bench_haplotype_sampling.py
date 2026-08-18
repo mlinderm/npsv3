@@ -63,7 +63,10 @@ def _check_load_average() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--region", choices=sorted(_harness.REGIONS), default="small")
+    parser.add_argument(
+        "--region", default="small",
+        help=f"Preset ({sorted(_harness.REGIONS)}) or literal region string, e.g. chr1:31431661-31432319 (default: small)",
+    )
     parser.add_argument("--reference", default=None, help="Reference FASTA (default: autodetected test reference)")
     parser.add_argument("--iterations", type=int, default=None, help="Timed iterations (default: 100 for small, 2 for large)")
     parser.add_argument("--warmup", type=int, default=2, help="Untimed warmup iterations")

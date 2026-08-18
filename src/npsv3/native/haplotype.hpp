@@ -71,8 +71,7 @@ class HaplotypeSamplerOverlay {
   void InitializeScores(const KmerClassify& counts);
 
   /// Return up to @p n unique highest-scoring distinct paths through the graph using the current k-mer
-  /// scores, via a single forward pass at exactly width @p n (OPTIMIZATION_PROPOSALS.md "Proposal 2" --
-  /// empirically validated to find the same result a certified/adaptively-widened search would).
+  /// scores, via a single forward pass at exactly width @p n .
   std::vector<Haplotype> FindBestPaths(size_t n) const;
 
   /// Return the top @p n haplotypes, sorted by descending score, sampled greedily from the graph using k-mer coverage.
@@ -172,6 +171,31 @@ class HaplotypeSamplerOverlay {
     double score;
   };
 
+  /// Deterministic per-index finalizer (SplitMix64) used to build an order-independent hash of a covered_paths
+  /// bit set as hash(S) = XOR over i in S of PathHash(i). 
+  /// 
+  /// Because XOR is commutative and this is a pure function
+  /// of the *set* of indices, equal bit sets always hash equal regardless of how they were constructed. Thus
+  /// the hash of a PathIdSetHolder can be updated incrementally (see the trusted-hash constructor below)
+  /// instead of recomputed from scratch on every transition. This incremental use is only valid because
+  /// covered_paths bits are monotonically added and never cleared (see accumulate_covered_paths).
+  static size_t PathHash(size_t idx) {
+    size_t x = idx + 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+  }
+
+  /// Hash every set bit of `bits` from scratch via PathHash. Only needed where there's no predecessor hash to
+  /// update incrementally from (e.g., the DP's seed node).
+  static size_t HashPathIdSet(const Graph::PathIdSet& bits) {
+    size_t h = 0;
+    for (auto idx = bits.find_first(); idx != Graph::PathIdSet::npos; idx = bits.find_next(idx)) {
+      h ^= PathHash(idx);
+    }
+    return h;
+  }
+
   /// Immutable covered_paths bitset plus its hash, computed once when the set is finalized, to enable DP transitions
   /// that don't add any new path bits to share their predecessor's bitset via pointer copy (instead of a deep copy).
   ///
@@ -181,7 +205,12 @@ class HaplotypeSamplerOverlay {
     Graph::PathIdSet bits;
     size_t hash;
 
-    explicit PathIdSetHolder(Graph::PathIdSet b) : bits(std::move(b)), hash(boost::hash_value(bits)) {}
+    explicit PathIdSetHolder(Graph::PathIdSet b) : bits(std::move(b)), hash(HashPathIdSet(bits)) {}
+
+    /// Trusted-hash constructor for incremental updates: caller must supply the hash of `b` themselves (see
+    /// PathHash above), typically as predecessor_hash ^ (XOR of PathHash(i) for each bit i newly set vs. the
+    /// predecessor). Only valid when `b`'s bits are a superset of whatever bits the caller's hash accounts for.
+    PathIdSetHolder(Graph::PathIdSet b, size_t h) : bits(std::move(b)), hash(h) {}
   };
   using SharedPathIdSet = boost::intrusive_ptr<const PathIdSetHolder>;
 
@@ -206,7 +235,8 @@ class HaplotypeSamplerOverlay {
   AutomatonIndex AutomatonGoto(AutomatonIndex state, odgi::nid_t node_id) const;
 
   /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
-  /// for the current k-mer scores, via a single forward pass at exactly width @p n.
+  /// for the current k-mer scores, via a single forward pass at exactly width @p n. Every (node,
+  /// automaton_state) pool is trimmed to n candidates, including pending (mid k-mer-match) states.
   BestPathState PropagateBestPathState(size_t n) const;
 
   /// Extract the final top-n distinct paths (applying the path filter, if active) from a completed @p path_state.

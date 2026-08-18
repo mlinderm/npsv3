@@ -336,48 +336,81 @@ void HaplotypeSamplerOverlay::InitializeScores(const KmerClassify& counts) {
 }
 
 namespace {
-  // Unconditionally merge exact covered_paths duplicates within backtrack (keep the highest-scoring
-  // representative per class)
-  template<typename T>
-  void DedupCoveredPaths(T& backtrack) {
-    if (backtrack.empty()) return;
-    // covered_paths is an immutable, refcounted PathIdSetHolder to enable fast "shallow" copies when
-    // there are no changes. First check for pointer equality, then hash equality and then bits. Only
-    // entries with *different* holders fall back to comparing ->hash and, on a hash tie, ->bits (potentially
-    // thousands of bits). Since equal covered_paths always hash equal, this can never merge or split groups
-    // differently than comparing covered_paths directly.
-    std::sort(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) {
-      if (a.covered_paths == b.covered_paths) return a.score > b.score;
-      if (a.covered_paths->hash != b.covered_paths->hash) return a.covered_paths->hash > b.covered_paths->hash;
-      // Group by covered_paths first, then sort by descending score within groups
-      if (a.covered_paths->bits == b.covered_paths->bits) {
-        return a.score > b.score;
-      }
-      return a.covered_paths->bits > b.covered_paths->bits;
-    });
-    // Retain only the highest-scoring representative per inference equivalence class.
-    auto last = std::unique(backtrack.begin(), backtrack.end(), [](const auto& a, const auto& b) {
-      return a.covered_paths == b.covered_paths ||
-             (a.covered_paths->hash == b.covered_paths->hash && a.covered_paths->bits == b.covered_paths->bits);
-    });
-    backtrack.resize(std::distance(backtrack.begin(), last));
+  // covered_paths is an immutable, refcounted PathIdSetHolder to enable fast "shallow" copies when there
+  // are no changes. First check for pointer equality, then hash equality and then bits. Only entries with
+  // *different* holders fall back to comparing ->hash and, on a hash tie, ->bits (potentially thousands of
+  // bits). Since equal covered_paths always hash equal, this can never merge or split groups differently
+  // than comparing covered_paths directly.
+  template <typename T>
+  bool SameCoveredPathsClass(const T& a, const T& b) {
+    return a.covered_paths == b.covered_paths ||
+           (a.covered_paths->hash == b.covered_paths->hash && a.covered_paths->bits == b.covered_paths->bits);
   }
 
-  /// Apply the settlement-point rule.
+  /// Dedup @p backtrack by covered_paths and trim to the top @p n highest-scoring distinct classes.
   ///
-  /// At the automaton root (or the final sink, where no k-mer match can still be pending), it's safe to collapse
-  /// to the top @p n *distinct* covered_paths classes. At any other (pending-match) automaton state, collapsing
-  /// to @p n classes could discard a class that would have gone on to have a better score when its pending match
-  /// resolves, so only exact-duplicate merging (node, automaton_state, covered_paths) is applied there.
+  /// Use a single O(|backtrack| x n) pass against a small (<= n) `kept` buffer, instead of a full O(m log m)
+  /// comparison sort purely to group-and-dedup followed by a second sort to rank by score. Every incoming
+  /// pool was already trimmed to <= n (typically 8 or less) at the previous node, so |backtrack| here is small
+  /// (bounded by roughly in-degree x n, or occupied-automaton-states x n at the sink merge), so a linear scan
+  //// can be efficient.
+  ///
+  /// Applied at every (node, automaton_state) pool, even those with pending (mid k-mer) matches.
+  /// `KmerSetScoreDelta` (the only per-edge score contribution) is a pure function of (source automaton_state,
+  /// next_node), and so is applied identically to every entry in a pool for a given edge, regardless of
+  /// covered_paths. Thus different covered_paths don't influence the ranking of future scores.
+  ///
+  /// The surviving entries' order is otherwise unspecified unless @p sort_result is true, which additionally
+  /// sorts the (<= n, so cheap) result by descending score. Callers whose result must be in descending-score
+  /// order (currently: only the final sink/root pool, consumed by SampleHaplotypes's greedy per-draw walk and
+  /// FindBestPaths's public sorted-order contract) must pass sort_result=true; every other call site's result
+  /// only feeds further DP propagation, where entries are consumed via stable stored indices
+  /// (Backpointer::pred_path_idx), not iteration order, so no order is needed there.
   template <typename T>
-  void SortAndTrimBacktrack(T& backtrack, size_t n, bool settled = true) {
-    DedupCoveredPaths(backtrack);
-    if (!settled) return;
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool sort_result = false) {
+    if (n == 0 || backtrack.empty()) {
+      backtrack.clear();
+      return;
+    }
 
-    size_t new_size = std::min(n, backtrack.size());
-    std::partial_sort(backtrack.begin(), backtrack.begin() + new_size, backtrack.end(),
-                      [](const auto& a, const auto& b) { return a.score > b.score; });
-    backtrack.resize(new_size);
+    T kept;
+    kept.reserve(n);
+    size_t worst_idx = 0; // valid only once kept.size() == n
+
+    auto recompute_worst = [&]() {
+      worst_idx = 0;
+      for (size_t i = 1; i < kept.size(); ++i) {
+        if (kept[i].score < kept[worst_idx].score) worst_idx = i;
+      }
+    };
+
+    for (auto& candidate : backtrack) {
+      size_t match_idx = kept.size();
+      for (size_t i = 0; i < kept.size(); ++i) {
+        if (SameCoveredPathsClass(candidate, kept[i])) {
+          match_idx = i;
+          break;
+        }
+      }
+      if (match_idx < kept.size()) {
+        if (candidate.score > kept[match_idx].score) kept[match_idx] = std::move(candidate);
+        continue;
+      }
+      if (kept.size() < n) {
+        kept.push_back(std::move(candidate));
+        if (kept.size() == n) recompute_worst();
+        continue;
+      }
+      if (candidate.score > kept[worst_idx].score) {
+        kept[worst_idx] = std::move(candidate);
+        recompute_worst();
+      }
+    }
+
+    if (sort_result) {
+      std::sort(kept.begin(), kept.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
+    }
+    backtrack = std::move(kept);
   }
 }
 
@@ -473,12 +506,9 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     auto& node_state = dp[i - min_id];
     assert(!node_state.empty());  // Should have at least one path to every reachable node
 
-    // At the automaton root (or the final sink, where no k-mer match can still be pending), it's safe to collapse
-    // to the top n *distinct* covered_paths classes. At any other (pending-match) automaton state, collapsing
-    // to n classes could discard a class that would have gone on to have a better score when its pending match
-    // resolves, so only exact-duplicate merging (node, automaton_state, covered_paths) is applied there.    
+    // Every pool at this node is width-trimmed to n distinct covered_paths classes.
     for (auto& [automaton_state, pool] : node_state) {
-      SortAndTrimBacktrack(pool, n, /*settled=*/automaton_state == kAutomatonRoot);
+      SortAndTrimBacktrack(pool, n);
     }
 
     // Propagate along every real forward graph edge
@@ -491,6 +521,17 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
       // PathIdSetHolder (cheap refcount bump, reuses its cached hash) instead of copying, et al.
       const bool contributes = contributes_paths_mask_.test(next_node);
 
+      // Precompute the sparse set of path bits next_node itself contributes, once per edge (not once per
+      // automaton_state/b_idx below): mirrors accumulate_covered_paths's masking exactly, and `contributes`
+      // already guarantees inference_node_mask_.test(next_node) when apply_path_filter_ is set (see
+      // InitializeContributesPathsMask). Reused both to extend covered_paths and, per b_idx below, to compute
+      // the incremental hash delta (only the bits that are actually newly set for that b_idx's predecessor).
+      Graph::PathIdSet contribution;
+      if (contributes) {
+        contribution = apply_path_filter_ ? (graph_.node_variant_paths_[next_node] & inference_path_mask_)
+                                           : graph_.node_variant_paths_[next_node];
+      }
+
       for (auto& [automaton_state, pool] : node_state) {
         size_t new_state = AutomatonGoto(automaton_state, next_node);
         double weight_delta = KmerSetScoreDelta(new_state);
@@ -498,9 +539,14 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
         for (size_t b_idx = 0; b_idx < pool.size(); ++b_idx) {
           SharedPathIdSet new_covered_paths;
           if (contributes) {
-            Graph::PathIdSet bits = pool[b_idx].covered_paths->bits;
-            accumulate_covered_paths(bits, next_node);
-            new_covered_paths = make_covered_paths(std::move(bits));
+            const auto& parent = *pool[b_idx].covered_paths;
+            size_t delta_hash = 0;
+            for (auto idx = contribution.find_first(); idx != Graph::PathIdSet::npos; idx = contribution.find_next(idx)) {
+              if (!parent.bits.test(idx)) delta_hash ^= PathHash(idx);
+            }
+            Graph::PathIdSet bits = parent.bits;
+            bits |= contribution;
+            new_covered_paths = SharedPathIdSet(new PathIdSetHolder(std::move(bits), parent.hash ^ delta_hash));
           } else {
             new_covered_paths = pool[b_idx].covered_paths; // unchanged -- share, don't copy
           }
@@ -525,7 +571,7 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
   for (auto& [automaton_state, pool] : sink_state) {
     merged.insert(merged.end(), std::make_move_iterator(pool.begin()), std::make_move_iterator(pool.end()));
   }
-  SortAndTrimBacktrack(merged, n, /*settled=*/true);
+  SortAndTrimBacktrack(merged, n, /*sort_result=*/true); // feeds SampleHaplotypes's order-sensitive walk
   sink_state.clear();
   sink_state.emplace(kAutomatonRoot, std::move(merged));
 
@@ -600,13 +646,6 @@ HaplotypeSamplerOverlay::PathWithCoverage HaplotypeSamplerOverlay::BacktrackPath
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleHaplotypes(size_t n) {
   // Each draw runs PropagateBestPathState as a single forward pass at exactly the requested width
-  // (OPTIMIZATION_PROPOSALS.md "Proposal 2"), rather than the score_to_go-certified doubling/widening loop
-  // this replaced. Empirically validated (see that doc's "Empirical validation of Proposal 2") across 450
-  // synthetic + 60 real-small-region + 21 real worst-case-region trials to never change the sampled result
-  // versus the certified/widened result: every discard SortAndTrimBacktrack performs compares entries
-  // within a single (node, automaton_state) pool, and score_to_go was a pure function of that same pair, so
-  // a same-pool comparison of current score is already exact, not an approximation -- widening was only
-  // ever needed to *certify* that, never to find a different answer.
   const bool profiling = HaplotypeProfilingEnabled();
   static size_t call_index = 0;  // single-threaded per PERFORMANCE_NOTES.md's existing thread-unsafe-counter assumption
   size_t this_call = profiling ? call_index++ : 0;

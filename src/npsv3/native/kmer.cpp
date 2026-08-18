@@ -12,7 +12,6 @@
 
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
-#include <boost/scope/scope_exit.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/serialization/vector.hpp>
@@ -307,6 +306,14 @@ KmerClassify::KmerClassify(const std::string& db_path, double coverage, const Km
   absent_coverage_ = params.absent_fraction * coverage;
   heterozygous_coverage_ = params.heterozygous_fraction * coverage;
   homozygous_coverage_ = params.homozygous_fraction * coverage;
+
+  if (!db_.OpenForListing(db_path_)) {
+    throw std::runtime_error(fmt::format("Cannot open KMC database for listing: {}", db_path_));
+  }
+}
+
+KmerClassify::~KmerClassify() {
+  db_.Close();
 }
 
 // ---------------------------------------------------------------------------
@@ -324,15 +331,39 @@ KmerZygosity KmerClassify::ClassifyCount(uint32_t count) const {
 }
 
 void KmerClassify::ClassifySorted(const std::vector<std::string>& sequences, const std::function<void(size_t idx, KmerZygosity zyg)>& callback) const {
-  CKMCFile db;
-  if (!db.OpenForListing(db_path_)) {
-    throw std::runtime_error(fmt::format("Cannot open KMC database for listing: {}", db_path_));
+  // Random access wins when `sequences` is much smaller than the DB (e.g. one region's k-mers against a
+  // DB pooled across many regions) -- the scan below wins when `sequences` is comparable to or larger than
+  // the DB (e.g. a DB already filtered to one region). See PERFORMANCE_NOTES.md for the measurements.
+  if (sequences.size() < db_.KmerCount()) {
+    ClassifySortedRandomAccess(sequences, callback);
+  } else {
+    ClassifySortedScan(sequences, callback);
   }
-  auto cleanup = boost::scope::make_scope_exit([&db] {
-    db.Close();
-  });
+}
 
-  auto k = db.KmerLength();
+void KmerClassify::ClassifySortedRandomAccess(const std::vector<std::string>& sequences, const std::function<void(size_t idx, KmerZygosity zyg)>& callback) const {
+  if (!ra_db_) {
+    ra_db_ = std::make_unique<detail::MMapKMCFile>();
+    if (!ra_db_->OpenForRA(db_path_)) {
+      ra_db_.reset();
+      throw std::runtime_error(fmt::format("Cannot open KMC database for random access: {}", db_path_));
+    }
+  }
+
+  CKmerAPI kmer(ra_db_->KmerLength());
+  for (size_t i = 0; i < sequences.size(); ++i) {
+    kmer.from_string(sequences[i]);
+    uint32_t count = 0;
+    callback(i, ra_db_->CheckKmer(kmer, count) ? ClassifyCount(count) : KmerZygosity::ABSENT);
+  }
+}
+
+void KmerClassify::ClassifySortedScan(const std::vector<std::string>& sequences, const std::function<void(size_t idx, KmerZygosity zyg)>& callback) const {
+  if (!db_.RestartListing()) {
+    throw std::runtime_error(fmt::format("Cannot restart KMC database listing: {}", db_path_));
+  }
+
+  auto k = db_.KmerLength();
 
   // Track which indices had a DB "hit", emitting ABSENT for the rest after the loop. We can't emit
   // ABSENT inline because the DB may only be locally sorted, not globally sorted.
@@ -343,7 +374,7 @@ void KmerClassify::ClassifySorted(const std::vector<std::string>& sequences, con
 
   CKmerAPI kmer(k);
   uint32_t count = 0;
-  while (db.ReadNextKmer(kmer, count)) {
+  while (db_.ReadNextKmer(kmer, count)) {
     std::string kmer_str = kmer.to_string();
 
     // Detect a locally-sorted chunk boundary and reset the merge position.

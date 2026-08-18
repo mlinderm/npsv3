@@ -70,8 +70,21 @@ def missing_inputs(cfg, sample: Sample) -> list[str]:
     return reasons
 
 
+def resolve_region(region_name: str) -> Range:
+    """Resolve `region_name` to a `Range`: a preset key in `REGIONS` if it matches one,
+    otherwise parsed directly as a literal region string (e.g. `chr1:31431661-31432319`).
+
+    Lets callers (the CLI script, `scan_dense_clusters.py`'s output, ad hoc investigation)
+    target any region -- not just the two fixed presets -- without a code change here.
+    """
+    return REGIONS.get(region_name, Range(region_name))
+
+
 def build_sampler(cfg, sample: Sample, region_name: str, tmp_path) -> tuple[HaplotypeSamplerOverlay, KmerClassify]:
     """Construct the sampler and k-mer classifier for `region_name`.
+
+    `region_name` may be a preset key in `REGIONS` (`"small"`/`"large"`) or an arbitrary
+    literal region string -- see `resolve_region`.
 
     The filtered k-mer database is cached under tests/results/ (via
     `cache_filter_kmc_database`, keyed by region + VCF hash + sample), so repeat runs
@@ -80,7 +93,7 @@ def build_sampler(cfg, sample: Sample, region_name: str, tmp_path) -> tuple[Hapl
     it only takes ~2-3s even for the large worst-case region, well under the cost of
     the KMC filtering step it would otherwise need to be cached alongside.
     """
-    region = REGIONS[region_name]
+    region = resolve_region(region_name)
     ref_kmer_counts = KmerCounts(str(cfg.kmer.ref_kmer_counts_kmc_prefix))
     _graph, unique_kmers, sampler = _create_graph_and_sampler(
         cfg.reference,
