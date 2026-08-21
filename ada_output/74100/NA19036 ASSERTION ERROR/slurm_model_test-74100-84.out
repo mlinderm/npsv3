@@ -1,0 +1,23 @@
+Job ID: 74100
+Node: node020
+Starting: 08/18/26 11:43:07
+NA19036
+1142 4080 96
+1889 3952 96
+3580 4048 96
+4639 4048 96
+4736 4048 96
+5080 4048 96
+6775 3952 96
+6854 3952 96
+9442 3968 96
+12492 4032 96
+14831 4000 96
+15738 4032 96
+15894 3936 96
+Traceback (most recent call last):
+  File "/home/cachang/npsv3/dataset_checker.py", line 22, in <module>
+    assert width <= 4096, "image too wide"
+           ^^^^^^^^^^^^^
+AssertionError: image too wide
+Ending: 08/18/26 11:44:26

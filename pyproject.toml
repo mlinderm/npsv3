@@ -42,6 +42,7 @@ dependencies = [
   "timm",
   "tensorboard",
   "mosaicml-streaming",
+  "peft",
 ]
 
 [project.urls]

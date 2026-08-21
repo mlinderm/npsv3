@@ -212,7 +212,7 @@ def _pack_and_pad_images(
             # print("batched")
             yield final
         image_width = support.shape[4]
-        print(num_images, support.shape[4])
+        # print(num_images, support.shape[4])
 
         # Append the "query" (real image) to the images list as a CHW tensor
         query_images.append(query)
