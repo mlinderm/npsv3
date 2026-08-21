@@ -47,9 +47,9 @@ def main(cfg: DictConfig) -> None:
         # If no output file is specified, create a fixed file in the Hydra output directory
         output = "stats.json" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
-        _make_paths_absolute(cfg, ["reference", "reads", "kmer.kmc_prefix"])
+        _make_paths_absolute(cfg, ["reference", "reads", "kmc_prefix"])
 
-        stats = compute_read_stats(cfg, cfg.reads, kmc_prefix=OmegaConf.select(cfg, "kmer.kmc_prefix"))
+        stats = compute_read_stats(cfg, cfg.reads, kmc_prefix=OmegaConf.select(cfg, "kmc_prefix"))
         with open(output, "w") as file:
             json.dump(stats, file)
 
@@ -194,7 +194,7 @@ def main(cfg: DictConfig) -> None:
         # Pre-generate graphs for a given VCF (since it doesn't depend on any particular sample)
         from npsv3.graphs.haplotype import serialize_graph_and_unique_kmers
 
-        _make_paths_absolute(cfg, ["reference", "input", "kmer.ref_kmer_counts_kmc_prefix"])
+        _make_paths_absolute(cfg, ["reference", "input", "graph.ref_kmer_counts_kmc_prefix"])
          # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
@@ -203,7 +203,7 @@ def main(cfg: DictConfig) -> None:
             cfg.input,
             output,
             pool_kmers=True,
-            ref_kmer_counts_path=OmegaConf.select(cfg, "kmer.ref_kmer_counts_kmc_prefix"),
+            ref_kmer_counts_path=OmegaConf.select(cfg, "graph.ref_kmer_counts_kmc_prefix"),
             progress_bar=True
        )
 

@@ -1,0 +1,6 @@
+defaults:
+  - base
+
+# KMC database of non-unique k-mers in the reference genome (used to filter out non-unique k-mers from the sample).
+ref_kmer_counts_kmc_prefix: null 
+

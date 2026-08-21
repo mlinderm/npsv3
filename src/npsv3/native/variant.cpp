@@ -14,6 +14,66 @@
 
 namespace npsv3 {
 
+namespace {
+
+enum class FTStatus { kPass, kFail, kMissing };
+
+// Classify a single sample's raw FT string (fixed-width, i.e. not null-terminated; n is the
+// per-record padded field width, per bcf_fmt_t::n for a Number=1 String field).
+FTStatus ClassifyFT(const char* ft, int n) {
+  if (n >= 4 && std::string_view(ft, 4) == "PASS") {
+    return FTStatus::kPass;
+  }
+  if (n >= 1 && ft[0] != '.') {
+    return FTStatus::kFail;
+  }
+  return FTStatus::kMissing;
+}
+
+// Index of the FORMAT field with the given dictionary id, or record->n_fmt if absent (or id < 0,
+// i.e. the field is not defined in the header at all).
+int FindFmtIndex(const bcf1_t* record, int id) {
+  if (id < 0) return record->n_fmt;
+  for (int i = 0; i < record->n_fmt; i++) {
+    if (record->d.fmt[i].id == id) return i;
+  }
+  return record->n_fmt;
+}
+
+// Decode a single sample's GT sub-field into a Genotype, dispatching on the field's packed integer width.
+Variant::Genotype DecodeGenotype(const bcf_fmt_t* gt_fmt, int sample_idx, int32_t phase_set) {
+  #define BRANCH_CASE(TYPE) \
+    return Variant::Genotype(reinterpret_cast<const TYPE*>(gt_fmt->p + sample_idx * gt_fmt->size), gt_fmt->n, phase_set);
+  switch (gt_fmt->type) {
+    case BCF_BT_INT8: BRANCH_CASE(int8_t);
+    case BCF_BT_INT16: BRANCH_CASE(int16_t);
+    case BCF_BT_INT32: BRANCH_CASE(int32_t);
+    default:
+      throw std::runtime_error("Unsupported GT format field type");
+  }
+  #undef BRANCH_CASE
+}
+
+// Decode a single sample's phase set from a PS field already confirmed to have Number=1; returns -1
+// if that sample's value is missing or vector-end.
+int32_t DecodePhaseSet(const bcf_fmt_t* ps_fmt, int sample_idx) {
+  #define BRANCH_CASE(TYPE) { \
+    TYPE ps = *reinterpret_cast<const TYPE*>(ps_fmt->p + sample_idx * ps_fmt->size); \
+    return (ps == detail::BCFEncodingValues<TYPE>::kVectorEnd || ps == detail::BCFEncodingValues<TYPE>::kMissing) \
+        ? -1 : static_cast<int32_t>(ps); \
+  }
+  switch (ps_fmt->type) {
+    case BCF_BT_INT8: BRANCH_CASE(int8_t);
+    case BCF_BT_INT16: BRANCH_CASE(int16_t);
+    case BCF_BT_INT32: BRANCH_CASE(int32_t);
+    default:
+      throw std::runtime_error("Unsupported PS format field type");
+  }
+  #undef BRANCH_CASE
+}
+
+}  // namespace
+
 VariantFileHeader::VariantFileHeader(bcf_hdr_t* hdr) : hdr_(hdr) {
   gt_id_ = bcf_hdr_id2int(hdr_.get(), BCF_DT_ID, "GT");
   if (gt_id_ >= 0 && !bcf_hdr_idinfo_exists(hdr_.get(), BCF_HL_FMT, gt_id_)) {
@@ -204,69 +264,26 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id) const {
   if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
     throw std::runtime_error("Failed to unpack variant record for genotype extraction");
 
-  int gt_fmt_idx = record_->n_fmt, ps_fmt_idx = record_->n_fmt;
-  for (int i = 0; i < record_->n_fmt; i++) {
-    int id = record_->d.fmt[i].id;
-    if (id == gt_id) { gt_fmt_idx = i; if (ps_id < 0) break; }
-    // Since "The first sub-field must always be the genotype (GT) if it is present.", PS must be past it
-    // and so we can break early once we find PS.
-    else if (id == ps_id) { ps_fmt_idx = i; break; }
-  }
+  int gt_fmt_idx = FindFmtIndex(record_.get(), gt_id);
   if (gt_fmt_idx == record_->n_fmt) {
     throw std::runtime_error("GT format field not present in variant record");
   }
-  
-  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
-  
-  // Extract phase sets if PS is defined
-  std::vector<int32_t> phase_sets(num_samples, -1);
-  if (ps_fmt_idx < record_->n_fmt) {
-    bcf_fmt_t* ps_fmt = &record_->d.fmt[ps_fmt_idx];
-    if (ps_fmt->n == 1) {
-      #define BRANCH_CASE(TYPE) { \
-        for (int i = 0; i < num_samples; i++) { \
-          TYPE ps = *reinterpret_cast<TYPE*>(ps_fmt->p + i * ps_fmt->size); \
-          if (ps == detail::BCFEncodingValues<TYPE>::kVectorEnd) { break; } \
-          else if (ps == detail::BCFEncodingValues<TYPE>::kMissing) { continue; } \
-          else { phase_sets[i] = ps; } \
-        } \
-      }
-      
-      switch (ps_fmt->type) {
-        case BCF_BT_INT8: BRANCH_CASE(int8_t); break;
-        case BCF_BT_INT16: BRANCH_CASE(int16_t); break;
-        case BCF_BT_INT32: BRANCH_CASE(int32_t); break;
-        default:
-          throw std::runtime_error("Unsupported PS format field type");
-      }
+  int ps_fmt_idx = FindFmtIndex(record_.get(), ps_id);
 
-      #undef BRANCH_CASE
-    } else {
-      spdlog::warn("PS format field has {} number of values per sample, expecting 1; ignoring PS.", ps_fmt->n);
-    }
+  bcf_fmt_t* gt_fmt = &record_->d.fmt[gt_fmt_idx];
+  bcf_fmt_t* ps_fmt = ps_fmt_idx < record_->n_fmt ? &record_->d.fmt[ps_fmt_idx] : nullptr;
+  if (ps_fmt && ps_fmt->n != 1) {
+    spdlog::warn("PS format field has {} number of values per sample, expecting 1; ignoring PS.", ps_fmt->n);
+    ps_fmt = nullptr;
   }
-  
+
+  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   std::vector<Variant::Genotype> genotypes;
   genotypes.reserve(num_samples);
-
-  bcf_fmt_t* fmt = &record_->d.fmt[gt_fmt_idx];
-  #define BRANCH_CASE(TYPE) { \
-    for (int i = 0; i < num_samples; i++) { \
-      TYPE* gt = reinterpret_cast<TYPE*>(fmt->p + i * fmt->size); \
-      genotypes.emplace_back(gt, fmt->n, phase_sets[i]); \
-    } \
+  for (int i = 0; i < num_samples; i++) {
+    int32_t phase_set = ps_fmt ? DecodePhaseSet(ps_fmt, i) : -1;
+    genotypes.push_back(DecodeGenotype(gt_fmt, i, phase_set));
   }
-
-  switch (fmt->type) {
-    case BCF_BT_INT8: BRANCH_CASE(int8_t); break;
-    case BCF_BT_INT16: BRANCH_CASE(int16_t); break;
-    case BCF_BT_INT32: BRANCH_CASE(int32_t); break;
-    default:
-      throw std::runtime_error("Unsupported GT format field type");
-  }
-
-  #undef BRANCH_CASE
-
   return genotypes;
 }
 
@@ -281,52 +298,32 @@ bool Variant::HasPassingGenotype(int gt_id, int ft_id) const {
   if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
     throw std::runtime_error("Failed to unpack variant record for genotype FT checking");
 
-  int gt_fmt_idx = record_->n_fmt, ft_fmt_idx = record_->n_fmt;
-  for (int i = 0; i < record_->n_fmt; i++) {
-    int id = record_->d.fmt[i].id;
-    if (id == gt_id) { gt_fmt_idx = i; if (ft_id < 0) break; }
-    // Since "The first sub-field must always be the genotype (GT) if it is present.", FT must be past it
-    // and so we can break early once we find FT.
-    else if (id == ft_id) { ft_fmt_idx = i; break; }
-  }
+  int gt_fmt_idx = FindFmtIndex(record_.get(), gt_id);
   if (gt_fmt_idx == record_->n_fmt) {
     throw std::runtime_error("GT format field not present in variant record");
   }
+  int ft_fmt_idx = FindFmtIndex(record_.get(), ft_id);
   if (ft_fmt_idx == record_->n_fmt) {
     return true;  // No FT field defined, all genotypes are passing
   }
-  
+
   int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   bcf_fmt_t *ft_fmt = &record_->d.fmt[ft_fmt_idx], *gt_fmt = &record_->d.fmt[gt_fmt_idx];
 
   for (int i = 0; i < num_samples; i++) {
     const char* ft = reinterpret_cast<const char*>(ft_fmt->p) + i * ft_fmt->n;
-    if (ft_fmt->n >= 4 && std::string_view(ft, 4) == "PASS") {
+    auto status = ClassifyFT(ft, ft_fmt->n);
+    if (status == FTStatus::kPass) {
       return true;  // Found an explicitly passing genotype
     }
-    if (ft_fmt->n >= 1 && ft[0] != '.') {
+    if (status == FTStatus::kFail) {
       continue;  // Found an explicitly failing genotype
     }
-    assert(ft_fmt->n >= 1 && ft[0] == '.');
     // If FT is '.', check to see if there is a valid genotype (i.e. non-missing). If so, we have found a passing genotype
-    // and return true.
-    #define BRANCH_CASE(TYPE) { \
-      for (int g=0; g < gt_fmt->n; g++) { \
-        auto allele = reinterpret_cast<TYPE*>(gt_fmt->p + i * gt_fmt->size)[g]; \
-        if (allele == detail::BCFEncodingValues<TYPE>::kVectorEnd) { break; } \
-        else if (allele== detail::BCFEncodingValues<TYPE>::kMissing) { continue; } \
-        else if (bcf_gt_is_missing(allele)) { continue; } \
-        else { return true; } \
-      } \
+    // and return true. Phase is irrelevant here, so pass an arbitrary phase_set.
+    if (!DecodeGenotype(gt_fmt, i, -1).AllAlleles(Genotype::kMissingAllele)) {
+      return true;
     }
-    switch (gt_fmt->type) {
-      case BCF_BT_INT8: BRANCH_CASE(int8_t); break;
-      case BCF_BT_INT16: BRANCH_CASE(int16_t); break;
-      case BCF_BT_INT32: BRANCH_CASE(int32_t); break;
-      default:
-        throw std::runtime_error("Unsupported GT format field type");
-    }
-    #undef BRANCH_CASE
   }
 
   return false;  // No passing genotypes found
@@ -340,6 +337,50 @@ bool Variant::HasPassingGenotype() const {
     return true;  // No FT field defined, all genotypes are passing
   }
   return HasPassingGenotype(hdr_->GTId(), hdr_->FTId());
+}
+
+Variant::SampleGenotype Variant::genotype(int sample_idx) const {
+  if (!hdr_->HasGT()) {
+    throw std::runtime_error("GT format field not defined in variant file");
+  }
+
+  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
+  if (sample_idx < 0 || sample_idx >= num_samples) {
+    throw std::out_of_range("Sample index out of range");
+  }
+
+  if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
+    throw std::runtime_error("Failed to unpack variant record for genotype extraction");
+
+  int gt_fmt_idx = FindFmtIndex(record_.get(), hdr_->GTId());
+  if (gt_fmt_idx == record_->n_fmt) {
+    throw std::runtime_error("GT format field not present in variant record");
+  }
+  int ps_fmt_idx = hdr_->HasPS() ? FindFmtIndex(record_.get(), hdr_->PSId()) : record_->n_fmt;
+  int ft_fmt_idx = hdr_->HasFT() ? FindFmtIndex(record_.get(), hdr_->FTId()) : record_->n_fmt;
+
+  // Extract phase set, if PS is defined
+  int32_t phase_set = -1;
+  if (ps_fmt_idx < record_->n_fmt) {
+    bcf_fmt_t* ps_fmt = &record_->d.fmt[ps_fmt_idx];
+    if (ps_fmt->n == 1) {
+      phase_set = DecodePhaseSet(ps_fmt, sample_idx);
+    } else {
+      spdlog::warn("PS format field has {} number of values per sample, expecting 1; ignoring PS.", ps_fmt->n);
+    }
+  }
+
+  auto sample_genotype = DecodeGenotype(&record_->d.fmt[gt_fmt_idx], sample_idx, phase_set);
+
+  // Extract FT filter status, if FT is defined
+  bool filtered = false;
+  if (ft_fmt_idx < record_->n_fmt) {
+    bcf_fmt_t* ft_fmt = &record_->d.fmt[ft_fmt_idx];
+    const char* ft = reinterpret_cast<const char*>(ft_fmt->p) + sample_idx * ft_fmt->n;
+    filtered = ClassifyFT(ft, ft_fmt->n) == FTStatus::kFail;
+  }
+
+  return SampleGenotype(std::move(sample_genotype), filtered);
 }
 
 bool Variant::IsFiltered() const {

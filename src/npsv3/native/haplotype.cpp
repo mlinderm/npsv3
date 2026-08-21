@@ -13,11 +13,31 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
 #include <boost/dynamic_bitset.hpp>
+#include <boost/serialization/utility.hpp>
+#include <boost/serialization/vector.hpp>
 #include <fmt/std.h>
 #include <fmt/ranges.h>
+#include <gbwt/dynamic_gbwt.h>
+#include <spdlog/spdlog.h>
+
+#include <optional>
 
 #include "variant.hpp"
+
+namespace boost {
+namespace serialization {
+
+template <class Archive>
+void serialize(Archive& ar, npsv3::HaplotypePriorOverlay::NodeTransition& t, unsigned int) {
+  ar & t.to_node;
+  ar & t.count;
+}
+
+}  // namespace serialization
+}  // namespace boost
 
 namespace npsv3 {
 
@@ -61,6 +81,347 @@ RssSample CurrentRss() {
   return sample;
 }
 }  // namespace
+
+namespace {
+
+/// Combining hash for a (from_node, to_node) pair key
+struct NodePairHash {
+  size_t operator()(const std::pair<odgi::nid_t, odgi::nid_t>& p) const noexcept {
+    size_t h = std::hash<odgi::nid_t>()(p.first);
+    h ^= std::hash<odgi::nid_t>()(p.second) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+}  // namespace
+
+HaplotypePriorOverlay::HaplotypePriorOverlay(const Graph& graph, const std::vector<std::string>& excluded_samples)
+    : graph_(graph) {
+  const std::unordered_set<std::string> excluded(excluded_samples.begin(), excluded_samples.end());
+  BuildTransitionTable(excluded);
+  BuildGBWTIndex(excluded);
+}
+
+void HaplotypePriorOverlay::BuildTransitionTable(const std::unordered_set<std::string>& excluded_samples) {
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+  const size_t node_space = static_cast<size_t>(max_id - min_id + 1);
+
+  std::unordered_map<std::pair<odgi::nid_t, odgi::nid_t>, uint32_t, NodePairHash> counts;
+  std::vector<uint32_t> node_totals(node_space, 0);
+
+  graph_.for_each_path_handle([&](const handlegraph::path_handle_t& path_handle) {
+    auto path_name = graph_.get_path_name(path_handle);
+    auto hash_pos = path_name.find('#');
+    if (hash_pos == std::string::npos) {
+      return;  // Not a background sample genotype/segment path (Sample#HaplotypeIndex#Contig#SegmentIndex)
+    }
+    if (!excluded_samples.empty() && excluded_samples.count(path_name.substr(0, hash_pos))) {
+      return;  // Caller-requested sample exclusion (e.g. the sample being genotyped)
+    }
+
+    // Walk the path's literal node sequence, skipping non-distinguishing (shared reference) nodes
+    odgi::nid_t prev = -1;  // Sentinel for no distinguishing node seen yet on this path
+    for (auto node_id : graph_.PathNodes(path_handle)) {
+      if (graph_.node_variant_paths_[node_id].none()) continue;
+      if (prev != -1) {
+        counts[{prev, node_id}]++;
+        node_totals[static_cast<size_t>(prev - min_id)]++;
+      }
+      prev = node_id;
+    }
+  });
+
+  // Compact into a sorted-by-(from, to) CSR structure for deterministic, cache-friendly per-source lookup.
+  std::vector<std::pair<std::pair<odgi::nid_t, odgi::nid_t>, uint32_t>> sorted_counts(counts.begin(), counts.end());
+  std::sort(sorted_counts.begin(), sorted_counts.end());
+
+  transition_starts_.assign(node_space + 1, 0);
+  for (const auto& [key, count] : sorted_counts) {
+    transition_starts_[static_cast<size_t>(key.first - min_id) + 1]++;
+  }
+  for (size_t i = 0; i < node_space; i++) {
+    transition_starts_[i + 1] += transition_starts_[i];
+  }
+
+  transitions_.reserve(sorted_counts.size());
+  for (const auto& [key, count] : sorted_counts) {
+    transitions_.push_back(NodeTransition{key.second, count});
+  }
+
+  node_totals_ = std::move(node_totals);
+}
+
+HaplotypePriorOverlay::HaplotypePriorOverlay(const Graph& graph, gbwt::GBWT index, std::vector<StateKey> state_keys,
+                                             std::unordered_map<StateKey, uint32_t, StateKeyHash> state_index,
+                                             std::vector<uint32_t> width, std::vector<double> score_to_go,
+                                             std::vector<size_t> transition_starts,
+                                             std::vector<NodeTransition> transitions,
+                                             std::vector<uint32_t> node_totals)
+    : graph_(graph),
+      index_(std::move(index)),
+      state_keys_(std::move(state_keys)),
+      state_index_(std::move(state_index)),
+      width_(std::move(width)),
+      score_to_go_(std::move(score_to_go)),
+      transition_starts_(std::move(transition_starts)),
+      transitions_(std::move(transitions)),
+      node_totals_(std::move(node_totals)) {}
+
+size_t HaplotypePriorOverlay::RowIndex(odgi::nid_t from_node) const {
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+  if (from_node < min_id || from_node > max_id) return static_cast<size_t>(-1);
+  return static_cast<size_t>(from_node - min_id);
+}
+
+double HaplotypePriorOverlay::TransitionProbability(odgi::nid_t from_node, odgi::nid_t to_node,
+                                                    double alpha) const {
+  const size_t row = RowIndex(from_node);
+  if (row == static_cast<size_t>(-1)) return 1.0;  // outside the graph's node range: no information
+
+  const size_t begin = transition_starts_[row];
+  const size_t end = transition_starts_[row + 1];
+  const size_t k_to = std::max<size_t>(end - begin, 1);  // floor of 1: see class docs
+
+  auto it = std::lower_bound(transitions_.begin() + begin, transitions_.begin() + end, to_node,
+                              [](const NodeTransition& t, odgi::nid_t to) { return t.to_node < to; });
+  const uint32_t count = (it != transitions_.begin() + end && it->to_node == to_node) ? it->count : 0;
+  const uint32_t total = node_totals_[row];
+
+  return (count + alpha) / (total + alpha * static_cast<double>(k_to));
+}
+
+double HaplotypePriorOverlay::LogTransitionProbability(odgi::nid_t from_node, odgi::nid_t to_node,
+                                                       double alpha) const {
+  return std::log(TransitionProbability(from_node, to_node, alpha));
+}
+
+namespace {
+
+struct BackgroundPathTag {
+  std::string sample;
+  int haplotype_index;
+};
+
+// Parses "Sample#HaplotypeIndex#Contig#SegmentIndex" -> {sample, haplotype_index}. Returns std::nullopt if
+// path_name doesn't look like a background sample path (same '#'-name predicate as SamplesIncluding).
+std::optional<BackgroundPathTag> ParseBackgroundPathName(const std::string& path_name) {
+  auto first = path_name.find('#');
+  if (first == std::string::npos) return std::nullopt;
+  auto second = path_name.find('#', first + 1);
+  if (second == std::string::npos) return std::nullopt;  // malformed; defensively skip
+  return BackgroundPathTag{path_name.substr(0, first),
+                            std::stoi(path_name.substr(first + 1, second - first - 1))};
+}
+
+}  // namespace
+
+size_t HaplotypePriorOverlay::StateKeyHash::operator()(const StateKey& k) const noexcept {
+  size_t h = std::hash<gbwt::node_type>()(k.node);
+  h ^= std::hash<gbwt::size_type>()(k.lo) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  h ^= std::hash<gbwt::size_type>()(k.hi) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  return h;
+}
+
+void HaplotypePriorOverlay::BuildGBWTIndex(const std::unordered_set<std::string>& excluded_samples) {
+  // gbwt::GBWTBuilder's node_width must cover the largest encoded node id (id << 1 | is_reverse) ever inserted or
+  // searched (too small results in silent corruption). This graph is always forward-oriented but we still reserve the
+  // reverse bit to match gbwt's node_width convention.
+  gbwt::size_type node_width = gbwt::bit_length(gbwt::Node::encode(graph_.max_node_id(), true));
+  gbwt::GBWTBuilder builder(node_width);
+
+  std::unordered_map<std::string, uint32_t> sample_ids;
+  std::unordered_map<uint32_t, uint32_t> panel_member_ids;  // packed (sample_id<<8|hap) -> dense member id
+  std::vector<gbwt::vector_type> panel_sequences;
+  std::vector<uint32_t> panel_sequence_members;  // parallel to panel_sequences: dense panel-member id
+
+  graph_.for_each_path_handle([&](const handlegraph::path_handle_t& path_handle) {
+    auto path_name = graph_.get_path_name(path_handle);
+    auto tag = ParseBackgroundPathName(path_name);
+    if (!tag) return;  // not a background sample genotype/segment path
+    if (excluded_samples.count(tag->sample)) return;  // Caller-requested sample exclusion (e.g. the sample being genotyped)
+
+    auto [sample_it, unused1] = sample_ids.try_emplace(tag->sample, static_cast<uint32_t>(sample_ids.size()));
+    uint32_t packed = (sample_it->second << 8) | static_cast<uint32_t>(tag->haplotype_index);
+    auto [member_it, unused2] = panel_member_ids.try_emplace(packed, static_cast<uint32_t>(panel_member_ids.size()));
+
+    auto nodes = graph_.PathNodes(path_handle);
+    gbwt::vector_type seq;
+    seq.reserve(nodes.size());
+    for (auto node_id : nodes) {
+      seq.push_back(gbwt::Node::encode(node_id, false));
+    }
+    if (seq.empty()) return;
+
+    builder.insert(seq, false);
+    panel_sequences.push_back(std::move(seq));
+    panel_sequence_members.push_back(member_it->second);
+  });
+  builder.finish();
+  index_ = builder.index;
+
+  // Walk every panel haplotype's own node sequence again, this time through the *finished* index's
+  // Find()/Extend(), to enumerate the induced state graph (states as (node,[lo,hi)), edges via Extend) and
+  // which panel members reach it.
+  //
+  // This walk is exhaustive over every state a caller could ever reach. Every panel path here is walked from its own
+  // genuine start (the region's entry node, or a phase-break), so any caller who does the same only reaches states this
+  // walk already covers.
+  //
+  // This also gives Width() without gbwt::locate(). Since the walk already knows which panel member it's
+  // following, recording that membership directly as we go is cheaper than a separate locate()+dedup pass
+  // and yields the same count.
+  const size_t num_panel_members = panel_member_ids.size();
+  std::vector<boost::dynamic_bitset<>> reaching_members;  // parallel to state_keys_, transient
+  std::vector<std::vector<uint32_t>> successors;          // parallel to state_keys_: successor state indices
+
+  auto GetOrCreateState = [&](const PanelState& state) -> uint32_t {
+    auto key = KeyOf(state);
+    auto [it, inserted] = state_index_.try_emplace(key, static_cast<uint32_t>(state_keys_.size()));
+    if (inserted) {
+      state_keys_.push_back(key);
+      reaching_members.emplace_back(num_panel_members);
+      successors.emplace_back();
+    }
+    return it->second;
+  };
+
+  for (size_t p = 0; p < panel_sequences.size(); p++) {
+    const auto& seq = panel_sequences[p];
+    uint32_t member = panel_sequence_members[p];
+
+    PanelState state = index_.find(seq[0]);
+    assert(!state.empty());
+    uint32_t state_idx = GetOrCreateState(state);
+    reaching_members[state_idx].set(member);
+
+    for (size_t i = 1; i < seq.size(); i++) {
+      PanelState next_state = index_.extend(state, seq[i]);
+      assert(!next_state.empty());
+      uint32_t next_idx = GetOrCreateState(next_state);
+      reaching_members[next_idx].set(member);
+      successors[state_idx].push_back(next_idx); // duplicate edges across panel members deduped below
+      state = next_state;
+      state_idx = next_idx;
+    }
+  }
+
+  width_.resize(state_keys_.size());
+  for (size_t i = 0; i < state_keys_.size(); i++) {
+    width_[i] = static_cast<uint32_t>(reaching_members[i].count());
+    auto& succ = successors[i];
+    std::sort(succ.begin(), succ.end());
+    succ.erase(std::unique(succ.begin(), succ.end()), succ.end());
+  }
+
+  // Backward max-recursion over log-width-ratios. Base case (score_to_go_ left at its default-initialized 0.0) is any
+  // state with no recorded successors: either the region's last node, or for empty/ never-encountered states, handled
+  // separately by ScoreToGo()'s own empty/lookup-miss checks, not by this table at all.
+  score_to_go_.assign(state_keys_.size(), 0.0);
+  std::vector<std::vector<uint32_t>> states_by_node_id(graph_.max_node_id() + 1);
+  for (size_t i = 0; i < state_keys_.size(); i++) {
+    states_by_node_id[gbwt::Node::id(state_keys_[i].node)].push_back(static_cast<uint32_t>(i));
+  }
+  for (auto nid = graph_.max_node_id(); nid >= graph_.min_node_id(); nid--) {
+    for (uint32_t state_idx : states_by_node_id[nid]) {
+      if (successors[state_idx].empty()) continue;  // base case: score_to_go_ already 0.0
+      double best = -std::numeric_limits<double>::infinity();
+      for (uint32_t next_idx : successors[state_idx]) {
+        double delta = std::log(static_cast<double>(width_[next_idx]) / static_cast<double>(width_[state_idx]));
+        best = std::max(best, delta + score_to_go_[next_idx]);
+      }
+      score_to_go_[state_idx] = best;
+    }
+  }
+}
+
+HaplotypePriorOverlay::PanelState HaplotypePriorOverlay::Find(odgi::nid_t node) const {
+  return index_.find(gbwt::Node::encode(node, false));
+}
+
+HaplotypePriorOverlay::PanelState HaplotypePriorOverlay::Extend(const PanelState& state, odgi::nid_t node) const {
+  return index_.extend(state, gbwt::Node::encode(node, false));
+}
+
+size_t HaplotypePriorOverlay::Width(const PanelState& state) const {
+  if (state.empty()) return 0;
+  auto it = state_index_.find(KeyOf(state));
+  return it != state_index_.end() ? width_[it->second] : 0;
+}
+
+double HaplotypePriorOverlay::ScoreToGo(const PanelState& state) const {
+  if (state.empty()) return 0.0;
+  auto it = state_index_.find(KeyOf(state));
+  return it != state_index_.end() ? score_to_go_[it->second] : 0.0;
+}
+
+// -----------------------------------------------------------------------------------------------
+// HaplotypePriorOverlay serialization
+// -----------------------------------------------------------------------------------------------
+//
+// The GBWT index writes itself first via its own native serialize(); everything else follows in a single Boost archive
+// on the same stream.
+
+void HaplotypePriorOverlay::Save(std::ostream& out) const {
+  index_.serialize(out);
+
+  std::vector<gbwt::node_type> nodes;
+  std::vector<gbwt::size_type> los, his;
+  nodes.reserve(state_keys_.size());
+  los.reserve(state_keys_.size());
+  his.reserve(state_keys_.size());
+  for (const auto& key : state_keys_) {
+    nodes.push_back(key.node);
+    los.push_back(key.lo);
+    his.push_back(key.hi);
+  }
+
+  boost::archive::binary_oarchive oa(out);
+  oa << nodes << los << his << width_ << score_to_go_;
+  oa << transition_starts_ << transitions_ << node_totals_;
+}
+
+void HaplotypePriorOverlay::Save(const std::string& path) const {
+  std::ofstream out(path, std::ios::binary);
+  if (!out) throw std::runtime_error("Cannot open haplotype prior file for writing: " + path);
+  Save(out);
+}
+
+void HaplotypePriorOverlay::Load(HaplotypePriorOverlay* target, const Graph& graph, std::istream& in) {
+  gbwt::GBWT index;
+  index.load(in);
+
+  boost::archive::binary_iarchive ia(in);
+  std::vector<gbwt::node_type> nodes;
+  std::vector<gbwt::size_type> los, his;
+  std::vector<uint32_t> width;
+  std::vector<double> score_to_go;
+  ia >> nodes >> los >> his >> width >> score_to_go;
+
+  std::vector<size_t> transition_starts;
+  std::vector<NodeTransition> transitions;
+  std::vector<uint32_t> node_totals;
+  ia >> transition_starts >> transitions >> node_totals;
+
+  std::vector<StateKey> state_keys(nodes.size());
+  std::unordered_map<StateKey, uint32_t, StateKeyHash> state_index;
+  state_index.reserve(nodes.size());
+  for (size_t i = 0; i < nodes.size(); i++) {
+    state_keys[i] = StateKey{nodes[i], los[i], his[i]};
+    state_index.emplace(state_keys[i], static_cast<uint32_t>(i));
+  }
+
+  new (target) HaplotypePriorOverlay(graph, std::move(index), std::move(state_keys), std::move(state_index),
+                                     std::move(width), std::move(score_to_go), std::move(transition_starts),
+                                     std::move(transitions), std::move(node_totals));
+}
+
+void HaplotypePriorOverlay::Load(HaplotypePriorOverlay* target, const Graph& graph, const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("Cannot open haplotype prior file: " + path);
+  Load(target, graph, in);
+}
 
 // -----------------------------------------------------------------------------------------------
 // The Aho-Corasick automaton: structure and how the forward DP queries it
@@ -187,10 +548,10 @@ void HaplotypeSamplerOverlay::GotoMap::for_each(Fn&& fn) const {
 }
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
-    HaplotypeSamplerCommonCtor,
-    const Graph& graph, const std::vector<std::string>& sequences,
-    const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params)
-    : graph_(graph), params_(params), apply_path_filter_(false), kmer_sequences_(sequences) {
+    HaplotypeSamplerCommonCtor, const Graph& graph, const std::vector<std::string>& sequences,
+    const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const HaplotypePriorOverlay* prior,
+    const Params& params)
+    : graph_(graph), params_(params), apply_path_filter_(false), kmer_sequences_(sequences), prior_(prior) {
   // Maintain internal kmers_ in the same order as unique_kmers for consistent indexing.
   const size_t num_kmers = sequences.size();
 
@@ -266,25 +627,34 @@ HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
       to_visit.push(child);
     });
   }
+
+  // Population-prior "distinguishing node" bookkeeping is deliberately *not* filtered by the inference-VCF
+  // mask.
+  InitializePopulationDistinguishingMask();
 }
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(
     const Graph& graph, const std::vector<std::string>& sequences,
-    const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations, const Params& params)
-    : HaplotypeSamplerOverlay(kCommonCtor, graph, sequences, locations, params) {
+    const std::vector<std::vector<UniqueKmersOverlay::KmerLocation>>& locations,
+    const HaplotypePriorOverlay* prior, const Params& params)
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, sequences, locations, prior, params) {
+  // Initialize the contributes_paths_mask_ based on the inference masks, so that we can do fast
+  // propagation of covered_paths when the current node doesn't contribute any new paths.
   InitializeContributesPathsMask();
 }
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
-                                                 const Params& params)
-    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
+                                                 const HaplotypePriorOverlay* prior, const Params& params)
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), prior, params) {
+  // Initialize the contributes_paths_mask_ based on the inference masks, so that we can do fast
+  // propagation of covered_paths when the current node doesn't contribute any new paths.
   InitializeContributesPathsMask();
 }
 
 HaplotypeSamplerOverlay::HaplotypeSamplerOverlay(const Graph& graph, const UniqueKmersOverlay& unique_kmers,
                                                  const std::string& inference_vcf, const Range& region,
-                                                 size_t min_size, const Params& params)
-    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), params) {
+                                                 size_t min_size, const HaplotypePriorOverlay* prior, const Params& params)
+    : HaplotypeSamplerOverlay(kCommonCtor, graph, unique_kmers.sequences(), unique_kmers.locations(), prior, params) {
   // Initialize inference VCF filtering
   apply_path_filter_ = true;
   graph.PopulateNodeAndPathMasks(inference_vcf, region, min_size, inference_node_mask_, inference_path_mask_);
@@ -310,6 +680,18 @@ void HaplotypeSamplerOverlay::InitializeContributesPathsMask() {
     } else if (inference_node_mask_.test(i) && (graph_.node_variant_paths_[i] & inference_path_mask_).any()) {
       contributes_paths_mask_.set(i);
     }
+  }
+}
+
+void HaplotypeSamplerOverlay::InitializePopulationDistinguishingMask() {
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+
+  population_distinguishing_mask_.clear();
+  population_distinguishing_mask_.resize(max_id + 1);
+  for (odgi::nid_t i = min_id; i <= max_id; ++i) {
+    if (!graph_.has_node(i)) continue;
+    if (graph_.node_variant_paths_[i].any()) population_distinguishing_mask_.set(i);
   }
 }
 
@@ -347,7 +729,27 @@ namespace {
            (a.covered_paths->hash == b.covered_paths->hash && a.covered_paths->bits == b.covered_paths->bits);
   }
 
-  /// Dedup @p backtrack by covered_paths and trim to the top @p n highest-scoring distinct classes.
+  // Population-state equality. Deliberately conservative: under-merging is the safe default, the explicit
+  // population_state_pool_cap bounds the cost, not this predicate. When the prior is disabled every entry
+  // carries an identical default-constructed PopulationState, so this is always true and SamePoolClass
+  // below degenerates structurally to SameCoveredPathsClass alone.
+  template <typename P>
+  bool SamePopulationState(const P& a, const P& b) {
+    if (a.last_distinguishing_node != b.last_distinguishing_node) return false;
+    if (const auto* ag = std::get_if<typename P::Gbwt>(&a.tier)) {
+      const auto* bg = std::get_if<typename P::Gbwt>(&b.tier);
+      return bg != nullptr && ag->state.node == bg->state.node && ag->state.range == bg->state.range;
+    }
+    return std::holds_alternative<typename P::FellBack>(b.tier);
+  }
+
+  template <typename T>
+  bool SamePoolClass(const T& a, const T& b) {
+    return SameCoveredPathsClass(a, b) && SamePopulationState(a.population_state, b.population_state);
+  }
+
+  /// Dedup @p backtrack by (covered_paths, population_state) and trim to the top @p n highest-scoring
+  /// distinct classes, ranked by @p rank_key (defaults to identity on .score).
   ///
   /// Use a single O(|backtrack| x n) pass against a small (<= n) `kept` buffer, instead of a full O(m log m)
   /// comparison sort purely to group-and-dedup followed by a second sort to rank by score. Every incoming
@@ -355,19 +757,33 @@ namespace {
   /// (bounded by roughly in-degree x n, or occupied-automaton-states x n at the sink merge), so a linear scan
   //// can be efficient.
   ///
-  /// Applied at every (node, automaton_state) pool, even those with pending (mid k-mer) matches.
-  /// `KmerSetScoreDelta` (the only per-edge score contribution) is a pure function of (source automaton_state,
-  /// next_node), and so is applied identically to every entry in a pool for a given edge, regardless of
-  /// covered_paths. Thus different covered_paths don't influence the ranking of future scores.
+  /// Applied at every (node, automaton_state) pool, even those with pending (mid k-mer) matches. `KmerSetScoreDelta`
+  /// (the only per-edge k-mer score contribution) is a pure function of (source automaton_state, next_node), and so is
+  /// applied identically to every entry in a pool for a given edge, regardless of covered_paths. The population-prior
+  /// term is *not* independent of covered_paths/population_state the same way, so @p rank_key exists to let ranking
+  /// incorporate PopulationScoreToGo as a heuristic aid, while the *stored* .score on every surviving entry
+  /// remains the real, unmodified accumulated score.
+  ///
+  /// @p same_class is the dedup predicate. **The sink/final merge deliberately overrides this to SameCoveredPathsClass
+  /// alone** (haplotype.cpp's PropagateBestPathState call site) rather than accepting the default: under an active
+  /// inference-VCF filter, population_distinguishing_mask_ is deliberately *not* masked the same way
+  /// contributes_paths_mask_ is, so two entries can reach the sink with identical (filtered) covered_paths but
+  /// different population_state, e.g. two upstream branches at a *masked-out* variant, re-converging at a later
+  /// *inference* variant. Population state is genuinely NOT provably determined by covered_paths in that case.
+  /// FindBestPaths's output-distinctness contract is covered_paths-only. A covered_paths-only dedup at the sink
+  /// preserves that, while `.score` (by then a real, fully-accumulated value, not a heuristic) still picks the
+  /// population-aware best representative of each covered_paths class. Intermediate trimming (the other call site)
+  /// still needs the population-aware predicate, or a branch the prior would favor later could be discarded prematurely
+  /// before covered_paths alone would have distinguished it.
   ///
   /// The surviving entries' order is otherwise unspecified unless @p sort_result is true, which additionally
-  /// sorts the (<= n, so cheap) result by descending score. Callers whose result must be in descending-score
-  /// order (currently: only the final sink/root pool, consumed by SampleHaplotypes's greedy per-draw walk and
-  /// FindBestPaths's public sorted-order contract) must pass sort_result=true; every other call site's result
-  /// only feeds further DP propagation, where entries are consumed via stable stored indices
-  /// (Backpointer::pred_path_idx), not iteration order, so no order is needed there.
-  template <typename T>
-  void SortAndTrimBacktrack(T& backtrack, size_t n, bool sort_result = false) {
+  /// sorts the (<= n, so cheap) result by descending rank_key. Callers whose result must be in
+  /// descending-score order (currently: only the final sink/root pool, consumed by SampleHaplotypes's greedy
+  /// per-draw walk and FindBestPaths's public sorted-order contract) must pass sort_result=true; every other
+  /// call site's result only feeds further DP propagation, where entries are consumed via stable stored
+  /// indices (Backpointer::pred_path_idx), not iteration order, so no order is needed there.
+  template <typename T, typename RankKeyFn, typename SameClassFn>
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool sort_result, RankKeyFn rank_key, SameClassFn same_class) {
     if (n == 0 || backtrack.empty()) {
       backtrack.clear();
       return;
@@ -380,20 +796,20 @@ namespace {
     auto recompute_worst = [&]() {
       worst_idx = 0;
       for (size_t i = 1; i < kept.size(); ++i) {
-        if (kept[i].score < kept[worst_idx].score) worst_idx = i;
+        if (rank_key(kept[i]) < rank_key(kept[worst_idx])) worst_idx = i;
       }
     };
 
     for (auto& candidate : backtrack) {
       size_t match_idx = kept.size();
       for (size_t i = 0; i < kept.size(); ++i) {
-        if (SameCoveredPathsClass(candidate, kept[i])) {
+        if (same_class(candidate, kept[i])) {
           match_idx = i;
           break;
         }
       }
       if (match_idx < kept.size()) {
-        if (candidate.score > kept[match_idx].score) kept[match_idx] = std::move(candidate);
+        if (rank_key(candidate) > rank_key(kept[match_idx])) kept[match_idx] = std::move(candidate);
         continue;
       }
       if (kept.size() < n) {
@@ -401,16 +817,30 @@ namespace {
         if (kept.size() == n) recompute_worst();
         continue;
       }
-      if (candidate.score > kept[worst_idx].score) {
+      if (rank_key(candidate) > rank_key(kept[worst_idx])) {
         kept[worst_idx] = std::move(candidate);
         recompute_worst();
       }
     }
 
     if (sort_result) {
-      std::sort(kept.begin(), kept.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
+      std::sort(kept.begin(), kept.end(),
+                [&](const auto& a, const auto& b) { return rank_key(a) > rank_key(b); });
     }
     backtrack = std::move(kept);
+  }
+
+  // Default dedup predicate: SamePoolClass (covered_paths AND population_state).
+  template <typename T, typename RankKeyFn>
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool sort_result, RankKeyFn rank_key) {
+    SortAndTrimBacktrack(backtrack, n, sort_result, rank_key,
+                         [](const auto& a, const auto& b) { return SamePoolClass(a, b); });
+  }
+
+  // Default rank-key: identity on .score, today's (pre-prior) behavior.
+  template <typename T>
+  void SortAndTrimBacktrack(T& backtrack, size_t n, bool sort_result = false) {
+    SortAndTrimBacktrack(backtrack, n, sort_result, [](const auto& e) { return e.score; });
   }
 }
 
@@ -442,8 +872,14 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::Extract
   std::vector<Haplotype> result;
   result.reserve(best_paths.size());
   for (size_t back_idx = 0; back_idx < best_paths.size(); ++back_idx) {
-    if (apply_path_filter_ && best_paths[back_idx].covered_paths->bits.none()) {
-      continue; // Skip paths that do not cover any inference paths when filtering is active
+    if (apply_path_filter_) {
+      // A haplotype that never explicitly selects a flagged allele for some inference variant still
+      // implicitly declines it (i.e. carries the reference allele there), even if it doesn't explicitly
+      // traverse the reference allele's own node(s).
+      auto adjusted = graph_.ApplyReferenceFallback(best_paths[back_idx].covered_paths->bits, inference_path_mask_);
+      if (adjusted.none()) {
+        continue; // Skip paths that do not cover (or implicitly decline) any inference variant
+      }
     }
     result.push_back(std::move(BacktrackPath(path_state, kAutomatonRoot, back_idx).first));
   }
@@ -452,6 +888,87 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::Extract
 
 std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestPaths(size_t n) const {
   return ExtractBestPaths(PropagateBestPathState(n));
+}
+
+void HaplotypeSamplerOverlay::EnsureTransitionScoreToGo() const {
+  if (transition_score_to_go_built_) return;
+  transition_score_to_go_built_ = true;
+  if (!prior_) return;
+
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+  transition_score_to_go_.assign(static_cast<size_t>(max_id - min_id + 1), 0.0);
+
+  // Backward max-recursion over HaplotypePriorOverlay's node-keyed adjacency, in strictly decreasing node-id order.
+  // Every recorded (from, to) pair has to_node's id strictly greater than from_node's, so score_to_go for a later node
+  // never depends on an earlier one.
+  const auto& starts = prior_->transition_starts();
+  const auto& transitions = prior_->transitions();
+  for (odgi::nid_t from = max_id; from >= min_id; --from) {
+    const size_t row = static_cast<size_t>(from - min_id);
+    if (row + 1 >= starts.size()) continue;
+    double best = 0.0; // base case: no recorded successor (region end, or not a source at all)
+    for (size_t i = starts[row]; i < starts[row + 1]; ++i) {
+      const auto& t = transitions[i];
+      const double log_p = std::log(prior_->TransitionProbability(from, t.to_node, params_.transition_prior_alpha));
+      const double candidate = log_p + transition_score_to_go_[static_cast<size_t>(t.to_node - min_id)];
+      if (i == starts[row] || candidate > best) best = candidate;
+    }
+    transition_score_to_go_[row] = best;
+  }
+}
+
+double HaplotypeSamplerOverlay::TransitionScoreToGo(odgi::nid_t from) const {
+  if (!prior_) return 0.0;
+  EnsureTransitionScoreToGo();
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+  if (from < min_id || from > max_id) return 0.0;
+  return transition_score_to_go_[static_cast<size_t>(from - min_id)];
+}
+
+double HaplotypeSamplerOverlay::PopulationScoreToGo(const PopulationState& state) const {
+  if (!prior_) return 0.0;
+  if (const auto* gbwt = std::get_if<PopulationState::Gbwt>(&state.tier)) {
+    const double stay = prior_->ScoreToGo(gbwt->state);
+    const double fall_back = (state.last_distinguishing_node != PopulationState::kNoNode)
+        ? params_.panel_fallback_penalty + TransitionScoreToGo(state.last_distinguishing_node)
+        : -std::numeric_limits<double>::infinity();
+    return std::max(stay, fall_back);
+  }
+  return TransitionScoreToGo(state.last_distinguishing_node);
+}
+
+double HaplotypeSamplerOverlay::ApplyPopulationEdge(PopulationState& state, odgi::nid_t next_node,
+                                                     bool distinguishes) const {
+  if (!prior_) return 0.0;
+
+  double delta = 0.0;
+  if (auto* gbwt = std::get_if<PopulationState::Gbwt>(&state.tier)) {
+    // Extend() fires once per edge, unconditionally.
+    const auto extended = prior_->Extend(gbwt->state, next_node);
+    if (!prior_->Empty(extended)) {
+      delta = std::log(static_cast<double>(prior_->Width(extended)) /
+                        static_cast<double>(prior_->Width(gbwt->state)));
+      gbwt->state = extended;
+    } else {
+      // Pay the one-time fallback penalty on this edge, then score every *subsequent* edge using Markov model.
+      delta = params_.panel_fallback_penalty;
+      state.tier = PopulationState::FellBack{};
+    }
+  } else if (distinguishes && state.last_distinguishing_node != PopulationState::kNoNode) {
+    delta = prior_->LogTransitionProbability(state.last_distinguishing_node, next_node,
+                                             params_.transition_prior_alpha);
+  }
+
+  // Maintain last_distinguishing_node bookkeeping so any later fallback has a correct starting context
+  if (distinguishes) state.last_distinguishing_node = next_node;
+
+  // Guard the multiplication explicitly rather than relying on delta's own finiteness: PopulationScoreToGo
+  // (a different function, ranking-only) can legitimately return -infinity, and 0.0 * -inf == NaN in
+  // IEEE-754. This guard is what keeps an overlay-configured-but-weight-zero caller byte-identical to the
+  // prior being fully disabled. Do not remove it as a "simplification".
+  return params_.haplotype_prior_weight != 0.0 ? params_.haplotype_prior_weight * delta : 0.0;
 }
 
 HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(size_t n) const {
@@ -485,18 +1002,43 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     return SharedPathIdSet(new PathIdSetHolder(std::move(bits)));
   };
 
+  // Population prior: active only when both an overlay and a nonzero weight are configured
+  const bool population_prior_active = prior_ != nullptr && params_.haplotype_prior_weight != 0.0;
+  auto rank_key = [&](const Backpointer& e) {
+    double key = e.score;
+    if (population_prior_active) key += params_.haplotype_prior_weight * PopulationScoreToGo(e.population_state);
+    return key;
+  };
+  // A separate, typically-larger cap for the intermediate per-node trim only: n is frequently
+  // deliberately small (SampleHaplotypes starts at samples.size()+2, FindBestPaths(1) passes 1), so without
+  // widening, population-hypothesis diversity would have no room to compete with covered-paths diversity
+  // for the same tiny slot count. Widens (never shrinks below the caller's requested n) only when the prior
+  // is actually active; otherwise identical to n, so trimming stays byte-identical to the behavior without the prior.
+  const size_t node_trim_cap = population_prior_active ? std::max(n, params_.population_state_pool_cap) : n;
+
   // Seed the source node: a virtual transition from the automaton's root consuming min_id itself, exactly
   // mirroring how every other node's arrival is processed below.
   {
     size_t seed_state = AutomatonGoto(kAutomatonRoot, min_id);
     Graph::PathIdSet seed_covered_paths(covered_paths_size);
     accumulate_covered_paths(seed_covered_paths, min_id);
+
+    PopulationState seed_pop{};
+    if (prior_) {
+      // This is the only Find() call site in PropagateBestPathState. Every other use of the Gbwt tier below is
+      // Extend()-only, via ApplyPopulationEdge. A stray Find() anywhere else silently degrades Width()/ScoreToGo() to
+      // 0, not a crash. Do not add one.
+      std::get<PopulationState::Gbwt>(seed_pop.tier).state = prior_->Find(min_id);
+      if (population_distinguishing_mask_.test(min_id)) seed_pop.last_distinguishing_node = min_id;
+    }
+
     dp[0][seed_state].push_back({
       min_score + KmerSetScoreDelta(seed_state),
       0,  // no predecessor node
       kAutomatonRoot, // irrelevant without predecessor node
       0, // irrelevant without predecessor node
-      make_covered_paths(std::move(seed_covered_paths))
+      make_covered_paths(std::move(seed_covered_paths)),
+      seed_pop
     });
   }
 
@@ -506,9 +1048,21 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     auto& node_state = dp[i - min_id];
     assert(!node_state.empty());  // Should have at least one path to every reachable node
 
-    // Every pool at this node is width-trimmed to n distinct covered_paths classes.
+    // Every pool at this node is width-trimmed to node_trim_cap distinct classes, ranked by rank_key (real
+    // score, plus the heuristic population score-to-go when active). Dedup by (covered_paths,
+    // population_state) only when the prior is actually active; otherwise population_state is real (Find/Extend
+    // still run whenever prior_ is configured, regardless of weight -- see ApplyPopulationEdge) but
+    // score-irrelevant, so classing by it alone would fragment node_trim_cap==n slots across population-state
+    // variants of the same covered_paths and starve out genuinely distinct covered_paths candidates. Falling
+    // back to SameCoveredPathsClass here keeps a weight-zero-but-prior-configured caller byte-identical to the
+    // prior being fully disabled, matching node_trim_cap's own gating above.
     for (auto& [automaton_state, pool] : node_state) {
-      SortAndTrimBacktrack(pool, n);
+      if (population_prior_active) {
+        SortAndTrimBacktrack(pool, node_trim_cap, /*sort_result=*/false, rank_key);
+      } else {
+        SortAndTrimBacktrack(pool, node_trim_cap, /*sort_result=*/false, rank_key,
+                             [](const auto& a, const auto& b) { return SameCoveredPathsClass(a, b); });
+      }
     }
 
     // Propagate along every real forward graph edge
@@ -532,6 +1086,11 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
                                            : graph_.node_variant_paths_[next_node];
       }
 
+      // Population-prior "distinguishing" is deliberately *not* the same flag as `contributes` above: it must stay
+      // unfiltered by any active inference-VCF mask, since HaplotypePriorOverlay's Markov adjacency table was built
+      // without knowledge of one.
+      const bool distinguishes = population_distinguishing_mask_.test(next_node);
+
       for (auto& [automaton_state, pool] : node_state) {
         size_t new_state = AutomatonGoto(automaton_state, next_node);
         double weight_delta = KmerSetScoreDelta(new_state);
@@ -550,12 +1109,21 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
           } else {
             new_covered_paths = pool[b_idx].covered_paths; // unchanged -- share, don't copy
           }
+
+          // Population-prior term is NOT hoistable like weight_delta above. Different b_idx entries sharing
+          // (automaton_state, next_node) generally carry different PopulationStates (different GBWT intervals,
+          // different last_distinguishing_node), so both the state transition and its score delta must be computed per
+          // entry.
+          PopulationState new_pop = pool[b_idx].population_state;
+          double pop_delta = ApplyPopulationEdge(new_pop, next_node, distinguishes);
+
           next_pool.push_back({
-            pool[b_idx].score + weight_delta,
+            pool[b_idx].score + weight_delta + pop_delta,
             i, // predecessor node
             automaton_state, // predecessor automaton state
             b_idx, // path index in predecessor node's pool
-            std::move(new_covered_paths)
+            std::move(new_covered_paths),
+            new_pop
           });
         }
       }
@@ -564,14 +1132,28 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
   }
 
   // At the sink, no k-mer match can ever resolve further, so the pending automaton state does not carry any
-  // forward-looking information. Merge every automaton-state pool into one, deduplicating by covered_paths, and
-  // trim to the final top-n, i.e., same "settlement" treatment as a root state.
+  // forward-looking information. Merge every automaton-state pool into one, deduplicating by covered_paths *alone*,
+  // i.e., SameCoveredPathsClass, not the population-aware SamePoolClass used everywhere else, and trim to the final
+  // top-n, i.e., same "settlement" treatment as a root state.
+  //
+  // This is NOT a no-op under an active inference-VCF filter (HAPLOTYPE_PRIOR_PROPOSAL.md finding #3):
+  // population_distinguishing_mask_ is deliberately unfiltered, so two branches that diverged at a masked-out
+  // (non-inference) variant can reach the sink with identical filtered covered_paths but genuinely different
+  // population_state. Using SameCoveredPathsClass here on purpose preserves FindBestPaths's existing
+  // output-distinctness contract instead of silently inflating output size whenever the prior happens to be active;
+  // `.score`, a fully-accumulated value here, not a heuristic, still picks the population-aware best representative
+  // within each covered_paths class. n (not node_trim_cap) is correct regardless, since node_trim_cap only exists to
+  // give population-state diversity room during *intermediate* propagation, and the final output is deliberately not
+  // keyed on population state at all.
   auto& sink_state = dp[max_id - min_id];
   StatePool merged;
   for (auto& [automaton_state, pool] : sink_state) {
     merged.insert(merged.end(), std::make_move_iterator(pool.begin()), std::make_move_iterator(pool.end()));
   }
-  SortAndTrimBacktrack(merged, n, /*sort_result=*/true); // feeds SampleHaplotypes's order-sensitive walk
+  SortAndTrimBacktrack(
+      merged, n, /*sort_result=*/true, [](const Backpointer& e) { return e.score; },
+      [](const Backpointer& a, const Backpointer& b) { return SameCoveredPathsClass(a, b); }
+  ); // feeds SampleHaplotypes's order-sensitive walk
   sink_state.clear();
   sink_state.emplace(kAutomatonRoot, std::move(merged));
 
@@ -599,6 +1181,23 @@ double HaplotypeSamplerOverlay::Score(const Haplotype& haplotype) const {
   for (size_t i = 0; i < kmers_.size(); ++i) {
     score += on_path.test(i) ? kmers_[i].score : -kmers_[i].score;
   }
+
+  // Population-prior term, mirroring PropagateBestPathState's own per-edge accumulation via the same
+  // ApplyPopulationEdge helper.
+  if (prior_ && !haplotype.empty()) {
+    PopulationState state{};
+    // Here haplotype.front() is a "genuine walk start" so use `Find`.
+    std::get<PopulationState::Gbwt>(state.tier).state = prior_->Find(haplotype.front());
+    if (population_distinguishing_mask_.test(haplotype.front())) {
+      state.last_distinguishing_node = haplotype.front();
+    }
+
+    for (size_t i = 1; i < haplotype.size(); ++i) {
+      const bool distinguishes = population_distinguishing_mask_.test(haplotype[i]);
+      score += ApplyPopulationEdge(state, haplotype[i], distinguishes);
+    }
+  }
+
   return score;
 }
 
@@ -668,40 +1267,111 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::SampleH
   std::vector<PathWithCoverage> samples;
   samples.reserve(n);
 
+  const bool population_prior_active = prior_ != nullptr && params_.haplotype_prior_weight != 0.0;
+  // Hard ceiling on how far a single draw's width is allowed to grow while searching for one more covering
+  // haplotype under an active population prior (see the retry loop below), so a region that never yields one
+  // can't widen indefinitely. Generous relative to n/pool_cap: in practice a genuine covering candidate should
+  // surface long before this is reached. Unused (and irrelevant) when the prior is disabled.
+  constexpr size_t kMaxWidthMultiplier = 8;
+  const size_t max_width = kMaxWidthMultiplier * std::max(n, params_.population_state_pool_cap);
+
   while (samples.size() < n) {
     // Request more paths than already selected. Since we could select a path with no covered paths, we sample the
     // top (|selected|+2) paths to ensure we can find a new distinct path that covers at least one inference path.
     size_t width = samples.size() + 2;
-    auto draw_start = ProfileClock::now();
-    auto path_state = PropagateBestPathState(width);
-    if (profiling) {
-      RssSample rss = CurrentRss();
-      fmt::print(stderr, "HAP_PROFILE call={} n={} width={} stage=fixed_width ms={:.3f} rss_kb={} hwm_kb={}\n",
-                 this_call, n, width, ElapsedMs(draw_start), rss.rss_kb, rss.hwm_kb);
+    if (population_prior_active) {
+      // PropagateBestPathState's intermediate beam (node_trim_cap) is clamped to at least
+      // population_state_pool_cap regardless of width, so any width at or below that cap can only change the
+      // *final* trim, never the search itself -- skip straight past that plateau instead of incrementing
+      // through it one draw at a time.
+      width = std::max(width, params_.population_state_pool_cap + 2);
     }
-    const auto & candidates = path_state.back().at(kAutomatonRoot);
 
-    size_t back_idx = candidates.size();
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      const auto& candidate = candidates[i];
-      if (apply_path_filter_ && candidate.covered_paths->bits.none()) {
-        continue; // Skip paths that do not cover any inference paths when filtering is active
+    BestPathState path_state;
+    size_t back_idx = 0;
+    size_t last_candidates_size = 0;
+    bool found_new = false;
+    Graph::PathIdSet adjusted_covered_paths;  // Set only when a new candidate is found below
+    for (;;) {
+      auto draw_start = ProfileClock::now();
+      path_state = PropagateBestPathState(width);
+      if (profiling) {
+        RssSample rss = CurrentRss();
+        fmt::print(stderr, "HAP_PROFILE call={} n={} width={} stage=fixed_width ms={:.3f} rss_kb={} hwm_kb={}\n",
+                   this_call, n, width, ElapsedMs(draw_start), rss.rss_kb, rss.hwm_kb);
       }
-      auto matching_sample = std::find_if(samples.begin(), samples.end(), [&](const PathWithCoverage& result) {
-        return candidate.covered_paths->bits == result.second;
-      });
-      if (matching_sample == samples.end()) {
-        back_idx = i;  // Found a new candidate that is not already in samples
+      const auto& candidates = path_state.back().at(kAutomatonRoot);
+      last_candidates_size = candidates.size();
+
+      back_idx = candidates.size();
+      for (size_t i = 0; i < candidates.size(); ++i) {
+        const auto& candidate = candidates[i];
+        // A haplotype that never explicitly selects a flagged allele for some inference variant still implicitly
+        // declines it (i.e. carries the reference allele there), even if it doesn't explicitly traverse the reference
+        // allele's own node(s). Compute once per candidate and use consistently for both the filter check and the dedup
+        // comparison below, so two candidates that decline the same variant via different, otherwise-unflagged alleles
+        // are correctly recognized as the same genotype call.
+        auto adjusted = apply_path_filter_
+            ? graph_.ApplyReferenceFallback(candidate.covered_paths->bits, inference_path_mask_)
+            : candidate.covered_paths->bits;
+        if (apply_path_filter_ && adjusted.none()) {
+          continue; // Skip paths that do not cover (or implicitly decline) any inference variant
+        }
+        auto matching_sample = std::find_if(samples.begin(), samples.end(), [&](const PathWithCoverage& result) {
+          return adjusted == result.second;
+        });
+        if (matching_sample == samples.end()) {
+          back_idx = i;  // Found a new candidate that is not already in samples
+          adjusted_covered_paths = std::move(adjusted);
+          break;
+        }
+      }
+      if (back_idx != candidates.size()) {
+        found_new = true;
         break;
       }
+
+      // No acceptable candidate at this width. Without the population prior, dedup is by covered_paths alone
+      // and node_trim_cap == width has always meant "this many distinct covered_paths classes is already as
+      // much diversity as this graph offers" in practice -- so preserve the original, cheap single-attempt
+      // behavior here rather than paying for retries a large graph can make expensive.
+      if (!population_prior_active) {
+        break;
+      }
+      // With the prior active, a sink returning fewer entries than requested does NOT prove every distinct
+      // (covered_paths, population_state) combination has been found: node_trim_cap (PropagateBestPathState's
+      // intermediate beam) tracks width too, so a still-larger width can let upstream nodes retain combinations
+      // that this width's narrower intermediate beam already pruned before they ever reached the sink -- i.e.
+      // sink diversity can grow non-monotonically with width, not just saturate at some fixed graph-determined
+      // value. So keep widening unconditionally up to max_width rather than trusting an under-full sink as
+      // proof there is nothing left to find.
+      if (width >= max_width) {
+        break;  // Hit the search-width ceiling; give up for this draw.
+      }
+      width *= 2;
     }
-    if (back_idx == candidates.size()) {
-      // We did not find any new distinct paths, so stop sampling
+
+    if (!found_new) {
+      // Only log when the prior was active and the sink was still saturating (last_candidates_size >= width):
+      // that's the case where giving up is a real loss (further widening was still finding new structure, we
+      // just ran out of ceiling). The non-prior single-attempt path never logs -- it matches long-standing
+      // behavior, not a new limitation worth flagging.
+      if (population_prior_active && last_candidates_size >= width) {
+        spdlog::info(
+            "HaplotypeSamplerOverlay::SampleHaplotypes: {}:{}-{} reached the search-width ceiling ({}) with "
+            "only {}/{} haplotypes sampled; additional distinct haplotypes may exist beyond this search width.",
+            graph_.region().contig(), graph_.region().start(), graph_.region().end(), width, samples.size(), n);
+      }
       break;
     }
 
     // Extract and save the path of interest and its covered path set
     samples.push_back(std::move(BacktrackPath(path_state, kAutomatonRoot, back_idx)));
+    if (apply_path_filter_) {
+      // Store the reference-fallback-adjusted bits (matching what the dedup comparison above used), not the
+      // raw ones BacktrackPath returns, so later draws compare consistently.
+      samples.back().second = std::move(adjusted_covered_paths);
+    }
     UpdateScores(samples.back().first);
   }
 
@@ -721,14 +1391,24 @@ std::vector<std::pair<std::string, size_t>> HaplotypeSamplerOverlay::DecodeHaplo
 
   // Re-derive the same covered_paths bitset PropagateBestPathState accumulates during sampling (a simple linear
   // union, since we already have the complete path rather than needing to search for it).
-  const size_t covered_paths_size = graph_.node_variant_paths_[haplotype.front()].size(); // All nodes should have the same size path sets
-  Graph::PathIdSet covered_paths(covered_paths_size);
-  for (auto node_id : haplotype) {
-    if (!apply_path_filter_) {
-      covered_paths |= graph_.node_variant_paths_[node_id];
-    } else if (inference_node_mask_.test(node_id)) {
-      covered_paths |= (graph_.node_variant_paths_[node_id] & inference_path_mask_);
+  Graph::PathIdSet covered_paths;
+  if (!apply_path_filter_) {
+    covered_paths = graph_.CoveredPaths(haplotype);
+  } else {
+    // Unlike the unfiltered case, only nodes that distinguish an *inference* allele (inference_node_mask_)
+    // contribute -- and only their inference-masked bits -- so nodes that merely fall within a variant's
+    // broader (non-distinguishing) reference span don't spuriously count. graph_.CoveredPaths() unions every
+    // node unconditionally, so it isn't equivalent here.
+    const size_t covered_paths_size = graph_.node_variant_paths_[haplotype.front()].size(); // All nodes should have the same size path sets
+    covered_paths = Graph::PathIdSet(covered_paths_size);
+    for (auto node_id : haplotype) {
+      if (inference_node_mask_.test(node_id)) {
+        covered_paths |= (graph_.node_variant_paths_[node_id] & inference_path_mask_);
+      }
     }
+    // A haplotype that never explicitly selects a flagged allele for some inference variant still implicitly
+    // declines it (i.e. carries the reference allele there).
+    covered_paths = graph_.ApplyReferenceFallback(covered_paths, inference_path_mask_);
   }
   return DecodeHaplotype(covered_paths);
 }

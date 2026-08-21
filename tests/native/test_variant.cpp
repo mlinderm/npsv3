@@ -334,6 +334,71 @@ chr1	3693769	.	C	G	30	.	.	GT:FT	./1:GAP1	.:.	0|1:PASS	.:.
   }
 }
 
+TEST_F(VariantFilteringTest, GetSampleGenotype) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter.">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G	30	GAP1	.	GT:PS:FT	./1:.:GAP1	.:.:.	0|1:102:.	.:.:.
+chr1	3693768	.	C	G	30	GAP1	.	GT:PS:FT	./1:.:GAP1	.:.:.	0|1:.:GAP1	.:.:.
+chr1	3693769	.	C	G	30	.	.	GT:PS:FT	./1:.:GAP1	.:.:.	0|1:.:PASS	.:.:.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  using Indices = Variant::Genotype::AlleleIndices;
+  // Per-record, per-sample expected (allele_indices, filtered)
+  // Sample2 and Sample4 carry a haploid "." GT (a single missing value, not "./."), so only the
+  // first allele slot is populated.
+  std::vector<std::vector<std::pair<Indices, bool>>> expected({
+    { { Indices({-1, 1}), true }, { Indices({-1, 0}), false }, { Indices({0, 1}), false }, { Indices({-1, 0}), false } },
+    { { Indices({-1, 1}), true }, { Indices({-1, 0}), false }, { Indices({0, 1}), true }, { Indices({-1, 0}), false } },
+    { { Indices({-1, 1}), true }, { Indices({-1, 0}), false }, { Indices({0, 1}), false }, { Indices({-1, 0}), false } },
+  });
+
+  for (const auto& record_expected : expected) {
+    auto variant = reader->NextVariant();
+    ASSERT_TRUE(variant);
+    for (size_t sample_idx = 0; sample_idx < record_expected.size(); sample_idx++) {
+      auto sample_genotype = variant->genotype(sample_idx);
+      EXPECT_EQ(sample_genotype.genotype().allele_indices(), record_expected[sample_idx].first);
+      EXPECT_EQ(sample_genotype.is_filtered(), record_expected[sample_idx].second);
+    }
+  }
+}
+
+TEST_F(VariantFilteringTest, GetSampleGenotypePhaseSet) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##contig=<ID=chr1,length=1000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	101	.	A	C	.	.	.	GT:PS	0|1:102	0/1:.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  auto variant = reader->NextVariant();
+  ASSERT_TRUE(variant);
+
+  auto sample1 = variant->genotype(0);
+  EXPECT_EQ(sample1.genotype().phase(), Phase(Phase::kLocal, 102));
+  EXPECT_FALSE(sample1.is_filtered());
+
+  auto sample2 = variant->genotype(1);
+  EXPECT_EQ(sample2.genotype().phase(), Phase(Phase::kUnphased));
+  EXPECT_FALSE(sample2.is_filtered());
+
+  EXPECT_THROW(variant->genotype(2), std::out_of_range);
+  EXPECT_THROW(variant->genotype(-1), std::out_of_range);
+}
+
 TEST_F(VariantFilteringTest, SetFilterToPass) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">

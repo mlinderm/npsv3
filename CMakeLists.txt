@@ -143,6 +143,10 @@ set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
 
+# Find (or build) GBWT (jltsiren/gbwt v1.4) plus the sdsl-lite fork it requires -- see
+# cmake/FindGBWT.cmake for why a plain find_package(GBWT) can't just search the system and stop there.
+find_package(GBWT REQUIRED)
+
 # Set source directory
 set(SOURCE_DIR "src/npsv3")
 set(TEST_DIR "tests")
@@ -186,6 +190,7 @@ target_link_libraries(graph
   fmt::fmt
   spdlog::spdlog
   KMC::Static
+  GBWT::GBWT
 )
 
 nanobind_add_module(_native_graph STABLE_ABI 

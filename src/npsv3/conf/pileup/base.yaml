@@ -4,7 +4,6 @@ image_height: 100
 image_channels: [0, 1, 2, 3, 4, 5, 6, 7]
 
 variant_padding: 100
-graph_flank: 1000
 fetch_flank: 1000
 realigner_flank: 1000
 

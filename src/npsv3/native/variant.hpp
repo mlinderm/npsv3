@@ -227,6 +227,19 @@ class Variant {
   typedef boost::hash2::digest<20> VariantId;
   typedef PackedGenotype<> Genotype;
 
+  // A single sample's genotype together with its FT filter status
+  class SampleGenotype {
+   public:
+    SampleGenotype(Genotype genotype, bool filtered) : genotype_(std::move(genotype)), filtered_(filtered) {}
+
+    const Genotype& genotype() const { return genotype_; }
+    bool is_filtered() const { return filtered_; }
+
+   private:
+    Genotype genotype_;
+    bool filtered_;
+  };
+
   // Make sure all base classes have virtual destructors to ensure proper cleanup of derived classes
   virtual ~Variant() = default;
 
@@ -282,6 +295,9 @@ class Variant {
 
   std::vector<Genotype> Genotypes() const;
   bool HasPassingGenotype() const;
+
+  // Genotype and FT filter status for a single sample; sample_idx must be [0, num_samples)
+  SampleGenotype genotype(int sample_idx) const;
 
   friend std::ostream& operator<<(std::ostream&, const Variant&);
   friend class VariantFileWriter;

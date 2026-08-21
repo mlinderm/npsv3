@@ -1,22 +1,29 @@
+# ruff: disable[PLC0414]
 import contextlib
+import ctypes
 import glob
 import itertools
 import logging
 import os
 import tempfile
 from collections.abc import Sequence
+from typing import cast
 
 import numpy as np
 import pandas as pd
 import ray
 import webdataset as wds
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from npsv3 import PathType
-from npsv3._native_graph import Diplotype
+from npsv3._native_graph import ConstantKmerClassify as ConstantKmerClassify
+from npsv3._native_graph import Diplotype as Diplotype
+from npsv3._native_graph import HaplotypePriorOverlay as HaplotypePriorOverlay
 from npsv3._native_graph import HaplotypeSamplerOverlay as HaplotypeSamplerOverlay
 from npsv3._native_graph import KmerClassify as KmerClassify
 from npsv3._native_graph import KmerCounts as KmerCounts
+from npsv3._native_graph import KmerZygosity as KmerZygosity
 from npsv3._native_graph import UniqueKmersOverlay as UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
 from npsv3.util.config import setup_resolvers
@@ -24,6 +31,32 @@ from npsv3.util.range import Range
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmers_by_unique_kmers, kmc_build_from_fasta, kmc_filter
 from npsv3.util.variant import Variant, VariantFileReader
 
+# ruff: enable[PLC0414]
+
+# "arena.<i>.purge" with i=MALLCTL_ARENAS_ALL (4096, per jemalloc.h) purges dirty pages across every arena in
+# this process, not just one -- see jemalloc.3 and jemalloc.h's own mallctl() usage example for this name.
+_JEMALLOC_PURGE_ALL_ARENAS_NAME = b"arena.4096.purge"
+
+def _jemalloc_purge() -> bool:
+    """Purge jemalloc's dirty/muzzy pages back to the OS immediately. returning False (no-op) if this process
+    isn't running under jemalloc.
+
+    jemalloc returns freed pages to the OS lazily, via a background decay timer (dirty pages default to ~10s), not
+    immediately on free(). That decay window can increase the chances actors processing memory-intensive regions
+    overlap, thus increasing the overall memory footprint. We purge immediately after large regions ot minimize chance
+    of overlap.
+
+    Looks up mallctl() fresh on every call, rather than caching a bound ctypes function at module scope: a
+    cached ctypes function object holds a raw C pointer, which Ray's cloudpickle can't serialize when shipping
+    this actor class to worker processes.
+    """
+    try:
+        mallctl = ctypes.CDLL(None).mallctl
+    except (OSError, AttributeError):
+        return False
+    mallctl.restype = ctypes.c_int
+    mallctl.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    return mallctl(_JEMALLOC_PURGE_ALL_ARENAS_NAME, None, None, None, 0) == 0
 
 def _create_graph_and_sampler(
     reference: PathType,
@@ -180,12 +213,17 @@ class _SerializeGraphAndUniqueKmers:
         canonicalize=False,
         ref_kmer_counts_path: str | None = None,
         filter_kmer_fasta_path: str | None = None,
-        max_size_shard=200*1024*1024, # 200 MB
+        max_size_shard=256*1024*1024, # 256 MB
+        population_prior: bool = False,
+        population_excluded_samples: Sequence[str] | None = None,
+        jemalloc_purge_node_count: int | None = 20_000,
     ):
         self.reference = reference
         self.vcf_path = vcf_path
         self.kmer_size = kmer_size
-        self._graph_writer = wds.ShardWriter(graph_shard, maxsize=max_size_shard, verbose=False)
+        # encoder=False disables ShardWriter's default extension-based auto-encoding, which only passes
+        # `bytes` through as-is (not bytearray) and so would create an undesired copy.
+        self._graph_writer = wds.ShardWriter(graph_shard, maxsize=max_size_shard, verbose=False, encoder=False) # type: ignore
         self.max_edges = max_edges
         self.exclude_universal = exclude_universal
         self.canonicalize = canonicalize
@@ -197,6 +235,9 @@ class _SerializeGraphAndUniqueKmers:
             self.kmer_fasta = open(filter_kmer_fasta_path, "w")
         else:
             self.kmer_fasta = None
+        self.population_prior = population_prior
+        self.population_excluded_samples = list(population_excluded_samples or [])
+        self.jemalloc_purge_node_count = jemalloc_purge_node_count
 
     def close(self):
         # `__ray_shutdown__` would eventually close the fasta file on actor termination, but that runs
@@ -209,8 +250,15 @@ class _SerializeGraphAndUniqueKmers:
     def construct_from_region(self, region_str: str):
         """Return a serialized Graph and UniqueKmersOverlay for region_str"""
         region = Range(region_str)
+
         try:
             graph = Graph(self.reference, self.vcf_path, region)
+        except Exception as e:
+            e.add_note(f"Error constructing graph for region {region_str}")
+            raise
+        node_count = graph.node_count()
+
+        try:
             unique_kmers = UniqueKmersOverlay(
                 graph,
                 self.kmer_size,
@@ -220,19 +268,45 @@ class _SerializeGraphAndUniqueKmers:
                 ref_kmer_counts=self.ref_kmer_counts,
             )
         except Exception as e:
-            e.add_note(f"Error constructing graph and unique kmers for region {region_str}")
+            e.add_note(f"Error constructing unique kmers for region {region_str}")
             raise
 
         slug = region.slug
         if self.kmer_fasta is not None:
             for i, seq in enumerate(unique_kmers.sequences):
                 self.kmer_fasta.write(f">{slug}_{i}\n{seq}\n")
-        self._graph_writer.write({
+
+        # Serialize via save_bytes(), which writes directly into a Python-owned bytearray's own backing memory with zero
+        # copies. Paired with encoder=False above (so ShardWriter doesn't force a bytearray->bytes copy of its own).
+        # Drop each native object as soon as its bytes are captured to minimize overlapping memory usage (respecting
+        # that the overlay needs/keeps a reference to the graph object).
+        unique_kmer_bytes = unique_kmers.save_bytes()
+        del unique_kmers
+
+        haplotype_prior_bytes = None
+        if self.population_prior:
+            prior = HaplotypePriorOverlay(graph, self.population_excluded_samples)
+            haplotype_prior_bytes = prior.save_bytes()
+            del prior
+        graph_bytes = graph.save_bytes()
+        del graph
+
+        if self.jemalloc_purge_node_count is not None and node_count >= self.jemalloc_purge_node_count:
+            # Return this region's now-freed pages to the OS immediately rather than waiting on jemalloc's background
+            # decay timer (default ~10s dirty-page decay). Gated on node_count so the immediate purge costs are only
+            # realized for very large regions instead of the many small regions.
+            _jemalloc_purge()
+
+        # All fields must be pre-encoded as bytes/bytearray/memoryview since ShardWriter's automatic encoding is disabled.
+        record = {
             "__key__": slug,
-            "region.txt": region_str,
-            "graph.bytes": graph.save_bytes(),
-            "unique_kmer_overlay.bytes": unique_kmers.save_bytes(),
-        })
+            "region.txt": region_str.encode("utf-8"),
+            "graph.bytes": graph_bytes,
+            "unique_kmer_overlay.bytes": unique_kmer_bytes,
+        }
+        if haplotype_prior_bytes is not None:
+            record["haplotype_prior_overlay.bytes"] = haplotype_prior_bytes
+        self._graph_writer.write(record)
 
 
 def serialize_graph_and_unique_kmers(
@@ -243,10 +317,10 @@ def serialize_graph_and_unique_kmers(
     min_variant_size=50,
     pool_kmers=False,
     ref_kmer_counts_path: PathType | None = None,
-    region: Range|None = None,
-    max_size_shard=200*1024*1024, # 200 MB
+    region: Range | None = None,
+    max_size_shard=256 * 1024 * 1024,  # 256 MB
     progress_bar=False,
-) -> tuple[list[str], PathType|None, int]:
+) -> tuple[list[str], PathType | None, int]:
     """Serialize all graphs and unique_kmer overlays for regions in vcf_path
 
     Args:
@@ -267,7 +341,8 @@ def serialize_graph_and_unique_kmers(
         tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
         vcf_file = stack.enter_context(VariantFileReader.open(str(vcf_path)))
 
-        # Create thread-specific graph shards and k-mer fasta files to avoid contention on a single file handle across threads.
+        # Create thread-specific graph shards and k-mer fasta files to avoid contention on a single file handle
+        # across threads.
         graph_shards = [os.path.join(output_dir, f"graphs-{i:05d}-%05d.tar.gz") for i in range(cfg.threads)]
         kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if pool_kmers else None for i in range(cfg.threads)]
         actors = [
@@ -275,13 +350,15 @@ def serialize_graph_and_unique_kmers(
             _SerializeGraphAndUniqueKmers.remote(
                 str(cfg.reference),
                 str(vcf_path),
-                cfg.kmer.kmer_size,
+                cfg.graph.kmer_size,
                 graph_shard,
-                max_edges=cfg.kmer.max_edges,
-                canonicalize=cfg.kmer.canonicalize,
+                max_edges=cfg.graph.max_edges,
+                canonicalize=cfg.graph.canonicalize,
                 ref_kmer_counts_path=str(ref_kmer_counts_path) if ref_kmer_counts_path is not None else None,
                 filter_kmer_fasta_path=kmer_fasta_path,
                 max_size_shard=max_size_shard,
+                population_prior=cfg.graph.population_prior,
+                population_excluded_samples = cfg.graph.population_excluded_samples,
             ) for graph_shard, kmer_fasta_path in zip(graph_shards, kmer_fasta_paths, strict=True)
         ]
         pool = ray.util.ActorPool(actors)
@@ -317,10 +394,10 @@ def serialize_graph_and_unique_kmers(
             unique_kmer_path = os.path.join(output_dir, "unique_kmers")
             kmc_build_from_fasta(
                 kmer_fasta_paths, # type: ignore
-                cfg.kmer.kmer_size,
+                cfg.graph.kmer_size,
                 unique_kmer_path,
                 tmp_dir,
-                canonicalize=cfg.kmer.canonicalize,
+                canonicalize=cfg.graph.canonicalize,
                 threads=cfg.threads,
             )
         else:
@@ -476,6 +553,9 @@ def _diplotypes_in_topk_shard(
     min_variant_size: int,
     max_haplotypes: int,
     max_diplotypes: int,
+    haplotype_sampler_params = None,
+    ploidy: int = 2,
+    missing_are_ref: bool = False,
 ) -> list[dict]:
     """Sample diplotypes and compute genotype ranks for every region in a single WebDataset shard."""
     result_rows = []
@@ -483,7 +563,7 @@ def _diplotypes_in_topk_shard(
         sample_idx = vcf_file.samples().index(sample_name)
         counts = KmerClassify(filtered_kmer_path, kmer_coverage)
 
-        for record in wds.WebDataset([shard_path], shardshuffle=False):
+        for record in wds.WebDataset([shard_path], shardshuffle=False): # type: ignore
             region_string = record["region.txt"].decode()
             region = Range(region_string)
             analysis_variants = _filter_variants(list(vcf_file.fetch(region)), min_variant_size)
@@ -491,8 +571,25 @@ def _diplotypes_in_topk_shard(
             graph = Graph.load_bytes(record["graph.bytes"])
             unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
 
+            # The population-prior overlay is only present in shards built with population_prior=True. If None, it
+            # will be ignored by the HaplotypeSamplerOverlay, which will fall back to a uniform prior.
+            sampler_params = HaplotypeSamplerOverlay.Params(**(haplotype_sampler_params or {}))
+            prior_overlay = (
+                HaplotypePriorOverlay(graph, prior_bytes)
+                if (prior_bytes := record.get("haplotype_prior_overlay.bytes"))
+                else None
+            )
+
             # TODO: Initialize HaplotypeSamplerOverlay from precomputed list of variants to avoid redundant VCF parsing
-            sampler = HaplotypeSamplerOverlay(graph, unique_kmers, vcf_path, region, min_variant_size)
+            sampler = HaplotypeSamplerOverlay(
+                graph,
+                unique_kmers,
+                vcf_path,
+                region,
+                min_variant_size,
+                prior=prior_overlay,
+                params=sampler_params,
+            )
             sampler.initialize_scores(counts)
             haplotypes = sampler.sample_haplotypes(n=max_haplotypes)
             diplotypes = sampler.sample_diplotypes(haplotypes, n=max_diplotypes)
@@ -504,9 +601,16 @@ def _diplotypes_in_topk_shard(
             record_rows = []
             all_matching_haplotypes = []
             for variant in analysis_variants:
-                # Get genotype as allele indices, e.g. (0,1), for this variant and sample
-                alleles = variant.genotype(sample_idx)
-                if any(allele < 0 for allele in alleles):
+                genotype = variant.genotype(sample_idx)
+                if genotype.is_filtered:
+                    continue  # Skip genotypes explicitly marked as failing filters
+
+                alleles = genotype.alleles
+                missing_count = sum(allele < 0 for allele in alleles)
+                if missing_count == len(alleles) and missing_are_ref:
+                    # Treat fully missing genotypes as all REF alleles (e.g., when derived from high-quality assemblies)
+                    alleles = (0,) * ploidy  
+                elif missing_count > 0:
                     continue  # Skip missing genotypes
 
                 # alleles x haplotypes boolean array indicating indicating compatible haplotypes for each allele
@@ -608,6 +712,7 @@ def diplotypes_in_topk(
                 num_cpus=cfg.threads,
                 num_gpus=0,
                 _temp_dir=tmp_dir,
+                log_to_driver=True,
                 include_dashboard=False,
                 runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore
             )
@@ -618,7 +723,7 @@ def diplotypes_in_topk(
             graph_shards, unique_kmer_path, *_ = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
+                ref_kmer_counts_path=cfg.graph.ref_kmer_counts_kmc_prefix,
                 output_dir=tmp_dir,
                 min_variant_size=min_variant_size,
                 pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
@@ -636,9 +741,11 @@ def diplotypes_in_topk(
         else:
             logging.info("Using pre-generated filtered k-mer database at %s", filtered_kmer_path)
 
-        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, "Filtered k-mer database has unexpected k"
+        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.graph.kmer_size, "Filtered k-mer database has unexpected k"
 
         # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
+        haplotype_sampler_params = cast(dict, OmegaConf.to_container(cfg.graph.haplotype_sampler_params, resolve=True))
+        haplotype_sampler_params.pop("_target_")
         pending = [
             _diplotypes_in_topk_shard.remote( # type: ignore
                 shard_path,
@@ -647,8 +754,10 @@ def diplotypes_in_topk(
                 str(filtered_kmer_path),
                 kmer_coverage=sample.kmer_coverage,
                 min_variant_size=min_variant_size,
-                max_haplotypes=cfg.kmer.max_haplotypes,
-                max_diplotypes=cfg.kmer.max_diplotypes,
+                max_haplotypes=cfg.graph.max_haplotypes,
+                max_diplotypes=cfg.graph.max_diplotypes,
+                haplotype_sampler_params=haplotype_sampler_params,
+                missing_are_ref=cfg.graph.missing_are_ref,
             )
             for shard_path in graph_shards
         ]

@@ -1,0 +1,28 @@
+graph_flank: 1000
+
+kmer_size: 31
+
+# Unique k-mer related parameters
+max_edges: 5
+canonicalize: false
+
+# Sampling related parameters (partly, adapted from Sirén et al. 2024). The total diplotypes should be h(h+1)/2
+max_haplotypes: 8
+max_diplotypes: 36
+
+population_prior: false
+population_excluded_samples: []
+haplotype_sampler_params:
+  _target_: npsv3.graphs.haplotype.HaplotypeSamplerOverlay.Params
+  homozygous_score: 1.0
+  absent_score: -0.8
+  heterozygous_score: 0.0
+  homozygous_discount: 0.9
+  het_adjustment: 0.05
+  haplotype_prior_weight: 0.0
+  panel_fallback_penalty: 0.0
+  transition_prior_alpha: 1.0
+  population_state_pool_cap: 8
+
+# Treat missing genotypes as all reference (e.g., assuming variants weren't called in high quality assemblies)
+missing_are_ref: false

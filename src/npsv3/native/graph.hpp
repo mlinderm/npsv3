@@ -3,6 +3,7 @@
 #include <odgi.hpp>
 #include <handlegraph/handle_graph.hpp>
 #include <algorithms/kmer.hpp>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 #include <iosfwd>
@@ -21,6 +22,7 @@ class Haplotype;
 
 class AllPathGraphOverlay;
 class HaplotypeSamplerOverlay;
+class HaplotypePriorOverlay;
 class UniqueKmersOverlay;
 
 class Graph : public handlegraph::PathHandleGraph {
@@ -160,8 +162,26 @@ class Graph : public handlegraph::PathHandleGraph {
   /**
    * @brief Compute forward reachability for all nodes
    *
-   * Returns a vector indexed by node ID where entry [u] is the set of node IDs
-   * reachable from u following forward edges, including u itself.
+   * Returns a vector indexed by node ID where entry [u] is the set of node IDs reachable from u following
+   * forward edges, including u itself -- restricted to node ids >= u (nodes are guaranteed topologically
+   * sorted, so u can never reach a smaller-id node; entry [u] only spans [u, max_node_id()], not the full
+   * node space). Bit m of entry [u] represents node id (max_node_id() - m), i.e. distance from the graph's
+   * last node, not the absolute node id -- so every entry shares the same origin (bit 0 == max_node_id()) and
+   * a successor's entry is always a bit-for-bit prefix of any of its predecessors' (wider) entries. Callers
+   * must translate node ids through this offset (see UniqueKmersOverlay's constructor, kmer.cpp, for the one
+   * call site) and must not query for a node id smaller than u -- that bit doesn't exist in entry [u] at all
+   * (out of range), precisely because it's already known to be unreachable from u.
+   *
+   * This halves memory relative to giving every entry the full [0, max_node_id()] range, but is still O(N)
+   * entries of O(N) average width, i.e. still O(N^2) bits overall. A properly-scoped fix would go further:
+   * measured directly on a 100K-node region, only ~5% of nodes were ever actually queried by
+   * UniqueKmersOverlay's conflict check, so retaining full entries for just those nodes (instead of all N)
+   * would cut memory by roughly the same ~20x margin -- not implemented here because it requires knowing the
+   * query set *before* this sweep runs (a first pass over Kmers() just to collect candidate start nodes,
+   * before the real pass that actually needs reachability answers), plus predecessor-refcounted eviction
+   * during the sweep to free each entry once its last predecessor has consumed it. Real complexity for a
+   * correctness-sensitive structure (a wrong reachability answer is a silent uniqueness-classification bug,
+   * not just a slow one) -- worth a dedicated, carefully-tested follow-up rather than folding into this pass.
    */
   std::vector<NodeIdSet> ForwardReachability() const;
 
@@ -180,12 +200,31 @@ class Graph : public handlegraph::PathHandleGraph {
 
   friend AllPathGraphOverlay;
   friend HaplotypeSamplerOverlay;
+  friend HaplotypePriorOverlay;
   friend UniqueKmersOverlay;
   friend detail::Polytype;
   friend detail::Haplotype;
 
  private:
   Graph() = default;  // Used by Load()
+
+  /// Return the union of node_variant_paths_ over every node in @p nodes -- the raw (unfiltered) set of
+  /// variant/allele path ids that a path through these nodes crosses. Shared by HaplotypeSamplerOverlay::
+  /// DecodeHaplotype's unfiltered case and HaplotypePriorOverlay.
+  PathIdSet CoveredPaths(const NodeIdSeq& nodes) const;
+
+  /// Walk @p nodes in order, returning the sequence of variant/allele path ids crossed (i.e., every set bit
+  /// of node_variant_paths_[node_id] for each node, in node-traversal order). Unlike CoveredPaths, this
+  /// preserves order, so consecutive entries reflect which allele was taken at each variant encountered along
+  /// the path -- used by HaplotypePriorOverlay to recover adjacent-variant allele transitions.
+  std::vector<size_t> DecodedPathIds(const NodeIdSeq& nodes) const;
+
+  /// For every variant that intersects @p relevant_mask (i.e. inference variants), if @p covered_paths has no bit set within that
+  /// bucket, set the bucket's reference-allele bit (variant_path_starts_[i], allele 0) as an implicit "didn't
+  /// take this variant's flagged allele" call. Buckets outside @p relevant_mask are left untouched, so a
+  /// variant that was never part of the caller's relevance scan (e.g. excluded by a min-size threshold) can't
+  /// spuriously contribute a reference call.
+  PathIdSet ApplyReferenceFallback(PathIdSet covered_paths, const PathIdSet& relevant_mask) const;
 
   Range region_;
   odgi::graph_t graph_;
@@ -322,7 +361,7 @@ class Polytype {
 
   void AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
                    const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
-                   int star_allele_index);
+                   const std::vector<bool>& star_alleles);
   std::tuple<Phase, Haplotype::BreakKind> NextPhase(const Phase& current_phase) const;
   void FinalizePaths();
 

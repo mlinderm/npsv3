@@ -170,8 +170,11 @@ class KmerClassify {
   double heterozygous_coverage_;
   double homozygous_coverage_;
 
-  /// Opened for listing once at construction (real subclass only) and reused via RestartListing() on every
-  /// ClassifySorted call, so the *.kmc_pre LUT is parsed once per instance instead of once per call. 
+  /// Opened for listing at construction (real subclass only) and re-opened before every scan-based
+  /// ClassifySorted call. Re-opening (rather than CKMCFile::RestartListing()) is required for correctness:
+  /// RestartListing() does not reliably reset the listing after a completed pass in this KMC build, so a
+  /// repeated scan would silently return nearly all-ABSENT (see ClassifySortedScan). The scan path only runs
+  /// when the DB is small, so the per-call re-open of the *.kmc_pre LUT is cheap relative to the scan.
   mutable CKMCFile db_;
 
   /// Random-access handle, opened lazily on the first ClassifySorted call whose `sequences` is smaller than
@@ -186,6 +189,29 @@ class KmerClassify {
   /// Per-k-mer random-access lookup via ra_db_ (opened lazily on first use) -- ClassifySorted's strategy
   /// when `sequences` is much smaller than the DB.
   void ClassifySortedRandomAccess(const std::vector<std::string>& sequences, const ClassificationCallback& callback) const;
+};
+
+/**
+ * @brief Classifies every k-mer with a single fixed zygosity, requiring no KMC database.
+ *
+ * Useful for tests and experiments that need a KmerClassify without building a real k-mer count database
+ * on disk -- e.g. ConstantKmerClassify(KmerZygosity::ABSENT) makes every graph-unique k-mer ABSENT, which
+ * (since the k-mer term is then a fixed function of the graph rather than of any query sample's reads)
+ * isolates other scoring contributions such as the population prior.
+ */
+class ConstantKmerClassify : public KmerClassify {
+ public:
+  explicit ConstantKmerClassify(KmerZygosity zygosity = KmerZygosity::HOMOZYGOUS) : zygosity_(zygosity) {}
+
+  void ClassifySorted(const std::vector<std::string>& sequences,
+                      const ClassificationCallback& callback) const override {
+    for (size_t i = 0; i < sequences.size(); ++i) {
+      callback(i, zygosity_);
+    }
+  }
+
+ private:
+  KmerZygosity zygosity_;
 };
 
 }  // namespace npsv3

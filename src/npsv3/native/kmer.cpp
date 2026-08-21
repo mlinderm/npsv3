@@ -141,9 +141,10 @@ UniqueKmersOverlay::UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_
     throw std::invalid_argument(fmt::format("Reference k-mer counts database has k={} but requested k={}", ref_kmer_counts->k(), k));
   }
 
-  // Precompute the forward reachability of all nodes in the graph to determine whether two k-mer occurrences 
+  // Precompute the forward reachability of all nodes in the graph to determine whether two k-mer occurrences
   // can co-occur on the same graph traversal.
   auto reachable = graph_.ForwardReachability();
+  const auto max_id = graph_.max_node_id();
 
   // A k-mer is **graph-unique** if no two of its occurrences can appear on the same graph
   // traversal. Each callback invocation from Kmers() describes one occurrence by its physical
@@ -198,9 +199,15 @@ UniqueKmersOverlay::UniqueKmersOverlay(const Graph& graph, size_t k, size_t max_
           // offsets, then they are both present on any traversal of that node and thus can co-occur.
           conflict = existing_offset != new_location.starting_handle_offset_;
           break;
-        } else if (auto existing_starting_node_id = graph_.get_id(existing_handles[0]);
-                   reachable[new_location_starting_node_id].test(existing_starting_node_id) ||
-                   reachable[existing_starting_node_id].test(new_location_starting_node_id)) {
+        } else if (auto existing_starting_node_id = graph_.get_id(existing_handles[0]),
+                        lo = std::min(new_location_starting_node_id, existing_starting_node_id),
+                        hi = std::max(new_location_starting_node_id, existing_starting_node_id);
+                   // Nodes are topologically sorted, so only the smaller-id node could possibly reach the
+                   // larger-id one -- the reverse direction is structurally impossible, not just usually
+                   // false, so a single query suffices. reachable[lo] only covers [lo, max_id] (see
+                   // ForwardReachability's docstring in graph.hpp) and is indexed by distance from max_id,
+                   // so hi's bit within it is (max_id - hi).
+                   reachable[lo].test(max_id - hi)) {
           // k-mer starts in a different node, but can reach or is reachable from another instance, and thus could co-occur on
           // some traversal of the graph.
           conflict = true;
@@ -359,8 +366,15 @@ void KmerClassify::ClassifySortedRandomAccess(const std::vector<std::string>& se
 }
 
 void KmerClassify::ClassifySortedScan(const std::vector<std::string>& sequences, const std::function<void(size_t idx, KmerZygosity zyg)>& callback) const {
-  if (!db_.RestartListing()) {
-    throw std::runtime_error(fmt::format("Cannot restart KMC database listing: {}", db_path_));
+  // Re-open (rather than CKMCFile::RestartListing()) before every scan. RestartListing() does not correctly
+  // reset the listing after a *completed* prior pass in this KMC build: a second full listing reads the same
+  // number of records but decodes them misaligned, so the sorted merge below matches almost nothing and
+  // (silently) returns nearly all-ABSENT. Re-opening always starts from a clean state. This path is only
+  // taken when the DB is small (KmerCount <= sequences.size(); the large-DB case uses random access), so the
+  // per-call re-open of the prefix LUT is cheap relative to the full scan it precedes.
+  db_.Close();
+  if (!db_.OpenForListing(db_path_)) {
+    throw std::runtime_error(fmt::format("Cannot open KMC database for listing: {}", db_path_));
   }
 
   auto k = db_.KmerLength();

@@ -1,6 +1,6 @@
 import pytest
 
-from npsv3._native_graph import UniqueKmersOverlay
+from npsv3._native_graph import HaplotypePriorOverlay, UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
 from npsv3.util.variant import VariantFileReader
@@ -61,7 +61,7 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1"""
         graph = Graph(HG38_REF_FASTA, vcf_path, region)
 
         data = graph.save_bytes()
-        assert isinstance(data, bytes)
+        assert isinstance(data, bytearray)  # named for symmetry with load_bytes(), but returns bytearray
         assert len(data) > 0
 
         # Verify that the return buffer matches the direct file serialization
@@ -71,9 +71,11 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1"""
             file_data = f.read()
             assert data == file_data
 
-        # Verify we can load the graph back from the bytes (with same attribute)
+        # load_bytes() accepts either bytes or bytearray -- exercise both overloads here.
         restored = Graph.load_bytes(data)
         assert restored.node_count() == graph.node_count()
+        restored_from_bytes = Graph.load_bytes(bytes(data))
+        assert restored_from_bytes.node_count() == graph.node_count()
 
     def test_unique_kmers_save_and_load_bytes(self, tmp_path):
         vcf_path, region = self.setup_vcf(tmp_path)
@@ -82,10 +84,80 @@ chr1	52277191	.	TCTATTGTTAGTAAAATAC	T	.	PASS	.	GT	0/1"""
         assert len(kmers) > 0  # sanity: this graph has unique k-mers
 
         data = kmers.save_bytes()
-        assert isinstance(data, bytes)
+        assert isinstance(data, bytearray)
         assert len(data) > 0
 
         restored = UniqueKmersOverlay(graph, data)
         assert len(restored) == len(kmers)
         assert restored.sequences == kmers.sequences
+
+    def test_haplotype_gbwt_overlay_save_and_load_bytes(self, tmp_path):
+        vcf_path, region = self.setup_vcf(tmp_path)
+        graph = Graph(HG38_REF_FASTA, vcf_path, region)
+        overlay = HaplotypePriorOverlay(graph)
+
+        data = overlay.save_bytes()
+        assert isinstance(data, bytearray)
+        assert len(data) > 0
+
+        # Walk Sample1's own hom-alt haplotype (Find() once, Extend() thereafter) -- the discipline the
+        # overlay's own class docs require for Width()/ScoreToGo() to be meaningful.
+        walk = graph.path_nodes("Sample1#1#chr1#0")
+        assert len(walk) > 1
+
+        def walk_and_collect(ov):
+            state = ov.find(walk[0])
+            widths = [ov.width(state)]
+            score_to_gos = [ov.score_to_go(state)]
+            for node in walk[1:]:
+                state = ov.extend(state, node)
+                widths.append(ov.width(state))
+                score_to_gos.append(ov.score_to_go(state))
+            return widths, score_to_gos
+
+        widths, score_to_gos = walk_and_collect(overlay)
+        assert not overlay.empty(overlay.find(walk[0]))
+        assert widths[0] > 0
+
+        restored = HaplotypePriorOverlay(graph, data)
+        restored_widths, restored_score_to_gos = walk_and_collect(restored)
+        assert restored_widths == widths
+        assert restored_score_to_gos == score_to_gos
+
+    def test_haplotype_gbwt_overlay_panel_state_round_trips_through_python(self, tmp_path):
+        vcf_path, region = self.setup_vcf(tmp_path)
+        graph = Graph(HG38_REF_FASTA, vcf_path, region)
+        overlay = HaplotypePriorOverlay(graph)
+
+        walk = graph.path_nodes("Sample1#1#chr1#0")
+        # A PanelState returned by find()/extend() must be directly usable by every other method without any
+        # Python-side introspection of its contents (it's deliberately opaque).
+        state = overlay.find(walk[0])
+        for node in walk[1:]:
+            assert overlay.width(state) >= 0
+            assert overlay.score_to_go(state) <= 0.0  # log-probabilities, unweighted units
+            state = overlay.extend(state, node)
+        assert not overlay.empty(state)
+
+    def test_haplotype_transition_overlay_save_and_load_bytes(self, tmp_path):
+        vcf_path, region = self.setup_vcf(tmp_path)
+        graph = Graph(HG38_REF_FASTA, vcf_path, region)
+        overlay = HaplotypePriorOverlay(graph)
+
+        data = overlay.save_bytes()
+        assert isinstance(data, bytearray)
+        assert len(data) > 0
+
+        walk = graph.path_nodes("Sample1#1#chr1#0")
+        assert len(walk) > 1
+        from_node, to_node = walk[0], walk[1]
+
+        probability = overlay.transition_probability(from_node, to_node, 1.0)
+        log_probability = overlay.log_transition_probability(from_node, to_node, 1.0)
+        node_totals = overlay.node_totals
+
+        restored = HaplotypePriorOverlay(graph, data)
+        assert restored.transition_probability(from_node, to_node, 1.0) == probability
+        assert restored.log_transition_probability(from_node, to_node, 1.0) == log_probability
+        assert restored.node_totals == node_totals
 

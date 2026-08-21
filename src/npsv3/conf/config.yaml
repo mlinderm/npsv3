@@ -5,7 +5,7 @@ defaults:
   - model: paired_packed_inception_contrastive
   - data: packed_images
   - trainer: paired
-  - kmer: kmc
+  - graph: kmc
   - command: genotype
   - checkpoint_callback: base
   - _self_
@@ -51,6 +51,9 @@ sample: null
 
 # Root path to download pre-trained models.
 cache_dir: null
+
+# Sample KMC database (used to speedup pre-processing)
+kmc_prefix: null
 
 timeout: 1800
 

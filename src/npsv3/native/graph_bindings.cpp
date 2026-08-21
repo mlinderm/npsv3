@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <sstream>
 #include <streambuf>
@@ -34,22 +36,90 @@ struct MemReadBuf : std::streambuf {
   }
 };
 
-// // Serializes `obj` via its `Save(ostream&)` method and returns the result as a numpy uint8
-// // array. Unlike `nb::bytes` (which always copies into a new, separately-allocated Python
-// // object), the array is a zero-copy view over the serialized buffer: a capsule ties the
-// // buffer's lifetime to the array so no C++-to-Python copy is required.
-// template <typename T>
-// static nb::ndarray<nb::numpy, uint8_t, nb::ndim<1>> SaveAsNdarray(const T& obj) {
-//   std::ostringstream oss(std::ios::binary);
-//   obj.Save(oss);
-//   auto buf = std::make_unique<std::string>(std::move(oss).str());
-//   size_t size = buf->size();
-//   auto* data = reinterpret_cast<uint8_t*>(buf->data());
-//   nb::capsule owner(buf.release(), [](void* p) noexcept {
-//     delete static_cast<std::string*>(p);
-//   });
-//   return nb::ndarray<nb::numpy, uint8_t, nb::ndim<1>>(data, {size}, owner);
-// }
+// Output streambuf that discards everything written, only counting the total number of bytes. Used as a cheap
+// first pass to learn an object's exact serialized size before allocating the serialization buffer.
+class CountingStreambuf : public std::streambuf {
+ public:
+  size_t count() const { return count_; }
+
+ protected:
+  int_type overflow(int_type ch) override {
+    if (traits_type::eq_int_type(ch, traits_type::eof())) return traits_type::eof();
+    ++count_;
+    return ch;
+  }
+
+  std::streamsize xsputn(const char*, std::streamsize n) override {
+    if (n > 0) count_ += static_cast<size_t>(n);
+    return n;
+  }
+
+ private:
+  size_t count_ = 0;
+};
+
+// Output streambuf that writes directly into an `nb::bytearray's` own backing memory, sized to an already-known
+// exact final length so there are no reallocations. Using `bytearray` enables zero-copies during serialization at
+// the C++/Python boundary. The exact size is required because any reallocations can substantially increase peak
+// memory usage (both the original and new larger region need to be allocated at the same time).
+class BytearrayStreambuf : public std::streambuf {
+ public:
+  explicit BytearrayStreambuf(size_t exact_size) : capacity_(exact_size) { buffer_.resize(exact_size); }
+
+  // Return the backing bytearray, already at its exact final size (Finish() only exists for symmetry with
+  // building on this class elsewhere; there's nothing left to shrink).
+  nb::bytearray Finish() { return std::move(buffer_); }
+
+ protected:
+  int_type overflow(int_type ch) override {
+    if (traits_type::eq_int_type(ch, traits_type::eof())) return traits_type::eof();
+    EnsureCapacity(write_pos_ + 1);
+    static_cast<char*>(buffer_.data())[write_pos_] = traits_type::to_char_type(ch);
+    ++write_pos_;
+    return ch;
+  }
+
+  std::streamsize xsputn(const char* s, std::streamsize n) override {
+    if (n <= 0) return 0;
+    const size_t count = static_cast<size_t>(n);
+    EnsureCapacity(write_pos_ + count);
+    std::memcpy(static_cast<char*>(buffer_.data()) + write_pos_, s, count);
+    write_pos_ += count;
+    return n;
+  }
+
+ private:
+  void EnsureCapacity(size_t min_capacity) {
+    if (min_capacity <= capacity_) {
+      return;
+    }
+    // Should be unreachable: the counting pass and this real pass both call the same const Save(ostream&) over
+    // the same unchanged object, so they must agree on length.
+    throw std::runtime_error("BytearrayStreambuf: write exceeded pre-counted exact size (Save() nondeterministic?)");
+  }
+
+  nb::bytearray buffer_;
+  size_t capacity_;
+  size_t write_pos_ = 0;
+};
+
+// Serializes `obj` via its `Save(ostream&)` method directly into an exactly-sized Python-owned bytearray. Backs the
+// save_bytes() binding on Graph, UniqueKmersOverlay, and HaplotypePriorOverlay.
+template <typename T>
+static nb::bytearray SaveAsBytearray(const T& obj) {
+  CountingStreambuf counter;
+  {
+    std::ostream count_os(&counter);
+    obj.Save(count_os);
+  }
+
+  BytearrayStreambuf buf(counter.count());
+  std::ostream os(&buf);
+  obj.Save(os);
+  os.flush();
+  return buf.Finish();
+}
+
 
 // Parse a 1-indexed fully closed region string "contig:start-end" into a Range, as accepted by
 // samtools/htslib (e.g. Range("chr1:1000-2000") or Range.parse_literal("chr1:1000-2000")).
@@ -61,6 +131,20 @@ static npsv3::Range ParseRegionString(const char* region) {
   }
   npsv3::ContigName contig(region, colon);
   return npsv3::Range(contig, static_cast<npsv3::Pos>(beg), static_cast<npsv3::Pos>(end));
+}
+
+// Convert a Genotype's packed allele indices into a Python tuple; shared by the Genotype.alleles
+// property binding below.
+static nb::tuple GenotypeAlleles(const npsv3::Variant::Genotype& gt) {
+  const auto& idx = gt.allele_indices();
+  static_assert(npsv3::Variant::Genotype::kMaxPloidy == 3,
+      "GenotypeAlleles must be updated to cover all cases");
+  switch (gt.num_alleles()) {
+    case 1: return nb::make_tuple(idx[0]);
+    case 2: return nb::make_tuple(idx[0], idx[1]);
+    case 3: return nb::make_tuple(idx[0], idx[1], idx[2]);
+    default: return nb::make_tuple();
+  }
 }
 
 class VariantFileReaderIterator {
@@ -95,9 +179,15 @@ NB_MODULE(_native_graph, m) {
     .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, const std::string& path) {
       npsv3::UniqueKmersOverlay::Load(self, graph, path);
     }, nb::keep_alive<1, 2>(), "graph"_a, "path"_a)
-    // Deserialisation overload: UniqueKmersOverlay(graph, data) loads from bytes without copying
+    // Deserialisation overloads: UniqueKmersOverlay(graph, data) loads from bytes/bytearray without copying
+    // (bytes and bytearray are separate, non-inheriting types at the C level and so require distinct overloads).
     .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, nb::bytes data) {
       MemReadBuf buf(data.c_str(), data.size());
+      std::istream is(&buf);
+      npsv3::UniqueKmersOverlay::Load(self, graph, is);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
+    .def("__init__", [](npsv3::UniqueKmersOverlay* self, const npsv3::Graph& graph, nb::bytearray data) {
+      MemReadBuf buf(static_cast<const char*>(data.data()), data.size());
       std::istream is(&buf);
       npsv3::UniqueKmersOverlay::Load(self, graph, is);
     }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
@@ -120,14 +210,8 @@ NB_MODULE(_native_graph, m) {
     .def("save_fasta", &npsv3::UniqueKmersOverlay::SaveFasta, "fasta_path"_a)
     .def("save", nb::overload_cast<const std::string&>(&npsv3::UniqueKmersOverlay::Save, nb::const_), "path"_a)
     .def("save_bytes", [](const npsv3::UniqueKmersOverlay& overlay) {
-      std::ostringstream oss(std::ios::binary);
-      overlay.Save(oss);
-      auto s = std::move(oss).str();
-      return nb::bytes(s.data(), s.size());
+      return SaveAsBytearray(overlay);
     })
-    // .def("save_ndarray", [](const npsv3::UniqueKmersOverlay& overlay) {
-    //   return SaveAsNdarray(overlay);
-    // })
     ;
 
   nb::class_<npsv3::KmerCounts>(m, "KmerCounts")
@@ -143,20 +227,119 @@ NB_MODULE(_native_graph, m) {
       new (self) npsv3::KmerClassify(db_path, coverage);
     }, "db_path"_a, "coverage"_a);
 
+  // Fixed-zygosity, DB-free KmerClassify usable anywhere a KmerClassify is expected (e.g.
+  // HaplotypeSamplerOverlay.initialize_scores). For example, ConstantKmerClassify(KmerZygosity.ABSENT) makes every
+  // graph-unique k-mer ABSENT.
+  nb::class_<npsv3::ConstantKmerClassify, npsv3::KmerClassify>(m, "ConstantKmerClassify")
+    .def("__init__", [](npsv3::ConstantKmerClassify* self, npsv3::KmerZygosity zygosity) {
+      new (self) npsv3::ConstantKmerClassify(zygosity);
+    }, "zygosity"_a = npsv3::KmerZygosity::HOMOZYGOUS);
+
+  // Opaque wrapper for HaplotypePriorOverlay::PanelState. Callers only round-trip this through HaplotypePriorOverlay's
+  // own methods, never construct or inspect it directly, so no constructor or fields are exposed to Python.
+  nb::class_<npsv3::HaplotypePriorOverlay::PanelState>(m, "PanelState");
+
+  // Overlay managing the population-prior "likely path state" including both full haplotypes and node-keyed
+  // transitions.
+  nb::class_<npsv3::HaplotypePriorOverlay>(m, "HaplotypePriorOverlay")
+    // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together. excluded_samples
+    // (e.g. the sample being genotyped) is consumed entirely during construction, so it needs no keep_alive.
+    .def("__init__", [](npsv3::HaplotypePriorOverlay* self, const npsv3::Graph& graph,
+                         const std::vector<std::string>& excluded_samples) {
+      new (self) npsv3::HaplotypePriorOverlay(graph, excluded_samples);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "excluded_samples"_a = std::vector<std::string>{})
+    // Deserialisation overload: HaplotypePriorOverlay(graph, path) loads from a binary file
+    .def("__init__", [](npsv3::HaplotypePriorOverlay* self, const npsv3::Graph& graph, const std::string& path) {
+      npsv3::HaplotypePriorOverlay::Load(self, graph, path);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "path"_a)
+    // Deserialisation overloads: HaplotypePriorOverlay(graph, data) loads from bytes/bytearray without copying
+    .def("__init__", [](npsv3::HaplotypePriorOverlay* self, const npsv3::Graph& graph, nb::bytes data) {
+      MemReadBuf buf(data.c_str(), data.size());
+      std::istream is(&buf);
+      npsv3::HaplotypePriorOverlay::Load(self, graph, is);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
+    .def("__init__", [](npsv3::HaplotypePriorOverlay* self, const npsv3::Graph& graph, nb::bytearray data) {
+      MemReadBuf buf(static_cast<const char*>(data.data()), data.size());
+      std::istream is(&buf);
+      npsv3::HaplotypePriorOverlay::Load(self, graph, is);
+    }, nb::keep_alive<1, 2>(), "graph"_a, "data"_a)
+    .def("find", &npsv3::HaplotypePriorOverlay::Find, "node"_a)
+    .def("extend", &npsv3::HaplotypePriorOverlay::Extend, "state"_a, "node"_a)
+    .def("empty", &npsv3::HaplotypePriorOverlay::Empty, "state"_a)
+    .def("width", &npsv3::HaplotypePriorOverlay::Width, "state"_a)
+    .def("score_to_go", &npsv3::HaplotypePriorOverlay::ScoreToGo, "state"_a)
+    .def_prop_ro("node_totals", &npsv3::HaplotypePriorOverlay::node_totals)
+    .def("transition_probability", &npsv3::HaplotypePriorOverlay::TransitionProbability, "from_node"_a, "to_node"_a, "alpha"_a)
+    .def("log_transition_probability", &npsv3::HaplotypePriorOverlay::LogTransitionProbability, "from_node"_a, "to_node"_a, "alpha"_a)
+    .def("save", nb::overload_cast<const std::string&>(&npsv3::HaplotypePriorOverlay::Save, nb::const_), "path"_a)
+    .def("save_bytes", [](const npsv3::HaplotypePriorOverlay& overlay) {
+      return SaveAsBytearray(overlay);
+    });
+
   nb::class_<npsv3::HaplotypeSamplerOverlay::Diplotype>(m, "Diplotype")
     .def_prop_ro("haplotypes", [](const npsv3::HaplotypeSamplerOverlay::Diplotype& d) {
       return nb::make_tuple(d.h1, d.h2);
     })
     .def_ro("score", &npsv3::HaplotypeSamplerOverlay::Diplotype::score);
 
-  nb::class_<npsv3::HaplotypeSamplerOverlay>(m, "HaplotypeSamplerOverlay")
-    // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together
-    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers) {
-      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers);
-    }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a)
-    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers, const std::string& inference_vcf, const npsv3::Range& region, size_t min_size) {
-      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers, inference_vcf, region, min_size);
-    }, nb::keep_alive<1, 2>(), "graph"_a, "unique_kmers"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50)
+  auto sampler = nb::class_<npsv3::HaplotypeSamplerOverlay>(m, "HaplotypeSamplerOverlay");
+
+  // Scoring/prior hyperparameters. The C++ member initializers stay the single source of truth for
+  // the defaults via the compile-time constexpr below, rather than re-stated as literals.
+  using Params = npsv3::HaplotypeSamplerOverlay::Params;
+
+  constexpr Params kDefaultParams{};
+  nb::class_<Params>(sampler, "Params")
+    .def(nb::init<>())
+    .def("__init__", [](Params* self, double homozygous_score, double absent_score, double heterozygous_score,
+                         double homozygous_discount, double het_adjustment, double haplotype_prior_weight,
+                         double panel_fallback_penalty, double transition_prior_alpha, size_t population_state_pool_cap) {
+      new (self) Params();
+      self->homozygous_score = homozygous_score;
+      self->absent_score = absent_score;
+      self->heterozygous_score = heterozygous_score;
+      self->homozygous_discount = homozygous_discount;
+      self->het_adjustment = het_adjustment;
+      self->haplotype_prior_weight = haplotype_prior_weight;
+      self->panel_fallback_penalty = panel_fallback_penalty;
+      self->transition_prior_alpha = transition_prior_alpha;
+      self->population_state_pool_cap = population_state_pool_cap;
+    }, "homozygous_score"_a = kDefaultParams.homozygous_score,
+       "absent_score"_a = kDefaultParams.absent_score,
+       "heterozygous_score"_a = kDefaultParams.heterozygous_score,
+       "homozygous_discount"_a = kDefaultParams.homozygous_discount,
+       "het_adjustment"_a = kDefaultParams.het_adjustment,
+       "haplotype_prior_weight"_a = kDefaultParams.haplotype_prior_weight,
+       "panel_fallback_penalty"_a = kDefaultParams.panel_fallback_penalty,
+       "transition_prior_alpha"_a = kDefaultParams.transition_prior_alpha,
+       "population_state_pool_cap"_a = kDefaultParams.population_state_pool_cap)
+    .def_rw("homozygous_score", &Params::homozygous_score)
+    .def_rw("absent_score", &Params::absent_score)
+    .def_rw("heterozygous_score", &Params::heterozygous_score)
+    .def_rw("homozygous_discount", &Params::homozygous_discount)
+    .def_rw("het_adjustment", &Params::het_adjustment)
+    .def_rw("haplotype_prior_weight", &Params::haplotype_prior_weight)
+    .def_rw("panel_fallback_penalty", &Params::panel_fallback_penalty)
+    .def_rw("transition_prior_alpha", &Params::transition_prior_alpha)
+    .def_rw("population_state_pool_cap", &Params::population_state_pool_cap);
+
+  sampler
+    // graph must outlive the overlay, so we use keep_alive<1, 2> to tie their lifetimes together. The
+    // population-prior overlay is a non-owning constructor argument held for the sampler's whole lifetime, so
+    // it gets its own keep_alive on whichever argument position it lands at in each overload (same rule as
+    // graph). `params` is copied into the sampler, so its default shared instance needs no keep_alive.
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers,
+                         const npsv3::HaplotypePriorOverlay* prior, const Params* params) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers, prior, params ? *params : Params{});
+    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 4>(),
+       "graph"_a, "unique_kmers"_a, "prior"_a = nullptr, "params"_a = nullptr)
+    .def("__init__", [](npsv3::HaplotypeSamplerOverlay* self, const npsv3::Graph& graph, const npsv3::UniqueKmersOverlay& unique_kmers,
+                         const std::string& inference_vcf, const npsv3::Range& region, size_t min_size,
+                         const npsv3::HaplotypePriorOverlay* prior, const Params* params) {
+      new (self) npsv3::HaplotypeSamplerOverlay(graph, unique_kmers, inference_vcf, region, min_size, prior, params ? *params : Params{});
+    }, nb::keep_alive<1, 2>(), nb::keep_alive<1, 7>(),
+       "graph"_a, "unique_kmers"_a, "inference_vcf"_a, "region"_a, "min_size"_a = 50,
+       "prior"_a = nullptr, "params"_a = nullptr)
     .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
     .def("find_best_paths", &npsv3::HaplotypeSamplerOverlay::FindBestPaths, "n"_a)
@@ -252,7 +435,6 @@ NB_MODULE(_native_graph, m) {
     .def(nb::self <= nb::self)
     .def(nb::self < nb::self)
     .def("__hash__", [](const npsv3::Range& r) {
-      //size_t h = std::hash<npsv3::ContigName>{}(r.contig());
       size_t seed = 0;
       boost::hash_combine(seed, r.contig());
       boost::hash_combine(seed, r.start());
@@ -266,6 +448,10 @@ NB_MODULE(_native_graph, m) {
       // Convert to 1-based closed interval for display
       return fmt::format("{}:{}-{}", r.contig(), r.start()+1, r.end());
     });
+
+  nb::class_<npsv3::Variant::SampleGenotype>(m, "Genotype")
+    .def_prop_ro("alleles", [](const npsv3::Variant::SampleGenotype& sg) { return GenotypeAlleles(sg.genotype()); })
+    .def_prop_ro("is_filtered", &npsv3::Variant::SampleGenotype::is_filtered);
 
   nb::class_<npsv3::Variant>(m, "Variant")
     .def_prop_ro("contig", [](const npsv3::Variant& v) { return v.contig().get(); })
@@ -304,21 +490,7 @@ NB_MODULE(_native_graph, m) {
     .def("set_filter_pass", &npsv3::Variant::SetFilterToPass)
     .def("has_passing_genotype", nb::overload_cast<>(&npsv3::Variant::HasPassingGenotype, nb::const_))
     .def("subset_samples", &npsv3::Variant::SubsetSamples)
-    .def("genotype", [](const npsv3::Variant& v, int sample_idx) {
-      auto genotypes = v.Genotypes();
-      if (sample_idx < 0 || static_cast<size_t>(sample_idx) >= genotypes.size())
-        throw std::out_of_range("Sample index out of range");
-      const auto& gt = genotypes[sample_idx];
-      const auto& idx = gt.allele_indices();
-      static_assert(npsv3::Variant::Genotype::kMaxPloidy == 3,
-          "genotype() binding switch must be updated to cover all cases");
-      switch (gt.num_alleles()) {
-        case 1: return nb::make_tuple(idx[0]);
-        case 2: return nb::make_tuple(idx[0], idx[1]);
-        case 3: return nb::make_tuple(idx[0], idx[1], idx[2]);
-        default: return nb::make_tuple();
-      }
-    }, "sample_idx"_a)
+    .def("genotype", &npsv3::Variant::genotype, "sample_idx"_a)
     .def("__str__", [](const npsv3::Variant& v) {
       std::ostringstream oss;
       oss << v;
@@ -329,7 +501,8 @@ NB_MODULE(_native_graph, m) {
     .def("subset", &npsv3::VariantFileHeader::Subset);
 
   nb::class_<VariantFileReaderIterator>(m, "VariantFileReaderIterator")
-    .def("__iter__", [](nb::handle h) { return h; })
+    .def("__iter__", [](nb::handle h) { return h; },
+         nb::sig("def __iter__(self) -> VariantFileReaderIterator"))
     .def("__next__", &VariantFileReaderIterator::next);
 
   nb::class_<npsv3::VariantFileReader>(m, "VariantFileReader")
@@ -368,17 +541,16 @@ NB_MODULE(_native_graph, m) {
     .def(nb::init<const std::string&, const std::string&, const npsv3::Range&>())
     .def("save", nb::overload_cast<const std::string&>(&npsv3::Graph::Save, nb::const_), "path"_a)
     .def("save_bytes", [](const npsv3::Graph& graph) {
-      std::ostringstream oss(std::ios::binary);
-      graph.Save(oss);
-      auto s = std::move(oss).str();
-      return nb::bytes(s.data(), s.size());
+      return SaveAsBytearray(graph);
     })
-    // .def("save_ndarray", [](const npsv3::Graph& graph) {
-    //   return SaveAsNdarray(graph);
-    // })
     .def_static("load", [](const std::string& path) { return npsv3::Graph::Load(path); }, "path"_a)
     .def_static("load_bytes", [](nb::bytes data) {
       MemReadBuf buf(data.c_str(), data.size());
+      std::istream is(&buf);
+      return npsv3::Graph::Load(is);
+    }, "data"_a)
+    .def_static("load_bytes", [](nb::bytearray data) {
+      MemReadBuf buf(static_cast<const char*>(data.data()), data.size());
       std::istream is(&buf);
       return npsv3::Graph::Load(is);
     }, "data"_a)

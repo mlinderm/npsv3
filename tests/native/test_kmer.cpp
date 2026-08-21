@@ -475,14 +475,12 @@ SyntheticDb BuildSyntheticDb(test::TempDir& dir, const std::string& seq, uint32_
   return result;
 }
 
-// Builds a DB the way production actually builds KmerClassify's real inputs: kmc_filter/cache_filter_kmc_
-// database (sample.py) both run `kmc_tools ... intersect ... -ocleft`, not plain `kmc` counting directly.
-// That distinction matters here: plain `kmc` picks KMC2 (signature-binned) format even for databases as
-// small as 40 k-mers on this machine's kmc build, while `kmc_tools intersect`'s *output* came out KMC1 at
-// every real project scale checked (752 to 5,669,389 k-mers, see PERFORMANCE_NOTES.md) -- so a plain-`kmc`
-// DB isn't a representative way to exercise the KMC1 branch. Uses the same sequence as both the "source"
-// and "filter" side, so the intersection is just that sequence's own k-mer set (source's counts are kept
-// via -ocleft, matching kmc_filter's own flag).
+// Builds a DB the way production actually builds KmerClassify's real inputs: kmc_filter/cache_filter_kmc_ database
+// (sample.py) both run `kmc_tools ... intersect ... -ocleft`, not plain `kmc` counting directly. `kmc` picks KMC2
+// (signature-binned) format even for databases as small as 40 k-mers on this machine's kmc build, while `kmc_tools
+// intersect`'s produces a KMC1 database. Uses the same sequence as both the "source" and "filter" side, so the
+// intersection is just that sequence's own k-mer set (source's counts are kept via -ocleft, matching kmc_filter's own
+// flag).
 SyntheticDb BuildFilteredSyntheticDb(test::TempDir& dir, const std::string& seq, uint32_t k, const char* name) {
   auto source = BuildSyntheticDb(dir, seq, k, (std::string(name) + "_source").c_str());
   if (source.prefix.empty()) return {};
@@ -539,6 +537,33 @@ void CheckScanMatchesRandomAccess(const SyntheticDb& db, const std::string& seq,
     EXPECT_EQ(it->second, zyg) << "Scan vs random-access disagree for k-mer " << kmer_str;
   }
 }
+
+// A second scan-path ClassifySorted call on the *same* KmerClassify instance must return identical results
+// to the first. Regression test for a real bug: CKMCFile::RestartListing() does not reliably reset the
+// listing after a completed pass in this KMC build, so the second full scan silenty produced incorrect results.
+void CheckScanIsIdempotentAcrossCalls(const SyntheticDb& db, const std::string& seq, uint32_t k) {
+  ASSERT_GT(db.kmer_count, 20u) << "Test setup should produce a nontrivial DB";
+
+  std::vector<std::string> present_kmers;
+  for (size_t i = 0; i + k <= seq.size(); ++i) present_kmers.push_back(seq.substr(i, k));
+  std::sort(present_kmers.begin(), present_kmers.end());
+  present_kmers.erase(std::unique(present_kmers.begin(), present_kmers.end()), present_kmers.end());
+
+  std::vector<std::string> query = present_kmers;
+  for (uint32_t seed = 9000; seed < 9010; ++seed) query.push_back(RandomSequence(k, seed));
+  std::sort(query.begin(), query.end());
+  ASSERT_GE(query.size(), db.kmer_count) << "Query must reach the scan threshold on both calls";
+
+  npsv3::KmerClassify classify(db.prefix, /*coverage=*/1.0);
+  auto first = ClassifyAll(classify, query);   // scan path
+  auto second = ClassifyAll(classify, query);  // same instance, scan path again
+
+  const size_t first_non_absent = std::count_if(first.begin(), first.end(),
+      [](const auto& kv) { return kv.second != npsv3::KmerZygosity::ABSENT; });
+  ASSERT_GT(first_non_absent, 0u) << "First scan should classify the present k-mers as non-ABSENT";
+
+  EXPECT_EQ(first, second) << "A repeated scan-path ClassifySorted on the same instance must be idempotent";
+}
 }  // namespace
 
 TEST(KmerClassifyAdaptiveDispatchTest, ScanMatchesRandomAccess_KMC1Scale) {
@@ -562,5 +587,26 @@ TEST(KmerClassifyAdaptiveDispatchTest, ScanMatchesRandomAccess_KMC2Scale) {
   ASSERT_FALSE(db.prefix.empty());
   ASSERT_TRUE(db.is_kmc2) << "This test is meant to exercise a KMC2-format DB; adjust sequence length if kmc's format heuristic changed";
   CheckScanMatchesRandomAccess(db, seq, k);
+}
+
+TEST(KmerClassifyAdaptiveDispatchTest, ScanIsIdempotentAcrossCalls_KMC1Scale) {
+  test::TempDir dir;
+  const uint32_t k = 21;
+  std::string seq = RandomSequence(400, /*seed=*/7);
+  auto db = BuildFilteredSyntheticDb(dir, seq, k, "kmc1_idem");
+  ASSERT_FALSE(db.prefix.empty());
+  ASSERT_FALSE(db.is_kmc2) << "This test is meant to exercise a KMC1-format DB; adjust sequence length if kmc_tools' format heuristic changed";
+  CheckScanIsIdempotentAcrossCalls(db, seq, k);
+}
+
+TEST(KmerClassifyAdaptiveDispatchTest, ScanIsIdempotentAcrossCalls_KMC2Scale) {
+  test::TempDir dir;
+  const uint32_t k = 25;
+  std::string seq = RandomSequence(2000, /*seed=*/42);
+  seq += seq.substr(0, 500);
+  auto db = BuildSyntheticDb(dir, seq, k, "kmc2_idem");
+  ASSERT_FALSE(db.prefix.empty());
+  ASSERT_TRUE(db.is_kmc2) << "This test is meant to exercise a KMC2-format DB; adjust sequence length if kmc's format heuristic changed";
+  CheckScanIsIdempotentAcrossCalls(db, seq, k);
 }
 

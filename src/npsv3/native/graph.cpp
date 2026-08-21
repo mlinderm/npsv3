@@ -11,9 +11,12 @@
 #include <boost/serialization/string.hpp>
 #include <boost/serialization/vector.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <fstream>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "fasta.hpp"
 #include "variant.hpp"
@@ -428,22 +431,37 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     auto genotypes = variant->Genotypes();
     assert(genotypes.size() == polytypes.size());
 
-    int star_allele_index = -1;
+    // A VCF record can carry more than one literal '*' ALT allele (seen in some multi-cohort merges, e.g.
+    // REF=A ALT=T,*,*). Variant::AlleleIndex("*") only returns the index of the first match, so track every
+    // '*' allele index here rather than resolving to a single one -- otherwise a genotype referencing a
+    // later '*' is mistaken for a normal ALT allele and handed to Haplotype::AddGenotypeAllele with a path
+    // that was never created for it (see phase 2 above), segfaulting when that invalid path handle is
+    // iterated in Graph::PathNodes.
+    std::vector<bool> star_alleles(variant->num_alleles(), false);
+    bool has_active_star = false;
     if (variant->has_flag(Variant::kHasStarAllele)) {
+      for (int i = 1; i < variant->num_alleles(); i++) {
+        star_alleles[i] = !variant->AlleleReferenceRegion(i);
+      }
+      auto is_star = [&](auto idx) { return idx >= 0 && star_alleles[idx]; };
+      auto all_star = [&](const Variant::Genotype& genotype) {
+        const auto& indices = genotype.allele_indices();
+        return std::all_of(std::begin(indices), std::begin(indices) + genotype.num_alleles(), is_star);
+      };
+      auto any_star = [&](const Variant::Genotype& genotype) {
+        const auto& indices = genotype.allele_indices();
+        return std::any_of(std::begin(indices), std::begin(indices) + genotype.num_alleles(), is_star);
+      };
       // Skip variants with all genotypes just '*'
-      star_allele_index = variant->AlleleIndex("*");
-      assert(star_allele_index > 0);
-      if (std::all_of(std::begin(genotypes), std::end(genotypes), [star_allele_index](const Variant::Genotype& genotype) {
-            return genotype.AllAlleles(star_allele_index);
-          })) {
+      if (std::all_of(std::begin(genotypes), std::end(genotypes), all_star)) {
         continue;
       }
-      
-      if (!std::any_of(std::begin(genotypes), std::end(genotypes), [star_allele_index](const Variant::Genotype& genotype) {
-        return genotype.AnyAllele(star_allele_index);
-      })) {
-        // Only note '*' if present in one of the genotypes
-        star_allele_index = -1;
+
+      if (std::any_of(std::begin(genotypes), std::end(genotypes), any_star)) {
+        // Only note '*' alleles if present in one of the genotypes
+        has_active_star = true;
+      } else {
+        std::fill(std::begin(star_alleles), std::end(star_alleles), false);
       }
     }
 
@@ -452,7 +470,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       // Coordinate overlap with previous variant(s)
       prev_range->UnionWith(variant_range);
       variant->add_flag(Variant::kIsOverlapping);
-    } else if (!prev_range && star_allele_index > 0) {
+    } else if (!prev_range && has_active_star) {
       // Treat variants with explicit '*' alleles as overlapping, even if there is not actual coordinate overlap
       prev_range = variant_range;
       variant->add_flag(Variant::kIsOverlapping);
@@ -478,7 +496,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
     // Extract the index range of reference nodes for the REF allele, since that is constant for all samples
     NodeIdRange ref_allele_indices = ComputeAlleleSpan(PathNodes(allele_paths[0]), ref_nodes);
     for (size_t i=0; i < polytypes.size(); i++) {
-      polytypes[i].AddGenotype(*variant, allele_paths, ref_allele_indices, genotypes[i], star_allele_index);
+      polytypes[i].AddGenotype(*variant, allele_paths, ref_allele_indices, genotypes[i], star_alleles);
     }
   }
 
@@ -561,17 +579,62 @@ std::vector<std::string> Graph::SamplesIncluding(const NodeIdSeq& nodes) const {
   return std::vector<std::string>(samples.begin(), samples.end());
 }
 
+Graph::PathIdSet Graph::CoveredPaths(const NodeIdSeq& nodes) const {
+  if (nodes.empty()) {
+    return PathIdSet();
+  }
+  PathIdSet covered_paths(node_variant_paths_[nodes.front()].size());
+  for (auto node_id : nodes) {
+    covered_paths |= node_variant_paths_[node_id];
+  }
+  return covered_paths;
+}
+
+std::vector<size_t> Graph::DecodedPathIds(const NodeIdSeq& nodes) const {
+  std::vector<size_t> path_ids;
+  for (auto node_id : nodes) {
+    const auto& bits = node_variant_paths_[node_id];
+    for (auto path_id = bits.find_first(); path_id != PathIdSet::npos; path_id = bits.find_next(path_id)) {
+      // A single allele's distinguishing span can cross multiple nodes (e.g. a multi-base deletion's REF
+      // span, especially once fragmented by another nearby variant's breakpoint -- common in dense regions).
+      // Skip a bit that's identical to the immediately preceding entry so that walking through the middle of
+      // one allele's own span is never recorded as a (path_id -> path_id) self-transition.
+      if (!path_ids.empty() && path_ids.back() == path_id) {
+        continue;
+      }
+      path_ids.push_back(path_id);
+    }
+  }
+  return path_ids;
+}
+
 std::vector<Graph::NodeIdSet> Graph::ForwardReachability() const {
   auto max_id = graph_.max_node_id();
   auto min_id = graph_.min_node_id();
-  std::vector<NodeIdSet> reachable(max_id + 1, NodeIdSet(max_id + 1));
+
+  // Entry [id] is sized to [id, max_id] (width max_id-id+1), not the full node space -- see this function's
+  // docstring in graph.hpp. Bit m == node (max_id - m), so bit (max_id-id) is id's own bit (the highest bit
+  // in its own entry) and bit 0 is always max_id.
+  std::vector<NodeIdSet> reachable(max_id + 1);
   for (auto id = min_id; id <= max_id; ++id) {
-    if (graph_.has_node(id)) reachable[id].set(id);
+    if (graph_.has_node(id)) reachable[id] = NodeIdSet(max_id - id + 1);
+  }
+  for (auto id = min_id; id <= max_id; ++id) {
+    if (graph_.has_node(id)) reachable[id].set(max_id - id);
   }
   for (auto id = max_id; id >= min_id; --id) {
     if (!graph_.has_node(id)) continue;
-    graph_.follow_edges(graph_.get_handle(id), false /* forward */, [&](const handlegraph::handle_t& succ) {
-      reachable[id] |= reachable[graph_.get_id(succ)];
+    graph_.follow_edges(graph_.get_handle(id), false /* forward */, [&](const handlegraph::handle_t& succ_handle) {
+      auto succ = graph_.get_id(succ_handle);
+      // reachable[succ] (width max_id-succ+1) shares bit 0's meaning (node max_id) with reachable[id] (width
+      // max_id-id+1, strictly wider since succ > id) but boost::dynamic_bitset's operator|= requires equal
+      // widths -- widen a copy first. The new high bits this introduces (positions beyond succ's own range,
+      // i.e. node ids in (id, succ)) start false, which is correct: reachable[succ] has no opinion on whether
+      // those nodes are reachable from succ, since they aren't -- they're the id's own not-yet-set upstream
+      // range.
+      NodeIdSet widened = reachable[succ];
+      widened.resize(max_id - id + 1, false);
+      reachable[id] |= widened;
       return true;
     });
   }
@@ -744,7 +807,7 @@ void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range&
       }
       auto alt_path = get_path_handle(alt_path_name);
       auto alt_path_idx = as_integer(alt_path);
-      
+
       // Mark the differing nodes between alt and ref paths as zero cost and set the corresponding inference path bit
       auto alt_nodes = PathNodes(alt_path);
       auto [ref_prefix, ref_suffix, alt_prefix, alt_suffix] = detail::TrimSequence(ref_nodes, alt_nodes);
@@ -758,6 +821,25 @@ void Graph::PopulateNodeAndPathMasks(const std::string& source_vcf, const Range&
       }
     }
   }
+}
+
+Graph::PathIdSet Graph::ApplyReferenceFallback(Graph::PathIdSet covered_paths, const Graph::PathIdSet& relevant_mask) const {
+  for (size_t i = 0; i + 1 < variant_path_starts_.size(); ++i) {
+    auto start = variant_path_starts_[i];
+    auto count = variant_path_starts_[i + 1] - start;
+    if (count == 0) continue;
+
+    PathIdSet bucket(covered_paths.size());
+    bucket.set(start, count, true);
+
+    if ((bucket & relevant_mask).none()) continue;  // Caller's own scan never flagged this variant at all
+    if ((bucket & covered_paths).none()) {
+      // No allele of this variant was explicitly selected -- treat the haplotype as having declined the
+      // flagged allele(s), i.e. as carrying the reference allele for this variant.
+      covered_paths.set(start);
+    }
+  }
+  return covered_paths;
 }
 
 void Graph::ToGFA(std::ostream& ostream) { graph_.to_gfa(ostream); }
@@ -915,7 +997,7 @@ namespace detail {
 
 void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& allele_paths,
                            const Graph::NodeIdRange& ref_allele_indices, const Variant::Genotype& genotype,
-                           int star_allele_index) {
+                           const std::vector<bool>& star_alleles) {
   if (genotype.num_alleles() == 0 || genotype.AllAlleles(Variant::Genotype::kMissingAllele)) {
     return; // No alleles to add
   }
@@ -923,24 +1005,30 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
     throw std::runtime_error("Different ploidy for genotypes not currently supported");
   }
 
+  // A record can carry more than one '*' allele (see Graph::Graph); any of them is an equivalent
+  // "covered by another variant's deletion" placeholder, so treat them interchangeably here.
+  auto is_star = [&](auto idx) { return idx >= 0 && static_cast<size_t>(idx) < star_alleles.size() && star_alleles[idx]; };
+
   auto variant_phase = genotype.phase();
   bool permute_alleles = false;
-  if (variant_phase == Phase::kUnphased && star_allele_index > 0 && (genotype.AlleleCount(star_allele_index) == genotype.num_alleles() - 1)) {
+  const auto& genotype_indices = genotype.allele_indices();
+  size_t star_count = std::count_if(std::begin(genotype_indices), std::begin(genotype_indices) + genotype.num_alleles(), is_star);
+  if (variant_phase == Phase::kUnphased && star_count > 0 && star_count == genotype.num_alleles() - 1) {
     // Implicitly phase variants with '*' alleles, allowing permutation of originally unphased variants
     // if needed to try to find a consistent phasing.
-    variant_phase = Phase(Phase::kImplicit); 
+    variant_phase = Phase(Phase::kImplicit);
     permute_alleles = true;
   }
 
   auto [next_phase, break_kind] = NextPhase(variant_phase);
-  
+
   Variant::Genotype::AlleleIndices indices(genotype.allele_indices());
   bool added_genotype = false;
   do {
     size_t h = 0;
     try {
       for (; h < genotype.num_alleles(); h++) {
-        if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
+        if (indices[h] == Variant::Genotype::kMissingAllele || is_star(indices[h])) {
           continue; // Skip missing alleles or '*' alleles
         }
         haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]], break_kind);
@@ -952,12 +1040,12 @@ void Polytype::AddGenotype(const Variant& variant, const Graph::PathHandleSeq& a
       for (size_t i=0; i <= h; i++) {
         haplotypes_[i].UndoActions();
       }
-    } 
+    }
   } while (permute_alleles && std::next_permutation(std::begin(indices), std::begin(indices) + genotype.num_alleles()));
-  
+
   if (!added_genotype) {
     for (size_t h = 0; h < genotype.num_alleles(); h++) {
-      if (indices[h] == Variant::Genotype::kMissingAllele || (star_allele_index > 0 && indices[h] == star_allele_index)) {
+      if (indices[h] == Variant::Genotype::kMissingAllele || is_star(indices[h])) {
         continue; // Skip missing alleles or '*' alleles
       }
       haplotypes_[h].AddGenotypeAllele(variant, ref_allele_indices, indices[h], allele_paths[indices[h]], Haplotype::kBreakInconsistent);

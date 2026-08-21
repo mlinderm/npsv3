@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from npsv3.graphs.graph import Graph
 from npsv3.graphs.haplotype import (
+    HaplotypePriorOverlay,
     HaplotypeSamplerOverlay,
     KmerClassify,
     UniqueKmersOverlay,
@@ -342,7 +343,22 @@ class GraphWriter(ExampleActor):
                 region = Range(record["region.txt"].decode())
                 graph = Graph.load_bytes(record["graph.bytes"])
                 unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
-                sampler = HaplotypeSamplerOverlay(graph, unique_kmers, self.vcf_path, region, self.min_variant_size)
+
+                # The population-prior overlay is only present in shards built with population_prior=True; see
+                # _diplotypes_in_topk_shard's identical treatment in npsv3.graphs.haplotype.
+                prior_bytes = record.get("haplotype_prior_overlay.bytes")
+                prior_overlay = HaplotypePriorOverlay(graph, prior_bytes) if prior_bytes is not None else None
+
+                params = HaplotypeSamplerOverlay.Params()
+                params.haplotype_prior_weight = self.cfg.kmer.population_prior.haplotype_prior_weight
+                params.panel_fallback_penalty = self.cfg.kmer.population_prior.panel_fallback_penalty
+                params.transition_prior_alpha = self.cfg.kmer.population_prior.transition_prior_alpha
+                params.population_state_pool_cap = self.cfg.kmer.population_prior.population_state_pool_cap
+
+                sampler = HaplotypeSamplerOverlay(
+                    graph, unique_kmers, self.vcf_path, region, self.min_variant_size,
+                    prior=prior_overlay, params=params,
+                )
                 analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
 
                 try:
