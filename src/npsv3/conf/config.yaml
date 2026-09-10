@@ -52,9 +52,6 @@ sample: null
 # Root path to download pre-trained models.
 cache_dir: null
 
-# Sample KMC database (used to speedup pre-processing)
-kmc_prefix: null
-
 timeout: 1800
 
 torch_compile: false

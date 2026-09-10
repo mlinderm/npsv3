@@ -4,11 +4,17 @@ kmer_size: 31
 
 # Unique k-mer related parameters
 max_edges: 5
+exclude_universal: true
 canonicalize: false
 
 # Sampling related parameters (partly, adapted from Sirén et al. 2024). The total diplotypes should be h(h+1)/2
 max_haplotypes: 8
 max_diplotypes: 36
+
+# When haplotype sampler doesn't sample > 1 distinct haplotypes for a region (e.g. other haplotypes are rare alleles not
+# supported by sample's data), borrow haplotypes from the population for any still-missing variant allele instead of
+# dropping the region.
+population_haplotype_topup: true
 
 population_prior: false
 population_excluded_samples: []
@@ -19,9 +25,9 @@ haplotype_sampler_params:
   heterozygous_score: 0.0
   homozygous_discount: 0.9
   het_adjustment: 0.05
-  haplotype_prior_weight: 0.0
-  panel_fallback_penalty: 0.0
-  transition_prior_alpha: 1.0
+  haplotype_prior_weight: 0.5
+  panel_fallback_penalty: -2
+  transition_prior_alpha: 0.01
   population_state_pool_cap: 8
 
 # Treat missing genotypes as all reference (e.g., assuming variants weren't called in high quality assemblies)

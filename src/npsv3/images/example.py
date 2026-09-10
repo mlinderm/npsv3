@@ -27,6 +27,7 @@ from npsv3.graphs.haplotype import (
     KmerClassify,
     UniqueKmersOverlay,
     _filter_variants,
+    add_population_haplotypes,
     prepare_genotyping_haplotypes,
     serialize_graph_and_unique_kmers,
 )
@@ -41,6 +42,12 @@ from npsv3.util.sample import Sample, _kmc_db_kmer_size, kmc_filter
 from npsv3.util.timeout import Timeout
 from npsv3.util.variant import Variant, VariantFileReader, overlapping_records
 from npsv3.util.vcf import index_variant_file, pysam_write_mode
+
+
+class InsufficientHaplotypesError(RuntimeError):
+    """Raised when make_graph_example cannot assemble >=2 distinct haplotypes for a region, even after
+    attempting to recover a population-panel individual's embedded haplotype for any still-missing
+    analysis-variant ALT allele. Caught by GraphWriter.from_shard, which skips (not crashes) the region."""
 
 
 def _reference_sequence(reference_fasta: str, region: Range) -> str:
@@ -106,7 +113,7 @@ def make_graph_example(
         # unique to the graph and present in the sample)
         counts = KmerClassify(filtered_kmer_path, sample.kmer_coverage)
         sampler.initialize_scores(counts)
-        haplotypes = sampler.sample_haplotypes(n=cfg.kmer.max_haplotypes)
+        haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
         assert len(haplotypes) > 0, f"No haplotypes sampled for region {region} in {sample.name}"
 
         # Prepare haplotypes for genotyping by ensuring the reference haplotype, and any "true" haplotypes, if present
@@ -114,7 +121,27 @@ def make_graph_example(
         haplotypes, alleles, true_haplotype_idxs = prepare_genotyping_haplotypes(
             graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy
         )
-        assert len(haplotypes) >= 2, f"Fewer than 2 haplotypes for region {region} in {sample.name}"  # noqa: PLR2004
+        if len(haplotypes) < 2 and cfg.graph.population_haplotype_topup:  # noqa: PLR2004
+            # Only attempt "top-up" from the population if the sampler did not produce any haplotype diversity (and if
+            # explicitly requested).
+            excluded_samples = { sample.name, *cfg.graph.population_excluded_samples }
+            haplotypes, alleles = add_population_haplotypes(
+                graph,
+                sampler,
+                haplotypes,
+                alleles,
+                analysis_variants,
+                region.contig,
+                excluded_samples,
+                cfg.graph.max_haplotypes,
+                ploidy=ploidy,
+            )
+        if len(haplotypes) < 2:  # noqa: PLR2004
+            msg = (
+                f"Fewer than 2 haplotypes for region {region} in {sample.name} even after population-panel "
+                f"top-up (have {len(haplotypes)})"
+            )
+            raise InsufficientHaplotypesError(msg)
         assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
         # Allow for all possible genotypes, or TODO: apply sampling here to reduce the potential number considered
@@ -141,32 +168,31 @@ def make_graph_example(
             example["label.rank"] = ranked_positives
 
         # The graph (and thus each haplotype's sequence) does not extend beyond `region`, but realignment and simulation need
-        # sequences comfortably longer than the fragment/insert size. Pad with reference sequence out to realigner_flank.
+        # sequences comfortably longer than the fragment/insert size. Pad with reference sequence out to `realigner_flank`.
+        # TODO: If this large memory consumer, refactor to use memoryview to avoid copying the reference sequence.
         sim_region = region.expand(cfg.pileup.realigner_flank)
         flank_seq = _reference_sequence(cfg.reference, sim_region)
         left_flank = flank_seq[: region.start - sim_region.start]
+        ref_seq = flank_seq[region.start - sim_region.start : len(flank_seq) - (sim_region.end - region.end)]
         right_flank = flank_seq[len(flank_seq) - (sim_region.end - region.end) :]
+        assert len(ref_seq) == region.length, f"Reference sequence length {len(ref_seq)} does not match region length {region.length} for {region}"
 
         # Create realigner once for this region. The (flanked) sequences are also reused, unmodified, for the
         # simulation fasta below.
         realign_fasta_path = os.path.join(tmp_dir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
-            # Extract the reference sequence from the first haplotype
-            ref_seq = graph.path_sequence(haplotypes[0])
-            assert ref_seq.isupper(), f"Sequence for haplotype 0 is not upper case in region {region}"
-            fasta.write(">seq-0\n")
-            fasta.write(left_flank + ref_seq + right_flank + "\n")
-
-            for i, haplotype in enumerate(itertools.islice(haplotypes, 1, None), start=1):
+            for i, haplotype in enumerate(haplotypes):
                 sequence = graph.path_sequence(haplotype)
                 assert sequence.isupper(), f"Sequence for haplotype {i} is not upper case in region {region}"
                 fasta.write(f">seq-{i}\n")
-                fasta.write(left_flank + sequence + right_flank + "\n")
+                fasta.write(left_flank)
+                fasta.write(sequence)
+                fasta.write(right_flank)
+                fasta.write("\n")
 
         addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
         realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
 
-        # Because the reference sequence may be sampled, it is not guaranteed to be the same length as the region
         # TODO: Do we need to pad out the shorter sequences so everything has identical length?
 
         # Create generator if not provided
@@ -314,6 +340,7 @@ class GraphWriter(ExampleActor):
         self.ploidy = ploidy
         self.min_variant_size = min_variant_size
         self.generator = hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
+        self.sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
 
     def from_graph(
         self,
@@ -340,34 +367,46 @@ class GraphWriter(ExampleActor):
         num_regions = 0
         with VariantFileReader.open(self.vcf_path) as vcf_file:
             for record in wds.WebDataset([shard_path], shardshuffle=False):
-                region = Range(record["region.txt"].decode())
+                region_string = record["region.txt"].decode()
+                region = Range(region_string)
+                analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
+
                 graph = Graph.load_bytes(record["graph.bytes"])
                 unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
 
-                # The population-prior overlay is only present in shards built with population_prior=True; see
-                # _diplotypes_in_topk_shard's identical treatment in npsv3.graphs.haplotype.
-                prior_bytes = record.get("haplotype_prior_overlay.bytes")
-                prior_overlay = HaplotypePriorOverlay(graph, prior_bytes) if prior_bytes is not None else None
-
-                params = HaplotypeSamplerOverlay.Params()
-                params.haplotype_prior_weight = self.cfg.kmer.population_prior.haplotype_prior_weight
-                params.panel_fallback_penalty = self.cfg.kmer.population_prior.panel_fallback_penalty
-                params.transition_prior_alpha = self.cfg.kmer.population_prior.transition_prior_alpha
-                params.population_state_pool_cap = self.cfg.kmer.population_prior.population_state_pool_cap
+                # The population-prior overlay is only present in shards built with population_prior=True. If None, it
+                # will be ignored by the HaplotypeSamplerOverlay, which will fall back to a uniform prior.
+                prior_overlay = (
+                    HaplotypePriorOverlay(graph, prior_bytes)
+                    if (prior_bytes := record.get("haplotype_prior_overlay.bytes"))
+                    else None
+                )
 
                 sampler = HaplotypeSamplerOverlay(
-                    graph, unique_kmers, self.vcf_path, region, self.min_variant_size,
-                    prior=prior_overlay, params=params,
+                    graph,
+                    unique_kmers,
+                    self.vcf_path,
+                    region,
+                    self.min_variant_size,
+                    prior=prior_overlay,
+                    params=self.sampler_params,
                 )
-                analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
 
                 try:
                     # Attempt to gracefully timeout long running regions.
                     with Timeout(self.cfg.timeout):
                         example = self.from_graph(region, graph, sampler, analysis_variants)
                 except TimeoutError:
-                    logging.exception("Timeout error for region %s", region)
+                    logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
                     continue
+                except InsufficientHaplotypesError as e:
+                    logging.warning("Skipping region %s for sample %s due to too few haplotypes sampled: %s", region, self.sample.name, e)
+                    continue
+                except Exception as e:
+                    e.add_note(
+                        f"Error generating images for region {region_string} for sample {self.sample.name} from shard {shard_path}"
+                    )
+                    raise
 
                 sample = {
                     "__key__": region.slug,
@@ -420,7 +459,7 @@ def vcf_to_graph_examples(
             graph_shards, unique_kmer_path, region_count = serialize_graph_and_unique_kmers(
                 cfg,
                 vcf_path,
-                ref_kmer_counts_path=cfg.kmer.ref_kmer_counts_kmc_prefix,
+                ref_kmer_counts_path=cfg.graph.ref_kmer_counts_kmc_prefix,
                 output_dir=tmp_dir,
                 min_variant_size=min_variant_size,
                 pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
@@ -428,6 +467,7 @@ def vcf_to_graph_examples(
                 region=region,
             )
         else:
+            logging.info("Using %d pre-generated graph shards", len(graph_shards))
             region_count = None
 
         if filtered_kmer_path is None:
@@ -437,7 +477,7 @@ def vcf_to_graph_examples(
             filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
             kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
 
-        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.kmer.kmer_size, "Filtered k-mer database has unexpected k"
+        assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.graph.kmer_size, "Filtered k-mer database has unexpected k"
 
         if region_count is not None:
             logging.info("Generating exhaustive images for %d regions (across %d threads)", region_count, cfg.threads)

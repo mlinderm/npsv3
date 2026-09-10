@@ -166,6 +166,7 @@ target_link_libraries(_native_realign
   ${SEQLIB_LIBRARIES} # We need to list this library before its dependencies
   Threads::Threads
   Boost::boost
+  fmt::fmt
 )
 
 add_library(graph STATIC

@@ -115,12 +115,18 @@ def hg00731_sample():
 
 @pytest.fixture
 def hg00096_sample():
-    return Sample(
-        name="HG00096",
-        sequencer="HSXn",
-        read_length=150,
-        mean_coverage=32.29,
+    sample = Sample(
+        "HG00096",
+         mean_coverage=32.29,
         mean_insert_size=437.41,
         std_insert_size=102.4,
+        sequencer="HSXn",
+        read_length=150,
         kmer_coverage=29,
     )
+    kmc_prefix_path = _first_existing(
+        "/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.k31.kmc_pre",
+    )
+    if kmc_prefix_path is not None:
+        sample.kmc_prefix, *_ = os.path.splitext(kmc_prefix_path)
+    return sample

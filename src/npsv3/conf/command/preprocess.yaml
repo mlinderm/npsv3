@@ -1,3 +1,6 @@
 # @package _global_
 command: preprocess
 sequencer: HSXn
+
+# Sample KMC database to create (or reuse if it already exists)
+kmc_prefix: null

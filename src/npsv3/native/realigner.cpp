@@ -1,11 +1,39 @@
 #include "realigner.hpp"
 
+#include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <fmt/core.h>
+
 #include "SeqLib/FastqReader.h"
 #include "utility.hpp"
+
+namespace {
+
+// Ad hoc, opt-in (NPSV3_REALIGN_PROFILE=1) timing/count breakdown for FragmentRealigner::RealignReadPair, in the
+// same spirit as haplotype.cpp's NPSV3_HAPLOTYPE_PROFILE (see that file's comment and PERFORMANCE_NOTES.md):
+// each fragment is realigned once per allele (reference + every alt), and each allele realignment aligns both
+// reads with BWA (which can return multiple secondary alignments) then scores every (read1, read2) alignment
+// pair -- an O(read1_alignments x read2_alignments) combination per allele. One REALIGN_PROFILE line is printed
+// per allele realignment plus one per-call total, so a run pathologically slow in this code (e.g. many BWA
+// secondary alignments in a repetitive/dense region, blowing up the pairwise combination) shows up as large
+// read1_alignments/read2_alignments/read_pairs counts and ms on specific alleles/fragments, distinguishing that
+// from a simple linear cost that scales only with allele count and haplotype length. Negligible overhead when
+// disabled (one getenv call, cached in a function-local static).
+bool RealignProfilingEnabled() {
+  static const bool enabled = std::getenv("NPSV3_REALIGN_PROFILE") != nullptr;
+  return enabled;
+}
+
+using RealignProfileClock = std::chrono::steady_clock;
+double RealignElapsedMs(RealignProfileClock::time_point start) {
+  return std::chrono::duration<double, std::milli>(RealignProfileClock::now() - start).count();
+}
+
+}  // namespace
 
 namespace {
 
@@ -235,12 +263,13 @@ std::ostream& operator<<(std::ostream& os, const RealignedReadPair& pair) {
 namespace {
 
 void RealignRead(const IndexedSequence& index, const sl::BamRecord& read, sl::BamRecordVector& alignments,
-                 int quality_offset, uint16_t addl_flags = 0) {
+                 int quality_offset, uint16_t addl_flags = 0, double keep_sec_with_frac_of_primary_score = 0.9,
+                 int max_secondary = 10) {
   const std::string read_seq(read.Sequence());
   const std::string base_qualities(read.Qualities(quality_offset));
   const std::string& ref_seq(index.IUPACSequence());
 
-  index.AlignSequence(read.Qname(), read_seq, alignments);
+  index.AlignSequence(read.Qname(), read_seq, alignments, keep_sec_with_frac_of_primary_score, max_secondary);
   auto max_log_prob = MaxScoreAlignment(read_seq, base_qualities);
   for (auto& alignment : alignments) {
     auto log_prob = ScoreAlignment(read_seq, base_qualities, ref_seq, alignment);
@@ -254,13 +283,16 @@ void RealignRead(const IndexedSequence& index, const sl::BamRecord& read, sl::Ba
 
 RealignedFragment::RealignedFragment(const sl::BamRecord& read1, const sl::BamRecord& read2,
                                      const IndexedSequence& index, const InsertSizeDistribution& insert_dist,
-                                     int quality_offset)
+                                     int quality_offset, double keep_sec_with_frac_of_primary_score,
+                                     int max_secondary)
     : total_log_prob_(std::numeric_limits<score_type>::lowest()) {
   pyassert(!read1.isEmpty(), "Fragment needs to include at least on read");
-  RealignRead(index, read1, read1_alignments_, quality_offset, BAM_FREAD1);
+  RealignRead(index, read1, read1_alignments_, quality_offset, BAM_FREAD1, keep_sec_with_frac_of_primary_score,
+             max_secondary);
 
   if (!read2.isEmpty()) {
-    RealignRead(index, read2, read2_alignments_, quality_offset, BAM_FREAD2);
+    RealignRead(index, read2, read2_alignments_, quality_offset, BAM_FREAD2, keep_sec_with_frac_of_primary_score,
+               max_secondary);
   }
 
   // Construct and score possible alignment pairs
@@ -310,12 +342,20 @@ const std::string& IndexedSequence::IUPACSequence() const {
 }
 
 void IndexedSequence::AlignSequence(const std::string& name, const std::string& seq,
-                                    sl::BamRecordVector& alignments) const {
-  bwa_.AlignSequence(seq, name, alignments, false, 0.9, 10);
+                                    sl::BamRecordVector& alignments, double keep_sec_with_frac_of_primary_score,
+                                    int max_secondary) const {
+  // NB: mem_align1 (BWAWrapper::AlignSequence's underlying BWA-MEM seed/chain/extend search) runs unconditionally
+  // and in full regardless of these two parameters -- they are a post-hoc filter applied only to the already-fully-
+  // computed hit list (mem_reg2aln is even called, generating a full CIGAR, for every hit BWA reports before either
+  // parameter is checked). So tightening them reduces how many alignments *we* get back (and thus the cost of the
+  // read1_alignments x read2_alignments pairing below, in RealignedFragment) but does not reduce BWA's own internal
+  // per-call search cost. See BWAWrapper::AlignSequence in lib/seqlib/src/BWAWrapper.cpp.
+  bwa_.AlignSequence(seq, name, alignments, false, keep_sec_with_frac_of_primary_score, max_secondary);
 }
 
-void IndexedSequence::AlignSequence(const sl::BamRecord& read, sl::BamRecordVector& alignments) const {
-  AlignSequence(read.Qname(), read.Sequence(), alignments);
+void IndexedSequence::AlignSequence(const sl::BamRecord& read, sl::BamRecordVector& alignments,
+                                    double keep_sec_with_frac_of_primary_score, int max_secondary) const {
+  AlignSequence(read.Qname(), read.Sequence(), alignments, keep_sec_with_frac_of_primary_score, max_secondary);
 }
 
 namespace {
@@ -374,6 +414,15 @@ FragmentRealigner::FragmentRealigner(const std::string& fasta_path, double inser
       alt_writers_.back().WriteHeader();
     }
   }
+
+  // See the member declarations' comment: these control how many BWA hits are reported per read (and thus the
+  // read1_alignments x read2_alignments pairing cost below in RealignReadPair), not BWA's internal search cost.
+  if (kwargs && kwargs.contains("keep_sec_with_frac_of_primary_score")) {
+    keep_sec_with_frac_of_primary_score_ = nb::cast<double>(kwargs["keep_sec_with_frac_of_primary_score"]);
+  }
+  if (kwargs && kwargs.contains("max_secondary")) {
+    max_secondary_ = nb::cast<int>(kwargs["max_secondary"]);
+  }
 }
 
 namespace {
@@ -409,15 +458,41 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
   // any interactions with Python objects (e.g. kwargs)
   nb::gil_scoped_release release;
 
+  const bool profiling = RealignProfilingEnabled();
+  static size_t call_index = 0;  // single-threaded per-process counter, mirrors HAP_PROFILE's call counter
+  const size_t this_call = profiling ? call_index++ : 0;
+  const auto call_start = profiling ? RealignProfileClock::now() : RealignProfileClock::time_point{};
+
   // Realign the fragment to the reference allele
-  RealignedFragment ref_realignment(read1, read2, ref_index_, insert_size_dist_);
+  auto allele_start = profiling ? RealignProfileClock::now() : RealignProfileClock::time_point{};
+  RealignedFragment ref_realignment(read1, read2, ref_index_, insert_size_dist_, 33,
+                                    keep_sec_with_frac_of_primary_score_, max_secondary_);
+  if (profiling) {
+    fmt::print(stderr,
+               "REALIGN_PROFILE call={} allele=ref ms={:.3f} read1_alignments={} read2_alignments={} read_pairs={}\n",
+               this_call, RealignElapsedMs(allele_start), ref_realignment.NumRead1Alignments(),
+               ref_realignment.NumRead2Alignments(), ref_realignment.NumAlignments());
+  }
   std::vector<RealignedFragment::score_type> total_log_prob(NumAltAlleles(), ref_realignment.TotalLogProb());
 
   std::vector<RealignedFragment> alt_realignments;
   for (size_t i = 0; i < NumAltAlleles(); i++) {
     // Realign the fragment to this alternate allele
-    alt_realignments.emplace_back(read1, read2, alt_indexes_[i], insert_size_dist_);
+    allele_start = profiling ? RealignProfileClock::now() : RealignProfileClock::time_point{};
+    alt_realignments.emplace_back(read1, read2, alt_indexes_[i], insert_size_dist_, 33,
+                                  keep_sec_with_frac_of_primary_score_, max_secondary_);
+    if (profiling) {
+      fmt::print(
+          stderr, "REALIGN_PROFILE call={} allele=alt_{} ms={:.3f} read1_alignments={} read2_alignments={} read_pairs={}\n",
+          this_call, i, RealignElapsedMs(allele_start), alt_realignments.back().NumRead1Alignments(),
+          alt_realignments.back().NumRead2Alignments(), alt_realignments.back().NumAlignments());
+    }
     total_log_prob[i] = LogSumPow(total_log_prob[i], alt_realignments.back().TotalLogProb());
+  }
+
+  if (profiling) {
+    fmt::print(stderr, "REALIGN_PROFILE call={} stage=total ms={:.3f} num_alt_alleles={}\n", this_call,
+               RealignElapsedMs(call_start), NumAltAlleles());
   }
 
   // Store the score for each read in fragment

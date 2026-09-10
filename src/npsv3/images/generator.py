@@ -36,34 +36,57 @@ def _fragment_zscore(sample: Sample, fragment_length: int, fragment_delta=0):
 
 class ImageGenerator:
     def __init__(self, cfg):
+        # Resolve the (OmegaConf) pileup settings used inside the per-read/per-column rendering hot loop into
+        # plain Python attributes once, rather than repeatedly resolving them via DictConfig on every pixel.
         self._cfg = cfg
-        self._image_shape = (
-            self._cfg.pileup.image_height,
-            self._cfg.pileup.image_width,
-            len(self._cfg.pileup.image_channels),
-        )
+
+        self._reference = cfg.reference
+
+        self._image_height = cfg.pileup.image_height
+        self._image_width = cfg.pileup.image_width
+        self._image_channels = list(cfg.pileup.image_channels)
+        self._image_shape = (self._image_height, self._image_width, len(self._image_channels))
+
+        self._fetch_flank = cfg.pileup.fetch_flank
+        self._insert_bases = cfg.pileup.insert_bases
+        self._assign_delta = cfg.pileup.assign_delta
+        self._phase_tag = cfg.pileup.phase_tag
+        self._variant_padding = cfg.pileup.variant_padding
+
+        self._max_baseq = cfg.pileup.max_baseq
+        self._max_mapq = cfg.pileup.max_mapq
+        self._discrete_mapq = cfg.pileup.discrete_mapq
+        self._mapq0_pixel = cfg.pileup.mapq0_pixel
+
+        self._binary_allele = cfg.pileup.binary_allele
+        self._max_alleleq = cfg.pileup.max_alleleq
+        self._allele_pixel_range = cfg.pileup.allele_pixel_range
+        self._amb_allele_pixel = cfg.pileup.amb_allele_pixel
+
+        self._insert_size_mean_pixel = cfg.pileup.insert_size_mean_pixel
+        self._insert_size_sd_pixel = cfg.pileup.insert_size_sd_pixel
 
         # Helper dictionaries to map to pixel values
         # fmt: off
         self._aligned_to_pixel = {
-            BaseAlignment.ALIGNED: self._cfg.pileup.aligned_base_pixel,
-            BaseAlignment.MATCH: self._cfg.pileup.match_base_pixel if self._cfg.pileup.render_snv else self._cfg.pileup.aligned_base_pixel,
-            BaseAlignment.MISMATCH: self._cfg.pileup.mismatch_base_pixel if self._cfg.pileup.render_snv else self._cfg.pileup.aligned_base_pixel,
-            BaseAlignment.SOFT_CLIP: self._cfg.pileup.soft_clip_base_pixel,
-            BaseAlignment.INSERT: self._cfg.pileup.insert_base_pixel,
+            BaseAlignment.ALIGNED: cfg.pileup.aligned_base_pixel,
+            BaseAlignment.MATCH: cfg.pileup.match_base_pixel if cfg.pileup.render_snv else cfg.pileup.aligned_base_pixel,
+            BaseAlignment.MISMATCH: cfg.pileup.mismatch_base_pixel if cfg.pileup.render_snv else cfg.pileup.aligned_base_pixel,
+            BaseAlignment.SOFT_CLIP: cfg.pileup.soft_clip_base_pixel,
+            BaseAlignment.INSERT: cfg.pileup.insert_base_pixel,
         }
         # fmt: on
 
         self._allele_to_pixel = {
-            AlleleAssignment.AMB: self._cfg.pileup.amb_allele_pixel,
-            AlleleAssignment.REF: self._cfg.pileup.ref_allele_pixel,
-            AlleleAssignment.ALT: self._cfg.pileup.alt_allele_pixel,
+            AlleleAssignment.AMB: cfg.pileup.amb_allele_pixel,
+            AlleleAssignment.REF: cfg.pileup.ref_allele_pixel,
+            AlleleAssignment.ALT: cfg.pileup.alt_allele_pixel,
             None: 0,
         }
 
         self._strand_to_pixel = {
-            Strand.POSITIVE: self._cfg.pileup.positive_strand_pixel,
-            Strand.NEGATIVE: self._cfg.pileup.negative_strand_pixel,
+            Strand.POSITIVE: cfg.pileup.positive_strand_pixel,
+            Strand.NEGATIVE: cfg.pileup.negative_strand_pixel,
             None: 0.0,
         }
 
@@ -76,13 +99,13 @@ class ImageGenerator:
         if zscore is None:
             return 0
         return np.clip(
-            self._cfg.pileup.insert_size_mean_pixel + zscore * self._cfg.pileup.insert_size_sd_pixel,
+            self._insert_size_mean_pixel + zscore * self._insert_size_sd_pixel,
             1,
             MAX_PIXEL_VALUE,
         )
 
     def _allele_pixel(self, realignment: AlleleRealignment):
-        if self._cfg.pileup.binary_allele:
+        if self._binary_allele:
             return self._allele_to_pixel[realignment.allele]
         if (
             realignment is None
@@ -94,9 +117,9 @@ class ImageGenerator:
             return 0
         return np.clip(
             (realignment.alt_quality - realignment.ref_quality)
-            / self._cfg.pileup.max_alleleq
-            * self._cfg.pileup.allele_pixel_range
-            + self._cfg.pileup.amb_allele_pixel,
+            / self._max_alleleq
+            * self._allele_pixel_range
+            + self._amb_allele_pixel,
             1,
             MAX_PIXEL_VALUE,
         )
@@ -112,11 +135,11 @@ class ImageGenerator:
     def _mapq_pixel(self, qual):
         if qual is None:
             return 0
-        if self._cfg.pileup.discrete_mapq:
+        if self._discrete_mapq:
             if qual == 0:
-                return self._cfg.pileup.mapq0_pixel
-            return np.minimum((np.array(qual) / self._cfg.pileup.max_mapq) * 127 + 128, MAX_PIXEL_VALUE)
-        return self._qual_pixel(qual, self._cfg.pileup.max_mapq)
+                return self._mapq0_pixel
+            return np.minimum((np.array(qual) / self._max_mapq) * 127 + 128, MAX_PIXEL_VALUE)
+        return self._qual_pixel(qual, self._max_mapq)
 
     def _phase_pixel(self, hp):
         if hp is None:
@@ -148,9 +171,9 @@ class ImageGenerator:
 
     def image_region(self, region) -> Range:
         # Try to minimize compression by setting right padding to exact width...
-        to_pad = self._cfg.pileup.image_width - region.length
-        left_padding = max((to_pad + 1) // 2, self._cfg.pileup.variant_padding)
-        right_padding = max(to_pad // 2, self._cfg.pileup.variant_padding)
+        to_pad = self._image_width - region.length
+        left_padding = max((to_pad + 1) // 2, self._variant_padding)
+        right_padding = max(to_pad // 2, self._variant_padding)
         return region.expand(left_padding, right_padding)
 
     def render(self, image_tensor, **kwargs) -> Image:
@@ -159,13 +182,13 @@ class ImageGenerator:
 
     def generate(self, read_path: PathType | Sequence[PathType], sample: Sample, region: Range, compress=False, **kwargs):
         image = self._generate(read_path, sample, region, **kwargs)
-        image_array = image[:, :, self._cfg.pileup.image_channels]
+        image_array = image[:, :, self._image_channels]
 
         # Create consistent image size
-        if compress and image_array.shape != (self._cfg.pileup.image_height, self._cfg.pileup.image_width, len(self._cfg.pileup.image_channels)):
+        if compress and image_array.shape != self._image_shape:
             # Need to convert from HWC to CHW (and back again)
             in_tensor = torch.from_numpy(image_array).permute(2, 0, 1)
-            out_tensor = transforms.functional.resize(in_tensor, [self._cfg.pileup.image_height, self._cfg.pileup.image_width])
+            out_tensor = transforms.functional.resize(in_tensor, [self._image_height, self._image_width])
             image_array = out_tensor.permute(1, 2, 0).numpy()
 
         return AnnotatedArray(
@@ -188,7 +211,7 @@ class CoverageImageGenerator(ImageGenerator):
         ref_seq: str | None = None,
         **kwargs,
     ):
-        image_height = self._cfg.pileup.image_height
+        image_height = self._image_height
         image_tensor = np.zeros((image_height, region.length, MAX_NUM_CHANNELS), dtype=np.uint8)
 
         read_paths = [read_path] if isinstance(read_path, (str, os.PathLike)) else list(read_path)
@@ -198,21 +221,21 @@ class CoverageImageGenerator(ImageGenerator):
         pileup = ReadPileup(region)
 
         for path in read_paths:
-            fragments = fetch_reads(path, region.expand(self._cfg.pileup.fetch_flank), reference=self._cfg.reference)
+            fragments = fetch_reads(path, region.expand(self._fetch_flank), reference=self._reference)
 
             for fragment in fragments:
                 # At present we render reads based on the original alignment so we only realign (and track) fragments that could overlap
                 # the image window. If we render "insert" bases, then we look if any part of the fragment overlaps the region
-                if fragment.fragment_overlaps(region, read_overlap_only=not self._cfg.pileup.insert_bases):
+                if fragment.fragment_overlaps(region, read_overlap_only=not self._insert_bases):
                     insert_zscore = _fragment_zscore(sample, fragment.fragment_length)
 
                     # Render "insert" bases for overlapping fragments without reads in the region (and thus would not
                     # otherwise be represented)
-                    add_insert = self._cfg.pileup.insert_bases and not fragment.reads_overlap(region)
+                    add_insert = self._insert_bases and not fragment.reads_overlap(region)
 
                     if realigner is not None:
                         realignment, read1_realignment, read2_realignment = realign_fragment(
-                            realigner, fragment, assign_delta=self._cfg.pileup.assign_delta
+                            realigner, fragment, assign_delta=self._assign_delta
                         )
                         realign_args = { "allele": realignment, "read1_realignment": read1_realignment, "read2_realignment": read2_realignment }
                     else:
@@ -222,7 +245,7 @@ class CoverageImageGenerator(ImageGenerator):
                         fragment,
                         add_insert=add_insert,
                         insert_zscore=insert_zscore,
-                        phase_tag=self._cfg.pileup.phase_tag,
+                        phase_tag=self._phase_tag,
                         **realign_args,
                     )
 
@@ -237,7 +260,7 @@ class CoverageImageGenerator(ImageGenerator):
                 image_tensor[row_idxs[col_slice], col_idxs, MAPQ_CHANNEL] = self._mapq_pixel(read.mapq)
                 image_tensor[row_idxs[col_slice], col_idxs, STRAND_CHANNEL] = self._strand_to_pixel[read.strand]
                 image_tensor[row_idxs[col_slice], col_idxs, BASEQ_CHANNEL] = self._qual_pixel(
-                    read.baseq(read_slice), self._cfg.pileup.max_baseq
+                    read.baseq(read_slice), self._max_baseq
                 )
                 image_tensor[row_idxs[col_slice], col_idxs, PHASE_CHANNEL] = self._phase_pixel(read.phase)
                 image_tensor[row_idxs[col_slice], col_idxs, ALLELE_CHANNEL] = self._allele_pixel(read.allele)

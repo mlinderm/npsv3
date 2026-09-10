@@ -26,6 +26,7 @@ from npsv3.graphs.haplotype import (
     _create_graph_and_sampler,
     _diplotypes_in_topk_shard,
     _sample_diplotypes_from_counts,
+    add_population_haplotypes,
     diplotypes_in_topk,
     prepare_genotyping_haplotypes,
     sample_diplotypes,
@@ -86,14 +87,26 @@ class _MockGraph:
     def has_path(self, name: str) -> bool:
         return name == self.contig or name in self._paths
 
+    def samples_including(self, nodes: Sequence[int]) -> list[str]:
+        node_set = set(nodes)
+        return sorted({
+            name.split("#", 1)[0]
+            for name, path in self._paths.items()
+            if "#" in name and node_set & set(path)
+        })
+
 
 class _MockHaplotypeSampler:
     """Minimal mock `HaplotypeSamplerOverlay` class for testing."""
-    def __init__(self, node_alleles: dict[int, tuple[str, int]]):
+    def __init__(self, node_alleles: dict[int, tuple[str, int]], scores: dict[tuple[int, ...], float] | None = None):
         self._node_alleles = node_alleles
+        self._scores = scores or {}
 
     def decode_haplotype(self, haplotype: list[int]) -> set[tuple[str, int]]:
         return {self._node_alleles[node] for node in haplotype if node in self._node_alleles}
+
+    def score(self, haplotype: Sequence[int]) -> float:
+        return self._scores.get(tuple(haplotype), 0.0)
 
 
 class TestPrepareGenotypingHaplotypes:
@@ -194,6 +207,146 @@ class TestPrepareGenotypingHaplotypes:
             cast(Graph, _MockGraph(self.region.contig, self.REF)), self.sampler, original, self.variants, self.region.contig, "SAMPLE"
         )
         assert original == [self.ALT]
+
+
+class TestAddPopulationHaplotypes:
+    # Single bi-allelic variant "v1"; node 4 distinguishes its ALT allele from REF.
+    contig = "chr1"
+    REF: ClassVar = [1, 2, 3]
+    ALT: ClassVar = [1, 4, 3]
+    # A second variant "v2" and its ALT-distinguishing node 14, for multi-variant fixtures.
+    REF2: ClassVar = [11, 12, 13]
+    ALT2: ClassVar = [11, 14, 13]
+
+    def _sampler(self, scores: dict[tuple[int, ...], float] | None = None) -> HaplotypeSamplerOverlay:
+        return cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler(
+            {2: ("v1", 0), 4: ("v1", 1), 12: ("v2", 0), 14: ("v2", 1)}, scores=scores,
+        ))
+
+    def test_adds_missing_alt_allele_from_population_carrier(self):
+        variants = [cast(Variant, _MockVariant("v1"))]
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={
+                "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT,
+                "OTHER#0#chr1#0": self.ALT, "OTHER#1#chr1#0": self.REF,
+            },
+        ))
+        haplotypes, alleles = add_population_haplotypes(
+            graph, self._sampler(), [self.REF], [{("v1", 0)}], variants, self.contig, { "SAMPLE" }, max_haplotypes=8,
+        )
+        assert haplotypes == [self.REF, self.ALT]
+        assert alleles == [{("v1", 0)}, {("v1", 1)}]
+
+    def test_does_not_duplicate_already_represented_allele(self):
+        variants = [cast(Variant, _MockVariant("v1"))]
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "OTHER#0#chr1#0": self.ALT},
+        ))
+        haplotypes, alleles = add_population_haplotypes(
+            graph, self._sampler(), [self.REF, self.ALT], [{("v1", 0)}, {("v1", 1)}], variants,
+            self.contig, { "SAMPLE" }, max_haplotypes=8,
+        )
+        assert haplotypes == [self.REF, self.ALT]
+
+    def test_excludes_sample_itself_as_carrier(self):
+        variants = [cast(Variant, _MockVariant("v1"))]
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "SAMPLE#0#chr1#0": self.ALT},
+        ))
+        haplotypes, _alleles = add_population_haplotypes(
+            graph, self._sampler(), [self.REF], [{("v1", 0)}], variants, self.contig, { "SAMPLE" }, max_haplotypes=8,
+        )
+        assert haplotypes == [self.REF]
+
+    def test_returns_unchanged_when_no_carrier_exists(self):
+        variants = [cast(Variant, _MockVariant("v1"))]
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT},  # no individual paths embedded at all
+        ))
+        haplotypes, _alleles = add_population_haplotypes(
+            graph, self._sampler(), [self.REF], [{("v1", 0)}], variants, self.contig, { "SAMPLE" }, max_haplotypes=8,
+        )
+        assert haplotypes == [self.REF]
+
+    def test_multiallelic_variant_considers_each_allele_independently(self):
+        variant = cast(Variant, _MockVariant("v1", num_alleles=3))
+        alt_allele_2 = [1, 5, 3]
+        sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1), 5: ("v1", 2)}))
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={
+                "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "_alt_v1_2": alt_allele_2,
+                "OTHER1#0#chr1#0": self.ALT, "OTHER2#0#chr1#0": alt_allele_2,
+            },
+        ))
+        haplotypes, alleles = add_population_haplotypes(
+            graph, sampler, [self.REF], [{("v1", 0)}], [variant], self.contig, { "SAMPLE" }, max_haplotypes=8,
+        )
+        assert haplotypes == [self.REF, self.ALT, alt_allele_2]
+        assert alleles == [{("v1", 0)}, {("v1", 1)}, {("v1", 2)}]
+
+    def test_does_not_mutate_input_lists(self):
+        variants = [cast(Variant, _MockVariant("v1"))]
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "OTHER#0#chr1#0": self.ALT},
+        ))
+        original_haplotypes = [self.REF]
+        original_alleles = [{("v1", 0)}]
+        add_population_haplotypes(
+            graph, self._sampler(), original_haplotypes, original_alleles, variants, self.contig, { "SAMPLE" },
+            max_haplotypes=8,
+        )
+        assert original_haplotypes == [self.REF]
+        assert original_alleles == [{("v1", 0)}]
+
+    def test_caps_at_max_haplotypes_keeping_highest_scoring_candidates(self):
+        variant = cast(Variant, _MockVariant("v1", num_alleles=3))
+        alt_allele_2 = [1, 5, 3]
+        sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler(
+            {2: ("v1", 0), 4: ("v1", 1), 5: ("v1", 2)},
+            scores={tuple(self.ALT): 1.0, tuple(alt_allele_2): 5.0},
+        ))
+        graph = cast(Graph, _MockGraph(
+            self.contig, self.REF,
+            paths={
+                "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "_alt_v1_2": alt_allele_2,
+                "OTHER1#0#chr1#0": self.ALT, "OTHER2#0#chr1#0": alt_allele_2,
+            },
+        ))
+        # Budget only allows one addition beyond REF -- the higher-scoring candidate (alt_allele_2) should
+        # win over the lower-scoring one (ALT), regardless of discovery order.
+        haplotypes, alleles = add_population_haplotypes(
+            graph, sampler, [self.REF], [{("v1", 0)}], [variant], self.contig, { "SAMPLE" }, max_haplotypes=2,
+        )
+        assert haplotypes == [self.REF, alt_allele_2]
+        assert alleles == [{("v1", 0)}, {("v1", 2)}]
+
+    def test_same_candidate_found_via_two_targets_is_only_added_once(self):
+        """A carrier whose single path covers ALT alleles of two different analysis variants is discovered
+        independently while searching for each variant's missing allele, but must only be added once."""
+        variants = [cast(Variant, _MockVariant("v1")), cast(Variant, _MockVariant("v2"))]
+        sampler = self._sampler()
+        ref_combined = self.REF + self.REF2
+        multi = self.ALT + self.ALT2  # carries the ALT allele of both v1 and v2 on one path
+        graph = cast(Graph, _MockGraph(
+            self.contig, ref_combined,
+            paths={
+                "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT,
+                "_alt_v2_0": self.REF2, "_alt_v2_1": self.ALT2,
+                "MULTI#0#chr1#0": multi,
+            },
+        ))
+        haplotypes, alleles = add_population_haplotypes(
+            graph, sampler, [ref_combined], [{("v1", 0), ("v2", 0)}], variants, self.contig, { "SAMPLE" },
+            max_haplotypes=8,
+        )
+        assert haplotypes == [ref_combined, multi]
+        assert alleles == [{("v1", 0), ("v2", 0)}, {("v1", 1), ("v2", 1)}]
 
 
 @pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
@@ -500,6 +653,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""  # fmt: skip
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
         "graph.population_prior=false",
+        "graph.max_haplotypes=4",
+        "graph.max_diplotypes=6",
     )
     def test_diplotypes_in_topk_shard_handles_shard_without_population_prior_keys(self, cfg, tmp_path):
         vcf_path = create_vcf(tmp_path, self.VCF_BYTES)
@@ -524,14 +679,16 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""  # fmt: skip
         # A shard that has no population-prior overlay keys must degrade gracefully (the overlay resolves to
         # None and the prior is inert) rather than raising KeyError.
         rows = ray.get(_diplotypes_in_topk_shard.remote(  # type: ignore
-            graph_shards[0], vcf_path, "Sample1", str(kmc_prefix),
-            kmer_coverage=29, min_variant_size=0, max_haplotypes=4, max_diplotypes=6,
+            cfg, graph_shards[0], vcf_path, "Sample1", str(kmc_prefix),
+            kmer_coverage=29, min_variant_size=0,
         ))
         assert isinstance(rows, list)
 
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
         "graph.population_prior=false",
+        "graph.max_haplotypes=4",
+        "graph.max_diplotypes=6",
     )
     def test_diplotypes_in_topk_shard_skips_filtered_genotype(self, cfg, tmp_path):
         # Sample1's genotype is explicitly filtered (FT != PASS/.) at the first variant only
@@ -563,8 +720,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT:FT	0|1:PASS	0|0:PASS	0|0:PASS	1|1:PASS	1|1:PA
         )
 
         rows = ray.get(_diplotypes_in_topk_shard.remote(  # type: ignore
-            graph_shards[0], vcf_path, "Sample1", str(kmc_prefix),
-            kmer_coverage=29, min_variant_size=0, max_haplotypes=4, max_diplotypes=6,
+            cfg, graph_shards[0], vcf_path, "Sample1", str(kmc_prefix),
+            kmer_coverage=29, min_variant_size=0,
         ))
 
         reported_variant_ids = {row["variant"] for row in rows}

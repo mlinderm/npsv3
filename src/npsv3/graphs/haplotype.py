@@ -7,13 +7,13 @@ import logging
 import os
 import tempfile
 from collections.abc import Sequence
-from typing import cast
+from typing import Container
 
+import hydra
 import numpy as np
 import pandas as pd
 import ray
 import webdataset as wds
-from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from npsv3 import PathType
@@ -203,30 +203,20 @@ class _SerializeGraphAndUniqueKmers:
     """Ray actor to construct a Graph and UniqueKmersOverlay for a region and return as serialized payload."""
     def __init__(
         self,
-        reference: str,
+        cfg,
         vcf_path: str,
-        kmer_size: int,
         graph_shard: str,
         *,
-        max_edges=5,
-        exclude_universal=True,
-        canonicalize=False,
         ref_kmer_counts_path: str | None = None,
         filter_kmer_fasta_path: str | None = None,
         max_size_shard=256*1024*1024, # 256 MB
-        population_prior: bool = False,
-        population_excluded_samples: Sequence[str] | None = None,
         jemalloc_purge_node_count: int | None = 20_000,
     ):
-        self.reference = reference
+        self.cfg = cfg
         self.vcf_path = vcf_path
-        self.kmer_size = kmer_size
         # encoder=False disables ShardWriter's default extension-based auto-encoding, which only passes
         # `bytes` through as-is (not bytearray) and so would create an undesired copy.
         self._graph_writer = wds.ShardWriter(graph_shard, maxsize=max_size_shard, verbose=False, encoder=False) # type: ignore
-        self.max_edges = max_edges
-        self.exclude_universal = exclude_universal
-        self.canonicalize = canonicalize
         if ref_kmer_counts_path is not None:
             self.ref_kmer_counts = KmerCounts(ref_kmer_counts_path)
         else:
@@ -235,8 +225,6 @@ class _SerializeGraphAndUniqueKmers:
             self.kmer_fasta = open(filter_kmer_fasta_path, "w")
         else:
             self.kmer_fasta = None
-        self.population_prior = population_prior
-        self.population_excluded_samples = list(population_excluded_samples or [])
         self.jemalloc_purge_node_count = jemalloc_purge_node_count
 
     def close(self):
@@ -252,7 +240,7 @@ class _SerializeGraphAndUniqueKmers:
         region = Range(region_str)
 
         try:
-            graph = Graph(self.reference, self.vcf_path, region)
+            graph = Graph(self.cfg.reference, self.vcf_path, region)
         except Exception as e:
             e.add_note(f"Error constructing graph for region {region_str}")
             raise
@@ -261,10 +249,10 @@ class _SerializeGraphAndUniqueKmers:
         try:
             unique_kmers = UniqueKmersOverlay(
                 graph,
-                self.kmer_size,
-                max_edges=self.max_edges,
-                exclude_universal=self.exclude_universal,
-                canonicalize=self.canonicalize,
+                self.cfg.graph.kmer_size,
+                max_edges=self.cfg.graph.max_edges,
+                exclude_universal=self.cfg.graph.exclude_universal,
+                canonicalize=self.cfg.graph.canonicalize,
                 ref_kmer_counts=self.ref_kmer_counts,
             )
         except Exception as e:
@@ -284,8 +272,8 @@ class _SerializeGraphAndUniqueKmers:
         del unique_kmers
 
         haplotype_prior_bytes = None
-        if self.population_prior:
-            prior = HaplotypePriorOverlay(graph, self.population_excluded_samples)
+        if self.cfg.graph.population_prior:
+            prior = HaplotypePriorOverlay(graph, self.cfg.graph.population_excluded_samples)
             haplotype_prior_bytes = prior.save_bytes()
             del prior
         graph_bytes = graph.save_bytes()
@@ -346,19 +334,13 @@ def serialize_graph_and_unique_kmers(
         graph_shards = [os.path.join(output_dir, f"graphs-{i:05d}-%05d.tar.gz") for i in range(cfg.threads)]
         kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if pool_kmers else None for i in range(cfg.threads)]
         actors = [
-            # Convert all arguments to easily serializable types, e.g, paths to str
             _SerializeGraphAndUniqueKmers.remote(
-                str(cfg.reference),
+                cfg,
                 str(vcf_path),
-                cfg.graph.kmer_size,
                 graph_shard,
-                max_edges=cfg.graph.max_edges,
-                canonicalize=cfg.graph.canonicalize,
                 ref_kmer_counts_path=str(ref_kmer_counts_path) if ref_kmer_counts_path is not None else None,
                 filter_kmer_fasta_path=kmer_fasta_path,
                 max_size_shard=max_size_shard,
-                population_prior=cfg.graph.population_prior,
-                population_excluded_samples = cfg.graph.population_excluded_samples,
             ) for graph_shard, kmer_fasta_path in zip(graph_shards, kmer_fasta_paths, strict=True)
         ]
         pool = ray.util.ActorPool(actors)
@@ -369,7 +351,7 @@ def serialize_graph_and_unique_kmers(
             overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size),
             disable=not progress_bar,
             desc="Pre-generating graphs and associated k-mers",
-            mininterval=1.0,
+            mininterval=5.0,
         ):
             # Utilize _pending_submits to implement back pressure on the number of regions in-flight
             # to avoid excessive memory usage (ActorPool doesn't provide a public API to implement back pressure)
@@ -523,6 +505,91 @@ def prepare_genotyping_haplotypes(
 
     return haplotypes, alleles, true_hap_idxs
 
+
+def add_population_haplotypes(
+    graph: Graph,
+    sampler: HaplotypeSamplerOverlay,
+    haplotypes: Sequence[Sequence[int]],
+    alleles: Sequence[set[tuple[str, int]]],
+    analysis_variants: Sequence[Variant],
+    contig: str,
+    excluded_samples: Container[str],
+    max_haplotypes: int,
+    ploidy: int = 2,
+) -> tuple[list[Sequence[int]], list[set[tuple[str, int]]]]:
+    """For each (variant, ALT allele) in analysis_variants not already represented in `alleles`, look up
+    an embedded population-panel individual's own phased haplotype path carrying that allele (via
+    graph.samples_including on the allele's distinguishing nodes, excluding exclude_sample_name) --
+    bypassing the score-driven beam search entirely, the same way prepare_genotyping_haplotypes already
+    top-ups exclude_sample_name's own "true" haplotypes, but for arbitrary population-panel individuals.
+    Candidates are ranked by sampler.score() (the same k-mer-evidence + population-prior score the beam
+    search itself uses) and spliced in highest-scoring-first, stopping once `haplotypes` reaches
+    `max_haplotypes` -- so the result is bounded and biased toward the most likely candidates given the
+    data, not an unbounded union of every population carrier found. Does not mutate inputs.
+    """
+    haplotypes = list(haplotypes)
+    alleles = list(alleles)
+
+    candidates: list[tuple[float, Sequence[int], set[tuple[str, int]]]] = []
+    for variant in analysis_variants:
+        variant_id = variant.variant_id
+        ref_path_name = f"_alt_{variant_id}_0"
+        if not graph.has_path(ref_path_name):
+            continue  # Variant excluded from graph construction (e.g. all-'*' alleles, partial overlap)
+        ref_nodes = set(graph.path_nodes(ref_path_name))
+
+        for allele_idx in range(1, variant.num_alleles):
+            target = (variant_id, allele_idx)
+            if any(target in hap_alleles for hap_alleles in alleles):
+                continue  # Already represented by some sampled/true haplotype
+
+            alt_path_name = f"_alt_{variant_id}_{allele_idx}"
+            if not graph.has_path(alt_path_name):
+                continue  # No explicit path (e.g. a '*' allele)
+            alt_nodes = set(graph.path_nodes(alt_path_name)) - ref_nodes
+            if not alt_nodes:
+                continue
+
+            hap_path = _find_population_carrier_path(graph, contig, excluded_samples, alt_nodes, ploidy)
+            if hap_path is None:
+                logging.debug("No population-panel carrier found for %s allele %d", variant_id, allele_idx)
+                continue
+
+            hap_alleles = haplotype_alleles(sampler, [hap_path], analysis_variants)[0]
+            if any(hap_alleles == existing for existing in alleles):
+                continue
+            candidates.append((sampler.score(hap_path), hap_path, hap_alleles))
+
+    # Highest-scoring first, capped at max_haplotypes total
+    for _score, hap_path, hap_alleles in sorted(candidates, key=lambda c: c[0], reverse=True):
+        if len(haplotypes) >= max_haplotypes:
+            break
+        if any(hap_alleles == existing for existing in alleles):
+            continue  # A higher-scoring earlier candidate may have already covered this allele's class
+        haplotypes.append(hap_path)
+        alleles.append(hap_alleles)
+
+    return haplotypes, alleles
+
+
+def _find_population_carrier_path(
+    graph: Graph, contig: str, exclude_samples: Container[str], alt_nodes: set[int], ploidy: int = 2,
+) -> Sequence[int] | None:
+    """Return the first (deterministic, sorted-by-name) population-panel carrier's embedded path
+    intersecting alt_nodes, excluding exclude_sample_name. Any real carrier's path is equally valid --
+    add_population_haplotypes' score-based ranking, not this choice, decides what's ultimately kept."""
+    for name in sorted(graph.samples_including(list(alt_nodes))):
+        if name in exclude_samples:
+            continue
+        for h in range(ploidy):
+            path_name = f"{name}#{h}#{contig}#0"
+            if graph.has_path(path_name):
+                hap_path = graph.path_nodes(path_name)
+                if set(hap_path) & alt_nodes:
+                    return hap_path
+    return None
+
+
 def _find_matching_diplotype(diplotypes: Sequence[Diplotype], matching_haplotypes: np.ndarray) -> int:
     """Return the index of the first diplotype that matches the genotype in `matching_halotypes` or -1
 
@@ -544,6 +611,7 @@ def _find_matching_diplotype(diplotypes: Sequence[Diplotype], matching_haplotype
 
 @ray.remote # type: ignore
 def _diplotypes_in_topk_shard(
+    cfg,
     shard_path: str,
     vcf_path: str,
     sample_name: str,
@@ -551,13 +619,10 @@ def _diplotypes_in_topk_shard(
     *,
     kmer_coverage: float,
     min_variant_size: int,
-    max_haplotypes: int,
-    max_diplotypes: int,
-    haplotype_sampler_params = None,
     ploidy: int = 2,
-    missing_are_ref: bool = False,
 ) -> list[dict]:
     """Sample diplotypes and compute genotype ranks for every region in a single WebDataset shard."""
+    sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
     result_rows = []
     with VariantFileReader.open(vcf_path) as vcf_file:
         sample_idx = vcf_file.samples().index(sample_name)
@@ -573,7 +638,6 @@ def _diplotypes_in_topk_shard(
 
             # The population-prior overlay is only present in shards built with population_prior=True. If None, it
             # will be ignored by the HaplotypeSamplerOverlay, which will fall back to a uniform prior.
-            sampler_params = HaplotypeSamplerOverlay.Params(**(haplotype_sampler_params or {}))
             prior_overlay = (
                 HaplotypePriorOverlay(graph, prior_bytes)
                 if (prior_bytes := record.get("haplotype_prior_overlay.bytes"))
@@ -591,8 +655,8 @@ def _diplotypes_in_topk_shard(
                 params=sampler_params,
             )
             sampler.initialize_scores(counts)
-            haplotypes = sampler.sample_haplotypes(n=max_haplotypes)
-            diplotypes = sampler.sample_diplotypes(haplotypes, n=max_diplotypes)
+            haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
+            diplotypes = sampler.sample_diplotypes(haplotypes, n=cfg.graph.max_diplotypes)
             assert len(haplotypes) > 0, f"No haplotypes sampled for region {region_string} in shard {shard_path}"
 
             # Translate haplotypes to sets of (variant_id, allele) pairs they are compatible with
@@ -607,7 +671,7 @@ def _diplotypes_in_topk_shard(
 
                 alleles = genotype.alleles
                 missing_count = sum(allele < 0 for allele in alleles)
-                if missing_count == len(alleles) and missing_are_ref:
+                if missing_count == len(alleles) and cfg.graph.missing_are_ref:
                     # Treat fully missing genotypes as all REF alleles (e.g., when derived from high-quality assemblies)
                     alleles = (0,) * ploidy  
                 elif missing_count > 0:
@@ -744,20 +808,15 @@ def diplotypes_in_topk(
         assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.graph.kmer_size, "Filtered k-mer database has unexpected k"
 
         # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
-        haplotype_sampler_params = cast(dict, OmegaConf.to_container(cfg.graph.haplotype_sampler_params, resolve=True))
-        haplotype_sampler_params.pop("_target_")
         pending = [
             _diplotypes_in_topk_shard.remote( # type: ignore
+                cfg,
                 shard_path,
                 str(vcf_path),
                 sample.name,
                 str(filtered_kmer_path),
                 kmer_coverage=sample.kmer_coverage,
                 min_variant_size=min_variant_size,
-                max_haplotypes=cfg.graph.max_haplotypes,
-                max_diplotypes=cfg.graph.max_diplotypes,
-                haplotype_sampler_params=haplotype_sampler_params,
-                missing_are_ref=cfg.graph.missing_are_ref,
             )
             for shard_path in graph_shards
         ]

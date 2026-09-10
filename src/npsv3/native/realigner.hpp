@@ -73,9 +73,12 @@ class RealignedFragment {
   typedef RealignedReadPair::score_type score_type;
 
   RealignedFragment(const sl::BamRecord& read1, const sl::BamRecord& read2, const IndexedSequence&,
-                    const InsertSizeDistribution&, int quality_offset = 33);
+                    const InsertSizeDistribution&, int quality_offset = 33,
+                    double keep_sec_with_frac_of_primary_score = 0.9, int max_secondary = 10);
 
   PairSequence::size_type NumAlignments() const { return read_pairs_.size(); }
+  sl::BamRecordVector::size_type NumRead1Alignments() const { return read1_alignments_.size(); }
+  sl::BamRecordVector::size_type NumRead2Alignments() const { return read2_alignments_.size(); }
 
   bool HasBestPair() const { return !read_pairs_.empty(); }
   const RealignedReadPair& BestPair() const { return read_pairs_.front(); }
@@ -105,8 +108,10 @@ class IndexedSequence {
   const std::string& IUPACSequence() const;
   void SetIUPACSequence(const sl::UnalignedSequence& sequence) { iupac_sequence_ = sequence; }
 
-  void AlignSequence(const sl::BamRecord& read, sl::BamRecordVector& alignments) const;
-  void AlignSequence(const std::string& name, const std::string& seq, sl::BamRecordVector& alignments) const;
+  void AlignSequence(const sl::BamRecord& read, sl::BamRecordVector& alignments,
+                     double keep_sec_with_frac_of_primary_score = 0.9, int max_secondary = 10) const;
+  void AlignSequence(const std::string& name, const std::string& seq, sl::BamRecordVector& alignments,
+                     double keep_sec_with_frac_of_primary_score = 0.9, int max_secondary = 10) const;
 
  private:
   sl::UnalignedSequence sequence_;
@@ -135,6 +140,13 @@ class FragmentRealigner {
   AltIndexesSequence alt_indexes_;
 
   BamWriters alt_writers_;
+
+  // BWA secondary-alignment reporting thresholds, forwarded to IndexedSequence::AlignSequence (see that
+  // function's comment in realigner.cpp for what these do and don't control). Overridable via the
+  // "keep_sec_with_frac_of_primary_score"/"max_secondary" constructor kwargs; defaults match the values
+  // that were previously hardcoded at the AlignSequence call site.
+  double keep_sec_with_frac_of_primary_score_ = 0.9;
+  int max_secondary_ = 10;
 
   sl::BamHeader RefHeader() const { return ref_index_.Header(); }
   sl::BamHeader AltHeader(int index) const { return alt_indexes_[index].Header(); }

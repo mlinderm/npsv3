@@ -297,16 +297,16 @@ def _find_or_create_kmc_db(
         if read_path.endswith(".cram"):
             # KMC does not support CRAM so convert to BAM. We don't convert to FASTQ because that requires sorting.
             bam_path = os.path.join(tmp_dir, "reads.bam")
-            convert_commandline = f"samtools view -@ {threads} --bam --reference {quote(reference_path)} -o {bam_path} {quote(read_path)}"
+            convert_commandline = f"samtools view -@ {threads} --bam -1 --reference {quote(reference_path)} -o {bam_path} {quote(read_path)}"
             subprocess.check_call(
                 convert_commandline,
                 shell=True,
-                stderr=subprocess.DEVNULL,
             )
             read_path = bam_path
 
+        # We observe deadlock with KMC, so try limiting the number of threads.
         kmc_commandline = f"kmc \
-            -t{threads} \
+            -t{min(threads, 6)} \
             -m{max_memory} -sm \
             -k{kmer_size} \
             {'-b' if not canonicalize else ""} \
@@ -444,7 +444,7 @@ def compute_read_stats(cfg: omegaconf.DictConfig, read_path: str, kmc_prefix: st
             read_path,
             kmc_prefix,
             reference_path=cfg.reference,
-            kmer_size=cfg.kmer.kmer_size,
+            kmer_size=cfg.graph.kmer_size,
             threads=cfg.threads,
         )
         stats["kmc_prefix"] = kmc_prefix

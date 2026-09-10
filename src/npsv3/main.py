@@ -76,8 +76,19 @@ def main(cfg: DictConfig) -> None:
     elif cfg.command == "images":
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "stats_path"])
+        _make_paths_absolute(cfg, ["reference", "reads", "input", "stats_path", "unique_kmer_path", "filtered_kmer_path"])
         _check_shared_reference(cfg)
+
+        # Collect pre-generated graph shards if specified, otherwise generate them on-the-fly (slower)
+        graph_shards = None
+        if not OmegaConf.is_missing(cfg, "graph_shards") and OmegaConf.select(cfg, "graph_shards") is not None:
+            # Pre-expand shard patterns using the '::' separator also used by WebDataset, and glob each pattern to find matching files
+            graph_shards = list(
+                itertools.chain.from_iterable(
+                    glob.glob(hydra.utils.to_absolute_path(shard)) for shard in cfg.graph_shards.split("::")
+                )
+            )
+            graph_shards.sort()  # Sort for deterministic order, since glob order is arbitrary
 
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
 
@@ -87,13 +98,16 @@ def main(cfg: DictConfig) -> None:
         vcf_to_examples = hydra.utils.get_method(cfg.pileup.example_fn)
         vcf_to_examples(
             cfg,
-            hydra.utils.to_absolute_path(cfg.reads),
+            cfg.reads,
             sample,
-            hydra.utils.to_absolute_path(cfg.input),
+            cfg.input,
             output,
-            background_vcf=hydra.utils.to_absolute_path(cfg.background),
             progress_bar=True,
+            graph_shards=graph_shards,
+            unique_kmer_path=OmegaConf.select(cfg, "unique_kmer_path"),
+            filtered_kmer_path=OmegaConf.select(cfg, "filtered_kmer_path"),
         )
+
     elif cfg.command == "train":
         import torch
 

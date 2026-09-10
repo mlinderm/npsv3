@@ -1,2 +1,7 @@
 # @package _global_
 command: images
+
+# Pre-computed graphs and k-mer sets (if available)
+graph_shards: null
+unique_kmer_path: null
+filtered_kmer_path: null
