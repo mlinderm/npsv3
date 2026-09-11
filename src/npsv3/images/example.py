@@ -28,6 +28,7 @@ from npsv3.graphs.haplotype import (
     UniqueKmersOverlay,
     _filter_variants,
     add_population_haplotypes,
+    build_kmer_evidence_index,
     prepare_genotyping_haplotypes,
     serialize_graph_and_unique_kmers,
 )
@@ -94,6 +95,7 @@ def make_graph_example(
     cfg,
     graph: Graph,
     sampler: HaplotypeSamplerOverlay,
+    unique_kmers: UniqueKmersOverlay,
     region: Range,
     vcf_path: str,
     sample: Sample,
@@ -103,6 +105,7 @@ def make_graph_example(
     generator: ImageGenerator | None = None,
     addl_features: dict | None = None,
     ploidy: int = 2,
+    agreement_sink=None,
     **kwargs,
 ):
     with contextlib.ExitStack() as stack:
@@ -190,8 +193,23 @@ def make_graph_example(
                 fasta.write(right_flank)
                 fasta.write("\n")
 
-        addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
-        realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
+        # The BWA realigner (channels 6/7) and the k-mer evidence index (channel 8, Stage 1 of the
+        # "Cheaper allele evidence" plan) are independently gated by `pileup.allele_evidence` so that the
+        # `kmer`-only production path can skip the realigner's per-(fragment, allele) BWA cost entirely --
+        # the whole point of the k-mer path. `both` builds both, for the dual-run agreement harness.
+        realigner = None
+        if cfg.pileup.allele_evidence in ("bwa", "both"):
+            addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
+            realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
+
+        kmer_index = None
+        if cfg.pileup.allele_evidence in ("kmer", "both"):
+            kmer_index = build_kmer_evidence_index(cfg, graph, sampler, unique_kmers, haplotypes, left_flank, right_flank)
+
+        # Shared across the real image and every simulated-genotype image below: the same haplotype/ploidy-copy
+        # split BAM is reused, unmodified, across every genotype combination that includes that haplotype, so
+        # this avoids re-realigning identical fragments once per genotype.
+        realign_cache = {}
 
         # TODO: Do we need to pad out the shorter sequences so everything has identical length?
 
@@ -210,14 +228,39 @@ def make_graph_example(
                     downsample=cfg.pileup.downsample,
                 )
 
-            image_tensor = generator.generate(
-                local_read_path,
-                sample,
-                region,
-                realigner=realigner,
-                ref_seq=ref_seq,
-                compress=True,
-            )
+            if agreement_sink is not None:
+                # Dual-run agreement harness (see images/agreement.py): tag the sink with this region's
+                # context and capture the pre-resize/pre-channel-select tensor too, so channel 6/7 vs. 8
+                # pixel correlation is possible -- restricted to the real image (not the simulated-genotype
+                # loop below), which is the most representative comparison and keeps harness cost bounded.
+                agreement_sink.region_label = str(region)
+                agreement_sink.image_index = 0
+                agreement_sink.analysis_variants = analysis_variants
+                agreement_sink.num_alleles = len(haplotypes)
+                image_tensor, raw_image = generator.generate(
+                    local_read_path,
+                    sample,
+                    region,
+                    realigner=realigner,
+                    kmer_index=kmer_index,
+                    ref_seq=ref_seq,
+                    realign_cache=realign_cache,
+                    compress=True,
+                    agreement_sink=agreement_sink,
+                    return_raw=True,
+                )
+                agreement_sink.raw_image = raw_image
+            else:
+                image_tensor = generator.generate(
+                    local_read_path,
+                    sample,
+                    region,
+                    realigner=realigner,
+                    kmer_index=kmer_index,
+                    ref_seq=ref_seq,
+                    realign_cache=realign_cache,
+                    compress=True,
+                )
 
         example["image"] = image_tensor
         if addl_features:
@@ -291,7 +334,9 @@ def make_graph_example(
                 repl_sample,
                 region,
                 realigner=realigner,
+                kmer_index=kmer_index,
                 ref_seq=ref_seq,
+                realign_cache=realign_cache,
                 compress=True,
             )
             replicate_images.append(synth_image_tensor)
@@ -308,6 +353,14 @@ class ExampleActor:
     def __init__(self, index: int, output_dir: str, cfg):
         self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar.gz")
         self.cfg = cfg
+
+        # If NPSV3_REALIGN_PROFILE profiling is requested, give this actor's process its own aux log file
+        # alongside its webdataset shard, rather than every actor in the pool interleaving REALIGN_PROFILE
+        # lines onto a shared stderr. Native code (realigner.cpp) picks this up via getenv on first use, so
+        # it must be set before any realignment happens in this process -- true here since __init__ always
+        # runs before from_shard/from_graph. No-op (and no file created) unless profiling is enabled.
+        if os.environ.get("NPSV3_REALIGN_PROFILE"):
+            os.environ["NPSV3_REALIGN_PROFILE_PATH"] = os.path.join(output_dir, f"images-{index:04d}.realign_profile.log")
 
         self._writer = wds.TarWriter(self.output_path)
 
@@ -347,12 +400,14 @@ class GraphWriter(ExampleActor):
         region: Range,
         graph: Graph,
         sampler: HaplotypeSamplerOverlay,
+        unique_kmers: UniqueKmersOverlay,
         analysis_variants: Sequence[Variant],
     ) -> dict:
         return make_graph_example(
             self.cfg,
             graph,
             sampler,
+            unique_kmers,
             region,
             self.vcf_path,
             self.sample,
@@ -395,7 +450,7 @@ class GraphWriter(ExampleActor):
                 try:
                     # Attempt to gracefully timeout long running regions.
                     with Timeout(self.cfg.timeout):
-                        example = self.from_graph(region, graph, sampler, analysis_variants)
+                        example = self.from_graph(region, graph, sampler, unique_kmers, analysis_variants)
                 except TimeoutError:
                     logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
                     continue

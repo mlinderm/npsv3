@@ -294,6 +294,7 @@ class PileupRead:
         allele=AlleleRealignment(),
         phase_tag: str = "HP",
         read_allele=AlleleRealignment(),
+        kmer_evidence=None,
     ):
         self._read = read
         self.region = _read_region(read, read.cigartuples)
@@ -301,6 +302,10 @@ class PileupRead:
         self.insert_zscore = insert_zscore
         self.phase = self._read.get_tag(phase_tag) if self._read.has_tag(phase_tag) else None
         self.read_allele = read_allele
+        # (ref_votes, alt_votes, multi_occurrence_hits) from KmerEvidenceIndex.scan() -- the first two are
+        # arrays in query coordinates, the third a per-read scalar (see ImageGenerator._scan_kmer_evidence)
+        # -- or None if k-mer evidence wasn't computed for this read.
+        self._kmer_evidence = kmer_evidence
 
     @property
     def read_start(self):
@@ -316,6 +321,12 @@ class PileupRead:
 
     def baseq(self, read_slice):
         return self._read.query_qualities[read_slice]
+
+    def kmer_votes(self, read_slice):
+        if self._kmer_evidence is None:
+            return None, None
+        ref_votes, alt_votes, _multi_occurrence_hits = self._kmer_evidence
+        return ref_votes[read_slice], alt_votes[read_slice]
 
 
 class PileupInsert:
@@ -334,6 +345,9 @@ class PileupInsert:
 
     def baseq(self, read_slice):
         return None
+
+    def kmer_votes(self, read_slice):
+        return None, None
 
 
 class ReadPileup:
@@ -392,12 +406,20 @@ class ReadPileup:
         allele=AlleleRealignment(),
         read1_realignment=AlleleRealignment(),
         read2_realignment=AlleleRealignment(),
+        read1_kmer_evidence=None,
+        read2_kmer_evidence=None,
         **attributes,
     ):
         if fragment.read1:
-            read1 = self.add_read(fragment.read1, phase_tag=phase_tag, allele=allele, read_allele=read1_realignment, **attributes)
+            read1 = self.add_read(
+                fragment.read1, phase_tag=phase_tag, allele=allele, read_allele=read1_realignment,
+                kmer_evidence=read1_kmer_evidence, **attributes
+            )
         if fragment.read2:
-            read2 = self.add_read(fragment.read2, phase_tag=phase_tag, allele=allele, read_allele=read2_realignment, **attributes)
+            read2 = self.add_read(
+                fragment.read2, phase_tag=phase_tag, allele=allele, read_allele=read2_realignment,
+                kmer_evidence=read2_kmer_evidence, **attributes
+            )
         if add_insert and fragment.is_properly_paired and (fragment.read1.reference_end < fragment.read2.reference_start):
             # Phasing information passes through to insert bases
             assert read1.phase == read2.phase, "Phasing specification doesn't match between reads in pair"

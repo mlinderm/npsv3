@@ -22,6 +22,7 @@
 
 #include "graph.hpp"
 #include "kmer.hpp"
+#include "kmer_evidence.hpp"
 #include "haplotype.hpp"
 
 namespace nb = nanobind;
@@ -212,6 +213,33 @@ NB_MODULE(_native_graph, m) {
     .def("save_bytes", [](const npsv3::UniqueKmersOverlay& overlay) {
       return SaveAsBytearray(overlay);
     })
+    ;
+
+  // Per-region exact k-mer index mapping k-mers to sampled-allele membership, used to accumulate
+  // per-base ref/alt vote evidence for a read in a single forward pass rather than one BWA realignment
+  // per (read, allele) pair -- see kmer_evidence.hpp / the "Cheaper allele evidence" plan, Stage 1.
+  nb::class_<npsv3::KmerEvidenceIndex>(m, "KmerEvidenceIndex")
+    // `all`/`local_unique` evidence_kmer_set: build directly from full haplotype sequences (allele 0 must
+    // be the reference).
+    .def("__init__", [](npsv3::KmerEvidenceIndex* self, const std::vector<std::string>& haplotype_sequences,
+                         size_t k, bool exclude_local_multi) {
+      new (self) npsv3::KmerEvidenceIndex(haplotype_sequences, k, exclude_local_multi);
+    }, "haplotype_sequences"_a, "k"_a, "exclude_local_multi"_a = false)
+    // `graph_unique` evidence_kmer_set: build from a pre-enumerated k-mer set plus per-k-mer allele
+    // bitmasks, as produced by transposing HaplotypeSamplerOverlay.kmers_on_path() over the sampled
+    // haplotypes.
+    .def("__init__", [](npsv3::KmerEvidenceIndex* self, const std::vector<std::string>& kmer_sequences,
+                         const std::vector<uint16_t>& masks, size_t k, size_t num_alleles) {
+      new (self) npsv3::KmerEvidenceIndex(kmer_sequences, masks, k, num_alleles);
+    }, "kmer_sequences"_a, "masks"_a, "k"_a, "num_alleles"_a)
+    .def_prop_ro("k", &npsv3::KmerEvidenceIndex::k)
+    .def_prop_ro("num_alleles", &npsv3::KmerEvidenceIndex::num_alleles)
+    .def("__len__", &npsv3::KmerEvidenceIndex::size)
+    .def("scan", [](const npsv3::KmerEvidenceIndex& self, const std::string& seq,
+                     std::optional<std::vector<uint8_t>> base_qualities, uint8_t min_baseq) {
+      auto result = self.Scan(seq, base_qualities ? &*base_qualities : nullptr, min_baseq);
+      return nb::make_tuple(std::move(result.ref_votes), std::move(result.alt_votes), result.multi_occurrence_hits);
+    }, "seq"_a, "base_qualities"_a = nb::none(), "min_baseq"_a = 0)
     ;
 
   nb::class_<npsv3::KmerCounts>(m, "KmerCounts")

@@ -43,6 +43,28 @@ haplotag_sim: false
 anchor_min_aligned: 3
 assign_delta: 1.0
 
+# Stage 1 ("Cheaper allele evidence for image generation") per-base k-mer allele-evidence channel (8).
+# "bwa" preserves today's behavior (channels 6/7 only, via FragmentRealigner); "kmer" replaces the
+# per-(fragment, allele) BWA realignment with a single per-read k-mer scan (channel 8 only, no channel
+# 6/7 data); "both" runs both engines on every fragment, for the dual-run agreement harness.
+allele_evidence: "bwa"
+# K-mer size for the evidence index. Deliberately decoupled from graph.kmer_size (which is hard-bound to
+# the sample KMC database and on-disk cache directory names); only needs to disambiguate within the
+# handful of sampled haplotypes at a region, not across the whole genome.
+evidence_kmer_size: 21
+# "all": index every k-mer of the sampled (flanked) haplotype sequences, no filtering.
+# "local_unique": as "all", but drop any k-mer occurring more than once within a single haplotype.
+# "graph_unique": reuse the already-built UniqueKmersOverlay k-mer set (locked to graph.kmer_size).
+evidence_kmer_set: "local_unique"
+# If > 0, k-mer windows containing a base with quality below this threshold are skipped, same as a hash
+# miss. Off by default -- see plan constraint 1 (do not weight or gate votes by default).
+evidence_min_baseq: 0
+# Channel 8 pixel encoding (plan 1b): pixel 0 means "no informative k-mer window here"; otherwise
+# center_pixel +/- pixel_range*contrast, contrast scaled so a saturated tent apex (evidence_kmer_size - 1
+# votes) lands near the rails.
+kmer_evidence_center_pixel: 128
+kmer_evidence_pixel_range: 124
+
 save_realignment_bam_dir: null
 
 # Downsample reads to this fraction of the total reads

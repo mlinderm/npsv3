@@ -23,6 +23,7 @@ from npsv3._native_graph import HaplotypePriorOverlay as HaplotypePriorOverlay
 from npsv3._native_graph import HaplotypeSamplerOverlay as HaplotypeSamplerOverlay
 from npsv3._native_graph import KmerClassify as KmerClassify
 from npsv3._native_graph import KmerCounts as KmerCounts
+from npsv3._native_graph import KmerEvidenceIndex as KmerEvidenceIndex
 from npsv3._native_graph import KmerZygosity as KmerZygosity
 from npsv3._native_graph import UniqueKmersOverlay as UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
@@ -504,6 +505,61 @@ def prepare_genotyping_haplotypes(
         true_hap_idxs[allele_idx] = hap_idx
 
     return haplotypes, alleles, true_hap_idxs
+
+
+def build_kmer_evidence_index(
+    cfg,
+    graph: Graph,
+    sampler: HaplotypeSamplerOverlay,
+    unique_kmers: UniqueKmersOverlay,
+    haplotypes: Sequence[Sequence[int]],
+    left_flank: str,
+    right_flank: str,
+) -> KmerEvidenceIndex:
+    """Build the per-region k-mer allele-evidence index feeding image channel 8 (Stage 1 of the "Cheaper
+    allele evidence for image generation" plan), from the same sampled haplotypes already prepared for
+    genotyping (`prepare_genotyping_haplotypes`/`add_population_haplotypes`; the reference haplotype is
+    guaranteed to be at index 0).
+
+    The k-mer set is selected by `cfg.pileup.evidence_kmer_set`:
+      - "all" / "local_unique": index every k-mer of the (flanked) haplotype sequences already
+        materialized for the realigner's FASTA, exact-matched at `cfg.pileup.evidence_kmer_size`.
+        "local_unique" additionally drops any k-mer occurring more than once within a single haplotype
+        (plan constraint 2's cheap multi-occurrence fix); "all" does not.
+      - "graph_unique": reuse the already-built, already-deserialized `unique_kmers` overlay k-mer set
+        (locked to `cfg.graph.kmer_size`), transposing `sampler.kmers_on_path()` over the sampled
+        haplotypes into a per-k-mer allele mask (plan constraint 2's `graph_unique` setting).
+
+    Args:
+        cfg: Global configuration (reads `pileup.evidence_kmer_set`, `pileup.evidence_kmer_size`, and,
+            for "graph_unique", `graph.kmer_size`).
+        graph (Graph): Graph for the region, used to obtain each haplotype's sequence for "all"/"local_unique".
+        sampler (HaplotypeSamplerOverlay): Used to translate haplotypes into graph-unique k-mer membership
+            for "graph_unique".
+        unique_kmers (UniqueKmersOverlay): The region's graph-unique k-mer set, for "graph_unique".
+        haplotypes (Sequence[Sequence[int]]): Sampled haplotypes (each a sequence of node IDs), reference
+            haplotype at index 0. Not modified.
+        left_flank (str): Reference-derived flank sequence prepended to every haplotype's own sequence,
+            matching the realigner FASTA (see `make_graph_example`). Only used for "all"/"local_unique".
+        right_flank (str): As `left_flank`, appended after every haplotype's own sequence.
+
+    Returns:
+        KmerEvidenceIndex: The built index, ready for per-read `scan()` calls.
+    """
+    kmer_set = cfg.pileup.evidence_kmer_set
+    if kmer_set in ("all", "local_unique"):
+        sequences = [left_flank + graph.path_sequence(haplotype) + right_flank for haplotype in haplotypes]
+        return KmerEvidenceIndex(
+            sequences, cfg.pileup.evidence_kmer_size, exclude_local_multi=(kmer_set == "local_unique")
+        )
+    elif kmer_set == "graph_unique":
+        num_alleles = len(haplotypes)
+        masks = np.zeros(sampler.num_kmers(), dtype=np.uint16)
+        for allele_idx, haplotype in enumerate(haplotypes):
+            masks[np.asarray(sampler.kmers_on_path(haplotype), dtype=np.int64)] |= np.uint16(1 << allele_idx)
+        return KmerEvidenceIndex(unique_kmers.sequences, masks.tolist(), cfg.graph.kmer_size, num_alleles)
+    else:
+        raise ValueError(f"Unknown pileup.evidence_kmer_set: {kmer_set!r}")
 
 
 def add_population_haplotypes(

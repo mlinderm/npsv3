@@ -175,6 +175,7 @@ add_library(graph STATIC
   "${SOURCE_DIR}/native/variant.cpp"
   "${SOURCE_DIR}/native/graph.cpp"
   "${SOURCE_DIR}/native/kmer.cpp"
+  "${SOURCE_DIR}/native/kmer_evidence.cpp"
   "${SOURCE_DIR}/native/haplotype.cpp"
 )
 set_target_properties(graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -237,6 +238,7 @@ add_executable(graph_test
   "${TEST_DIR}/native/test_graph.cpp"
   "${TEST_DIR}/native/test_helpers.cpp"
   "${TEST_DIR}/native/test_kmer.cpp"
+  "${TEST_DIR}/native/test_kmer_evidence.cpp"
   "${TEST_DIR}/native/test_range.cpp"
   "${TEST_DIR}/native/test_haplotype.cpp"
 )

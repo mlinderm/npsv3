@@ -1,6 +1,7 @@
 #include "realigner.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <nanobind/stl/string.h>
@@ -21,11 +22,34 @@ namespace {
 // per allele realignment plus one per-call total, so a run pathologically slow in this code (e.g. many BWA
 // secondary alignments in a repetitive/dense region, blowing up the pairwise combination) shows up as large
 // read1_alignments/read2_alignments/read_pairs counts and ms on specific alleles/fragments, distinguishing that
-// from a simple linear cost that scales only with allele count and haplotype length. Negligible overhead when
-// disabled (one getenv call, cached in a function-local static).
+// from a simple linear cost that scales only with allele count and haplotype length. Each per-allele line also
+// reports the best pair's alignment score (log10 P(data|alignment)) and edit distance (NM, summed over the
+// pair's reads; -1 if there is no best pair or no NM tag), which lets a run additionally distinguish "slow
+// because many secondary hits" from "slow because the read diverges from this allele" (high NM/low score) --
+// e.g. to test whether cost correlates more with divergence than with the alignment counts already logged.
+// Negligible overhead when disabled (one getenv call, cached in a function-local static).
 bool RealignProfilingEnabled() {
   static const bool enabled = std::getenv("NPSV3_REALIGN_PROFILE") != nullptr;
   return enabled;
+}
+
+// Where profiling lines go: NPSV3_REALIGN_PROFILE_PATH, if set, opened once (append mode) and reused for the
+// life of the process -- one FragmentRealigner is constructed per region, but a Ray actor process handles many
+// regions in sequence, so this lets a driver give each actor its own file (e.g. alongside that actor's
+// webdataset shard) instead of every actor's lines interleaving on a shared stderr. Falls back to stderr, the
+// prior behavior, if the variable is unset or the path can't be opened. Only ever consulted when profiling is
+// enabled, so there is no cost in the disabled case.
+FILE* RealignProfileStream() {
+  static FILE* const stream = []() -> FILE* {
+    const char* path = std::getenv("NPSV3_REALIGN_PROFILE_PATH");
+    if (path && *path) {
+      if (FILE* file = std::fopen(path, "a")) return file;
+      fmt::print(stderr, "NPSV3_REALIGN_PROFILE_PATH={} could not be opened for writing; falling back to stderr\n",
+                 path);
+    }
+    return stderr;
+  }();
+  return stream;
 }
 
 using RealignProfileClock = std::chrono::steady_clock;
@@ -463,15 +487,34 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
   const size_t this_call = profiling ? call_index++ : 0;
   const auto call_start = profiling ? RealignProfileClock::now() : RealignProfileClock::time_point{};
 
+  // Edit distance (sum over the pair's reads, from BWA's "NM" tag) of the best-scoring pair for one allele
+  // realignment, or -1 if there is no best pair / no NM tag -- reported alongside score/ms so a profiling run
+  // can distinguish "slow because divergent" (high NM) from "slow because many secondary hits" (see the
+  // read1_alignments/read2_alignments/read_pairs counts already logged above).
+  auto best_pair_nm = [](const RealignedFragment& realignment) -> int32_t {
+    if (!realignment.HasBestPair()) return -1;
+    const auto& pair = realignment.BestPair();
+    int32_t total = 0, nm;
+    bool any = false;
+    if (pair.Left() && pair.Left()->GetIntTag("NM", nm)) { total += nm; any = true; }
+    if (pair.Right() && pair.Right()->GetIntTag("NM", nm)) { total += nm; any = true; }
+    return any ? total : -1;
+  };
+  auto best_pair_score = [](const RealignedFragment& realignment) -> RealignedFragment::score_type {
+    return realignment.HasBestPair() ? realignment.BestPair().Score() : NAN;
+  };
+
   // Realign the fragment to the reference allele
   auto allele_start = profiling ? RealignProfileClock::now() : RealignProfileClock::time_point{};
   RealignedFragment ref_realignment(read1, read2, ref_index_, insert_size_dist_, 33,
                                     keep_sec_with_frac_of_primary_score_, max_secondary_);
   if (profiling) {
-    fmt::print(stderr,
-               "REALIGN_PROFILE call={} allele=ref ms={:.3f} read1_alignments={} read2_alignments={} read_pairs={}\n",
+    fmt::print(RealignProfileStream(),
+               "REALIGN_PROFILE call={} allele=ref ms={:.3f} read1_alignments={} read2_alignments={} "
+               "read_pairs={} score={:.3f} nm={}\n",
                this_call, RealignElapsedMs(allele_start), ref_realignment.NumRead1Alignments(),
-               ref_realignment.NumRead2Alignments(), ref_realignment.NumAlignments());
+               ref_realignment.NumRead2Alignments(), ref_realignment.NumAlignments(),
+               best_pair_score(ref_realignment), best_pair_nm(ref_realignment));
   }
   std::vector<RealignedFragment::score_type> total_log_prob(NumAltAlleles(), ref_realignment.TotalLogProb());
 
@@ -483,20 +526,28 @@ FragmentRealigner::RealignTuple FragmentRealigner::RealignReadPair(const std::st
                                   keep_sec_with_frac_of_primary_score_, max_secondary_);
     if (profiling) {
       fmt::print(
-          stderr, "REALIGN_PROFILE call={} allele=alt_{} ms={:.3f} read1_alignments={} read2_alignments={} read_pairs={}\n",
+          RealignProfileStream(),
+          "REALIGN_PROFILE call={} allele=alt_{} ms={:.3f} read1_alignments={} read2_alignments={} "
+          "read_pairs={} score={:.3f} nm={}\n",
           this_call, i, RealignElapsedMs(allele_start), alt_realignments.back().NumRead1Alignments(),
-          alt_realignments.back().NumRead2Alignments(), alt_realignments.back().NumAlignments());
+          alt_realignments.back().NumRead2Alignments(), alt_realignments.back().NumAlignments(),
+          best_pair_score(alt_realignments.back()), best_pair_nm(alt_realignments.back()));
     }
     total_log_prob[i] = LogSumPow(total_log_prob[i], alt_realignments.back().TotalLogProb());
   }
 
   if (profiling) {
-    fmt::print(stderr, "REALIGN_PROFILE call={} stage=total ms={:.3f} num_alt_alleles={}\n", this_call,
+    FILE* stream = RealignProfileStream();
+    fmt::print(stream, "REALIGN_PROFILE call={} stage=total ms={:.3f} num_alt_alleles={}\n", this_call,
                RealignElapsedMs(call_start), NumAltAlleles());
+    // Flush per fragment (not per line) so a file target survives an actor crash/kill with at most one
+    // fragment's worth of buffered lines lost, without paying a flush on every allele-realignment.
+    if (stream != stderr) std::fflush(stream);
   }
 
-  // Store the score for each read in fragment
-  std::vector<RealignedFragment::score_type> read_scores(4, 0);
+  // Store the score for each read in fragment. NaN (rather than 0, which would decode as a
+  // log10 probability of 1, i.e. maximal support) marks a read/allele with no valid alignment.
+  std::vector<RealignedFragment::score_type> read_scores(4, NAN);
 
   RealignedFragment::score_type ref_score = NAN, ref_quality = 0;
   if (ref_realignment.HasBestPair()) {

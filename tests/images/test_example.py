@@ -67,6 +67,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             cfg,
             graph,
             sampler,
+            unique_kmers,
             region,
             vcf_path,
             hg00733_sample,
