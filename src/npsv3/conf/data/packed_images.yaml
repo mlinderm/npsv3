@@ -10,3 +10,6 @@ pad: false
 resampled: false
 epoch_batches: null
 patch_size: ${oc.select:model.patch_size,16}
+# Read genotypes-major (G, R, H, W, C) shards written before the replicates-major convention
+legacy_axis_order: false
+

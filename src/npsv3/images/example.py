@@ -1,13 +1,19 @@
 import contextlib
+import csv
+import gzip
+import io
 import itertools
+import json
 import logging
 import math
 import os
 import random
 import shutil
 import sys
+import tarfile
 import tempfile
 import typing
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -349,9 +355,182 @@ def make_graph_example(
 
 
 
+PIXEL_COMPRESS_LEVEL = 1
+"""zlib level for per-member pixel compression. Pileup pixels are ~38% exact zeros, so level 1
+already reaches ~7.6x; higher levels cost generation time for very little.
+"""
+
+MANIFEST_COLUMNS = ("key", "r", "g", "h", "w", "c", "shard", "sample", "label")
+"""Per-actor manifest schema. Used offline only -- for choosing `packing_buffer_size`, simulating
+occupancy and dataset statistics -- never by energon at training time.
+"""
+
+
+def energon_key(sample_name: str, region: Range) -> str:
+    """Globally unique, dot-free key for a region's example.
+
+    Today's `__key__` is just `region.slug`, which collides across samples once the per-sample trees
+    are merged. WebDataset splits the key from the extension at the **first** dot, so a dot anywhere
+    in the key (hg38 alt/decoy contigs like `GL000207.1` have them) would silently truncate it.
+    Dots become underscores rather than being deleted, so distinct contigs stay distinct.
+    """
+    key = f"{sample_name}_{region.slug}".replace(".", "_")
+    assert "." not in key, f"Energon key {key!r} must not contain a dot"
+    return key
+
+
+class ExampleWriter(ABC):
+    """Writes generated examples to one shard stream owned by a single actor."""
+
+    @abstractmethod
+    def write(self, example: dict, *, region: Range, sample_name: str) -> None: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
+
+
+class WebDatasetExampleWriter(ExampleWriter):
+    """Today's single gzipped WebDataset tar, unchanged byte-for-byte."""
+
+    def __init__(self, index: int, output_dir: str):
+        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar.gz")
+        self._writer = wds.TarWriter(self.output_path)
+
+    def write(self, example: dict, *, region: Range, sample_name: str) -> None:  # noqa: ARG002
+        sample = {
+            "__key__": region.slug,
+            "region.txt": example["region"],
+            "image.npy.gz": example["image"],
+        }
+        if "label" in example:
+            sample["label.cls"] = example["label"]
+        if "label.rank" in example:
+            sample["label.rank.npy"] = example["label.rank"]
+        if "sim.images" in example:
+            sample["sim.images.npy.gz"] = example["sim.images"]
+        self._writer.write(sample)
+
+    def close(self) -> None:
+        self._writer.close()
+
+
+class EnergonExampleWriter(ExampleWriter):
+    """Polylithic energon trees: a tiny JSON metadata shard beside a gzipped pixel shard.
+
+    The split is what lets the packing buffer decide a pack from metadata alone -- `g`, `r` and the
+    geometry are all the cost function needs -- and only then fetch the pixels for the groups that
+    were actually selected. `label_rank` rides along in the JSON (a few dozen ints) so
+    `pack_selected_samples` does not need a third fetch.
+
+    Both tars are plain, uncompressed `.tar` with per-member gzip: gzipping the tar itself would
+    destroy the random access within a shard that the aux lookup depends on.
+    """
+
+    def __init__(self, index: int, output_dir: str):
+        meta_dir = os.path.join(output_dir, "meta_ds")
+        pixel_dir = os.path.join(output_dir, "pixel_ds")
+        os.makedirs(meta_dir, exist_ok=True)
+        os.makedirs(pixel_dir, exist_ok=True)
+
+        self.meta_path = os.path.join(meta_dir, f"meta-{index:04d}.tar")
+        self.pixel_path = os.path.join(pixel_dir, f"px-{index:04d}.tar")
+        self.manifest_path = os.path.join(output_dir, f"manifest-{index:04d}.csv.gz")
+
+        self._meta_tar = tarfile.open(self.meta_path, "w")
+        self._pixel_tar = tarfile.open(self.pixel_path, "w")
+        self._manifest_file = gzip.open(self.manifest_path, "wt", newline="", compresslevel=PIXEL_COMPRESS_LEVEL)
+        self._manifest = csv.writer(self._manifest_file)
+        self._manifest.writerow(MANIFEST_COLUMNS)
+
+        self._shard_name = os.path.basename(self.pixel_path)
+
+    @staticmethod
+    def _add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mtime = 0  # Deterministic shards, so a regenerated shard compares byte-for-byte
+        tar.addfile(info, io.BytesIO(data))
+
+    @staticmethod
+    def _compress(array: np.ndarray) -> bytes:
+        assert array.dtype == np.uint8, f"Expected uint8 pixels, got {array.dtype}"
+        return gzip.compress(np.ascontiguousarray(array).tobytes(), compresslevel=PIXEL_COMPRESS_LEVEL, mtime=0)
+
+    def write(self, example: dict, *, region: Range, sample_name: str) -> None:
+        key = energon_key(sample_name, region)
+
+        real = np.asarray(example["image"])
+        height, width, channels = real.shape
+
+        sims = example.get("sim.images")
+        if sims is None:
+            num_replicates = num_genotypes = 0
+        else:
+            sims = np.asarray(sims)
+            # Replicates-major (R, G, H, W, C), the single convention in the codebase
+            num_replicates, num_genotypes = sims.shape[:2]
+            assert sims.shape[2:] == real.shape, f"Simulated images {sims.shape} disagree with the real image {real.shape}"
+
+        # `label` is the canonical positive; `label.rank` is its derived view, recorded rather than
+        # recomputed so the ranking rule can evolve without invalidating shards. Both are null for
+        # unlabeled examples.
+        label = example.get("label")
+        label_rank = example.get("label.rank")
+        self._add(
+            self._meta_tar,
+            f"{key}.json",
+            json.dumps(
+                {
+                    "r": num_replicates,
+                    "g": num_genotypes,
+                    "h": height,
+                    "w": width,
+                    "c": channels,
+                    "label": None if label is None else int(label),
+                    "label_rank": None if label_rank is None else [int(rank) for rank in label_rank],
+                    "region": example["region"],
+                    "sample": sample_name,
+                }
+            ).encode(),
+        )
+
+        self._add(self._pixel_tar, f"{key}.real.bin.gz", self._compress(real))
+        if sims is not None:
+            self._add(self._pixel_tar, f"{key}.sims.bin.gz", self._compress(sims))
+
+        self._manifest.writerow(
+            (
+                key,
+                num_replicates,
+                num_genotypes,
+                height,
+                width,
+                channels,
+                self._shard_name,
+                sample_name,
+                "" if label is None else int(label),
+            )
+        )
+
+    def close(self) -> None:
+        self._meta_tar.close()
+        self._pixel_tar.close()
+        self._manifest_file.close()
+
+
+def make_example_writer(cfg, index: int, output_dir: str) -> ExampleWriter:
+    """Create the writer named by `pileup.example_format`."""
+    example_format = OmegaConf.select(cfg, "pileup.example_format", default="wds")
+    if example_format == "wds":
+        return WebDatasetExampleWriter(index, output_dir)
+    if example_format == "energon":
+        return EnergonExampleWriter(index, output_dir)
+    msg = f"Unknown pileup.example_format {example_format!r}, expected 'wds' or 'energon'"
+    raise ValueError(msg)
+
+
 class ExampleActor:
     def __init__(self, index: int, output_dir: str, cfg):
-        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar.gz")
         self.cfg = cfg
 
         # If NPSV3_REALIGN_PROFILE profiling is requested, give this actor's process its own aux log file
@@ -362,7 +541,7 @@ class ExampleActor:
         if os.environ.get("NPSV3_REALIGN_PROFILE"):
             os.environ["NPSV3_REALIGN_PROFILE_PATH"] = os.path.join(output_dir, f"images-{index:04d}.realign_profile.log")
 
-        self._writer = wds.TarWriter(self.output_path)
+        self._writer = make_example_writer(cfg, index, output_dir)
 
     def close(self):
         # `__ray_shutdown__` would eventually close the writer on actor termination, but that runs
@@ -463,19 +642,7 @@ class GraphWriter(ExampleActor):
                     )
                     raise
 
-                sample = {
-                    "__key__": region.slug,
-                    "region.txt": example["region"],
-                    "image.npy.gz": example["image"],
-                }
-                if "label" in example:
-                    sample["label.cls"] = example["label"]
-                if "label.rank" in example:
-                    sample["label.rank.npy"] = example["label.rank"]
-                if "sim.images" in example:
-                    sample["sim.images.npy.gz"] = example["sim.images"]
-
-                self._writer.write(sample)
+                self._writer.write(example, region=region, sample_name=self.sample.name)
                 num_regions += 1
         return num_regions
 

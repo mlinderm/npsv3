@@ -43,7 +43,10 @@ def train(cfg, output_dir=None, **kw_args):
         dirpath=output_dir,
     )
 
-    if cfg.data.validate_urls:
+    # The energon data config is addressed by metadataset rather than by per-split WebDataset URLs,
+    # and its metadataset always carries a validation split.
+    is_metadataset = OmegaConf.select(cfg, "data.metadataset_path") is not None
+    if is_metadataset or OmegaConf.select(cfg, "data.validate_urls"):
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
         num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
     else:
@@ -51,7 +54,11 @@ def train(cfg, output_dir=None, **kw_args):
         limit_val_batches = num_sanity_val_steps = 0
 
     # Skip testing if no testing data provided
-    limit_test_batches = OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if cfg.data.test_urls else 0
+    limit_test_batches = (
+        OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
+        if OmegaConf.select(cfg, "data.test_urls")
+        else 0
+    )
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,

@@ -1,4 +1,9 @@
+import csv
+import glob
+import gzip
+import json
 import os
+import tarfile
 
 import numpy as np
 import pytest
@@ -135,6 +140,90 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             )
             sample_count += 1
         assert sample_count == 1, "Only one sample in dataset"
+
+    @pytest.mark.usefixtures("ray_setup")
+    def test_vcf_to_energon_dataset(self, cfg, hg00733_sample, tmp_path):
+        """`pileup.example_format=energon` emits the polylithic trees directly from GraphWriter.
+
+        Round-trips the same region as `test_vcf_to_dataset` and asserts the pixel bytes come back
+        byte-exact, so the new writer is verified against the format the old loader consumes rather
+        than only against itself.
+        """
+        # cSpell:disable
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##contig=<ID=chr1,length=248956422>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00733
+chr1	1134739	.	A	ACATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGC	30	PASS	.	GT	1|0
+chr1	1134748	.	T	G	30	PASS	.	GT	1|1
+chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGA	30	PASS	.	GT	0|1"""
+        ) # fmt: skip
+        # cSpell:enable
+
+        region = Range("chr1:1134644-1134867")
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+
+        energon_cfg = cfg.copy()
+        OmegaConf.update(energon_cfg, "pileup.example_format", "energon")
+
+        output_dir = str(tmp_path / "energon")
+        vcf_to_graph_examples(
+            energon_cfg,
+            cfg.reads,
+            hg00733_sample,
+            vcf_path,
+            output_dir,
+            graph_shards=graph_shards,
+            filtered_kmer_path=filtered_kmer_path,
+        )
+
+        meta_shards = sorted(glob.glob(os.path.join(output_dir, "meta_ds", "meta-*.tar")))
+        pixel_shards = sorted(glob.glob(os.path.join(output_dir, "pixel_ds", "px-*.tar")))
+        manifests = sorted(glob.glob(os.path.join(output_dir, "manifest-*.csv.gz")))
+        assert len(meta_shards) == len(pixel_shards) == len(manifests) == cfg.threads, "One shard stream per actor"
+
+        image_shape = (cfg.pileup.image_height, cfg.pileup.image_width, len(cfg.pileup.image_channels))
+
+        sample_count = 0
+        for meta_shard, pixel_shard in zip(meta_shards, pixel_shards, strict=True):
+            with tarfile.open(meta_shard) as meta_tar, tarfile.open(pixel_shard) as pixel_tar:
+                pixel_members = pixel_tar.getnames()
+                for member in meta_tar.getmembers():
+                    key, _dot, extension = member.name.partition(".")
+                    assert extension == "json", "Keys must be dot-free so WebDataset splits them correctly"
+                    assert key.startswith(f"{hg00733_sample.name}_"), "Keys are namespaced by sample to survive merging"
+
+                    meta = json.loads(meta_tar.extractfile(member).read())
+                    assert meta["sample"] == hg00733_sample.name
+                    assert (meta["h"], meta["w"], meta["c"]) == image_shape
+                    assert meta["r"] == cfg.simulation.replicates
+                    assert meta["g"] == 10, "This region has 10 possible genotypes"
+                    assert meta["label"] is not None and meta["label"] > 0
+                    assert len(meta["label_rank"]) == meta["g"], "Ranks are a per-genotype view of the label"
+                    assert meta["label_rank"][meta["label"]] == 1, "The canonical positive is rank 1"
+
+                    # Both trees use identical keys, and a sample's pixel members are adjacent
+                    real_name, sims_name = f"{key}.real.bin.gz", f"{key}.sims.bin.gz"
+                    assert pixel_members.index(sims_name) == pixel_members.index(real_name) + 1
+
+                    real = np.frombuffer(gzip.decompress(pixel_tar.extractfile(real_name).read()), dtype=np.uint8)
+                    sims = np.frombuffer(gzip.decompress(pixel_tar.extractfile(sims_name).read()), dtype=np.uint8)
+                    assert real.reshape(meta["h"], meta["w"], meta["c"]).shape == image_shape
+                    assert sims.reshape(meta["r"], meta["g"], meta["h"], meta["w"], meta["c"]).size == sims.size
+
+                    sample_count += 1
+
+        assert sample_count == 1, "Only one sample in dataset"
+
+        manifest_rows = []
+        for manifest in manifests:
+            with gzip.open(manifest, "rt", newline="") as manifest_file:
+                manifest_rows.extend(csv.DictReader(manifest_file))
+        assert len(manifest_rows) == sample_count
+        assert manifest_rows[0]["g"] == "10"
+        assert manifest_rows[0]["sample"] == hg00733_sample.name
+
 
 @pytest.mark.cfg_overrides(
     f"reference={HG38_REF_FASTA}",

@@ -120,9 +120,13 @@ def main(cfg: DictConfig) -> None:
 
         _make_paths_absolute(cfg, ["model.encoder.checkpoint_path"])
 
-        OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
-        if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
-            OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
+        if OmegaConf.select(cfg, "data.metadataset_path") is not None:
+            # The energon data config is addressed by metadataset rather than by WebDataset URLs
+            _make_paths_absolute(cfg, ["data.metadataset_path", "data.cache_dir"])
+        else:
+            OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
+            if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
+                OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
 
         checkpoint = train(cfg, output_dir=output)
         if not OmegaConf.select(cfg, "trainer.fast_dev_run", default=False):
