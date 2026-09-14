@@ -42,6 +42,7 @@ dependencies = [
   "timm",
   "tensorboard",
   "mosaicml-streaming",
+  "megatron-energon>=7.4,<8",
 ]
 
 [project.urls]

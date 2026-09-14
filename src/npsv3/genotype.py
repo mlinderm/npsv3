@@ -79,7 +79,7 @@ class VariantExamples:
                 query_image = to_tensor(example["image"])
                 support_images = to_tensor(example["sim.images"])
                 label = torch.from_numpy(example["label.rank"])
-                yield (query_image, support_images, label, example["region"], example["label.alleles"])
+                yield (query_image, support_images, label, example.get("label"), example["region"], example["label.alleles"])
 
     def from_region(self, region: Range):
         # Perform the packing and padding in the actor to maximize the work done in parallel
@@ -145,9 +145,8 @@ class OnlinePackedImageDataModule(L.LightningDataModule):
                 pass
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        # We currently only need to transfer the images to the device, e.g., GPU
-        query, support, *addl_fields = batch
-        return (query.to(device), support.to(device), *addl_fields)
+        # PackedBatch.to only moves its tensor fields, leaving `meta` on the host
+        return batch.to(device)
 
     def teardown(self, **_kwargs):
         ray.shutdown()

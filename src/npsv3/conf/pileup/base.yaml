@@ -51,3 +51,8 @@ aligner: "bwa"
 
 example_fn: "npsv3.images.example.vcf_to_graph_examples"
 max_exhaustive_records: 2
+
+# Output layout for generated examples:
+#   wds     - today's single gzipped WebDataset tar per actor (images-%04d.tar.gz)
+#   energon - polylithic meta_ds/pixel_ds trees plus a per-actor manifest
+example_format: "wds"

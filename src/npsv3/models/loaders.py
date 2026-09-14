@@ -1,5 +1,7 @@
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Hashable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from itertools import repeat
 from typing import Any
 
@@ -10,6 +12,9 @@ import torch.nn.functional as F
 import webdataset as wds
 from torch.utils import data
 from torchvision.transforms import v2 as transforms
+
+LABEL_PADDING_VALUE = -100
+"""Label value for padding rows and for groups without a defined genotype label."""
 
 
 # Adapted from timm library
@@ -27,16 +32,6 @@ def ntuple(val: Iterable | Any, n: int) -> tuple:
 def to_tensor(img: np.ndarray) -> torch.Tensor:
     """Convert *HWC numpy array to a *CHW tensor"""
     return torch.from_numpy(img).movedim(-1, -3).contiguous()
-
-
-def _combine_values(values: tuple) -> tuple:
-    if isinstance(values[0], int | float):
-        return torch.tensor(values)
-    if isinstance(values[0], torch.Tensor):
-        return torch.stack(values)
-    if isinstance(values[0], np.ndarray):
-        return torch.from_numpy(np.stack(values))
-    return list(values)
 
 
 class EmptyDataset(data.Dataset):
@@ -64,6 +59,7 @@ class BaseDataModule(L.LightningDataModule, ABC):
         shuffle_size=1000,
         mean=(0.5,),
         std=(0.5,),
+        legacy_axis_order=False,
         **_kwargs,
     ):
         super().__init__()
@@ -82,19 +78,30 @@ class BaseDataModule(L.LightningDataModule, ABC):
         )
 
     def _make_base_dataset(self, urls, mode="train", resampled=False):
+        legacy_axis_order = self.hparams.legacy_axis_order
+
         def to_tuple(data):
             query_image = to_tensor(data["image.npy.gz"])
             support_images = to_tensor(data["sim.images.npy.gz"])
-            # Synthesize ranked labels from the integer label if not present
-            label = data["label.cls"]
-            if (label_rank := data.get("label.rank.npy")) is None:
-                label_rank = F.one_hot(torch.tensor(label, dtype=torch.long), support_images.size(0))
+            if legacy_axis_order:
+                # Shards written before the replicates-major convention are genotypes-major (G, R, H, W, C).
+                # With R=1 (the whole existing corpus) this transpose is free.
+                support_images = support_images.transpose(0, 1)
+            num_genotypes = support_images.size(1)
+
+            # `label` is the canonical positive and is absent entirely for unlabeled examples
+            label = data.get("label.cls")
+            if (label_rank := data.get("label.rank.npy")) is not None:
+                label_rank = torch.from_numpy(label_rank)
+            elif label is not None:
+                # Synthesize ranked labels from the integer label if not present
+                label_rank = F.one_hot(torch.tensor(label, dtype=torch.long), num_genotypes)
                 if label > 0:
                     # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
-                    label_rank[(label_rank == 0) & (torch.arange(support_images.size(0)) > 0)] = 3
+                    label_rank[(label_rank == 0) & (torch.arange(num_genotypes) > 0)] = 3
             else:
-                label_rank = torch.from_numpy(label_rank)
-            return query_image, support_images, label_rank, data.get("region.txt", data["__key__"])
+                label_rank = torch.zeros(num_genotypes, dtype=torch.long)
+            return query_image, support_images, label_rank, label, data.get("region.txt", data["__key__"])
 
         dataset = wds.WebDataset(urls, nodesplitter=wds.split_by_node, shardshuffle=100 if mode == "train" and not resampled else False, resampled=resampled)
         if mode == "train":
@@ -124,113 +131,276 @@ class BaseDataModule(L.LightningDataModule, ABC):
         return self.make_loader(self.predict_urls, mode="predict")
 
 
-def _pack_image_batch(
-    query_images,
-    support_images,
-    labels,
-    batch_size,
-    addl_fields=None,
-    image_transform=torch.nn.Identity,
-    padding_value=-100,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Transform lists of images and labels into a single batch tensor, padding labels with padding_value if needed"""
-    num_variants = len(query_images)
-    assert num_variants == len(support_images) == len(labels), "Unexpected number of images or labels for variant"
+@dataclass
+class ImageGroup:
+    """One region's real (query) image plus the grid of simulated (support) images scored against it.
 
-    total_num_support = sum(img.shape[0] for img in support_images)
-    assert total_num_support == sum(label.shape[0] for label in labels), "Unexpected number of labels for variant"
-    assert total_num_support + num_variants <= batch_size, "Total number of images exceeds batch size"
+    The support grid is **replicates-major** ``(R, G, C, H, W)``: flattening it yields
+    ``[r0g0 ... r0g_{G-1}, r1g0 ...]``, which is why the length-``G`` rank vector is *tiled* R times
+    rather than interleaved. ``genotype_label`` is the canonical single positive (an index into the
+    genotype axis); ``label_rank`` is its derived view.
+    """
 
-    # Manually cat images while transforming and scaling. If batch_size is larger than the number of images,
-    # the images will be padded with random values
-    images_batch = torch.empty((batch_size, *query_images[0].shape), dtype=torch.float32)
-    offsets = [0]  # Offset to the start of each new variant group in the batch
-    for support in support_images:
-        next_offset = offsets[-1] + support.shape[0]
-        images_batch[offsets[-1] : next_offset, ...] = image_transform(support)
+    query: torch.Tensor  # (C, H, W)
+    support: torch.Tensor  # (R, G, C, H, W)
+    label_rank: torch.Tensor  # (G,) int64 ranks
+    genotype_label: int | None = None
+    meta: Any = None
+
+    @property
+    def num_replicates(self) -> int:
+        return self.support.shape[0]
+
+    @property
+    def num_genotypes(self) -> int:
+        return self.support.shape[1]
+
+    @property
+    def width(self) -> int:
+        return self.support.shape[-1]
+
+    def cost(self, *, width_bucket: int | None = None) -> int:
+        """Number of image slots this group occupies in a pack, ``(1 + R*G) * ceil(w / w_bucket)``."""
+        slots = 1 + self.num_replicates * self.num_genotypes
+        if width_bucket:
+            slots *= math.ceil(self.width / width_bucket)
+        return slots
+
+    def flat_support(self) -> torch.Tensor:
+        """Support images flattened replicates-major to ``(R*G, C, H, W)``."""
+        return self.support.reshape(-1, *self.support.shape[2:])
+
+    def flat_labels(self) -> torch.Tensor:
+        """Rank labels tiled to match :meth:`flat_support`, i.e. ``(R*G,)``."""
+        return torch.tile(self.label_rank, (self.num_replicates,))
+
+
+@dataclass
+class PackedBatch:
+    """A packed batch of images: all groups' support images first, then one query image per group.
+
+    Images are laid out as ``[s_00 ... s_0n, s_10 ... s_1m, ..., q_0 ... q_v]`` with ``offsets``
+    indexing the *support* region only, which is what
+    :func:`torch.nested.nested_tensor_from_jagged` consumes downstream.
+    """
+
+    images: torch.Tensor  # (B, C, H, W_bucket), supports [0:offsets[-1]) then queries
+    labels: torch.Tensor  # (B,) or (total_support,) int64 ranks, tiled R times
+    offsets: torch.Tensor  # (n_groups+1,) int64, into the support region
+    widths: torch.Tensor  # (B,) int32, true width before bucket padding
+    genotype_label: torch.Tensor  # (n_groups,) int64, the single positive's genotype index
+    num_genotypes: torch.Tensor  # (n_groups,) int32, G_b; with offsets this recovers R_b
+    meta: list = field(default_factory=list)  # per-group region strings / keys
+
+    # Deliberately un-annotated, so it is a class attribute and not a dataclass field
+    _TENSOR_FIELDS = ("images", "labels", "offsets", "widths", "genotype_label", "num_genotypes")
+
+    @property
+    def num_groups(self) -> int:
+        return self.offsets.numel() - 1
+
+    @property
+    def num_images(self) -> int:
+        """Number of real (non-padding) image slots."""
+        return int(self.offsets[-1]) + self.num_groups
+
+    def positive_indices(self) -> torch.Tensor:
+        """Indices into ``images``/``labels`` of every replicate's true-genotype image.
+
+        There are ``R_b`` positives per group (the same genotype simulated ``R_b`` times), at
+        ``offsets[b] + r*G_b + genotype_label[b]``. Unlabeled groups contribute nothing.
+        """
+        indices = []
+        lengths = torch.diff(self.offsets)
+        for group in range(self.num_groups):
+            label = int(self.genotype_label[group])
+            if label < 0:
+                continue
+            num_genotypes = int(self.num_genotypes[group])
+            num_replicates = int(lengths[group]) // num_genotypes
+            start = int(self.offsets[group])
+            indices.extend(start + replicate * num_genotypes + label for replicate in range(num_replicates))
+        return torch.tensor(indices, dtype=torch.long)
+
+    def pin_memory(self) -> "PackedBatch":
+        return replace(self, **{name: getattr(self, name).pin_memory() for name in self._TENSOR_FIELDS})
+
+    def to(self, device, *args, **kwargs) -> "PackedBatch":
+        return replace(self, **{name: getattr(self, name).to(device, *args, **kwargs) for name in self._TENSOR_FIELDS})
+
+
+def select_packs(costs: Sequence[int | tuple[int, Hashable]], *, budget: int) -> list[list[int]]:
+    """Bin pack groups into fixed-budget packs, returning the original indices assigned to each pack.
+
+    Groups are bucketed by width bucket first (so a pack never mixes geometries), then packed
+    first-fit-decreasing within each bucket. Pure and metadata-only: no pixels are touched. The
+    result is deterministic given the input order.
+
+    Args:
+        costs: Per-group cost in image slots, either as a plain int or as a ``(cost, bucket)`` pair.
+            Buckets are emitted in first-appearance order.
+        budget: Maximum number of image slots per pack.
+
+    Returns:
+        list[list[int]]: Indices into ``costs``, ascending within each pack.
+
+    Raises:
+        ValueError: If any single group's cost exceeds ``budget``. Such groups must be rejected by
+            the caller rather than given their own oversized bin.
+    """
+    buckets: dict[Hashable, list[tuple[int, int]]] = {}
+    for index, entry in enumerate(costs):
+        cost, bucket = entry if isinstance(entry, tuple) else (entry, 0)
+        cost = int(cost)
+        if cost > budget:
+            msg = f"Group {index} costs {cost} image slots, which exceeds the budget of {budget}"
+            raise ValueError(msg)
+        buckets.setdefault(bucket, []).append((index, cost))
+
+    packs: list[list[int]] = []
+    for entries in buckets.values():
+        bins: list[tuple[list[int], list[int]]] = []  # ([remaining slots], [group indices])
+        # Decreasing cost, ties broken by original index so the result doesn't depend on sort stability
+        for index, cost in sorted(entries, key=lambda entry: (-entry[1], entry[0])):
+            for remaining, members in bins:
+                if remaining[0] >= cost:
+                    remaining[0] -= cost
+                    members.append(index)
+                    break
+            else:
+                bins.append(([budget - cost], [index]))
+        packs.extend(sorted(members) for _remaining, members in bins)
+    return packs
+
+
+def build_packed_batch(
+    groups: Sequence[ImageGroup],
+    *,
+    budget: int | None = None,
+    pad: bool = False,
+    width_bucket: int | None = None,
+    padding_value: int = LABEL_PADDING_VALUE,
+) -> PackedBatch:
+    """Concatenate groups into a single :class:`PackedBatch`.
+
+    Padding is 0, the upstream "no data in this pixel" sentinel, so padding rows read as an empty
+    pileup rather than as out-of-distribution noise.
+
+    Args:
+        groups: Groups to pack, in the order they should appear in the batch.
+        budget: Maximum number of image slots. Required if pad is True. Defaults to None.
+        pad: Pad the batch out to budget rows. Defaults to False.
+        width_bucket: Width to pad images out to. Defaults to the widest group.
+        padding_value: Label value for padding rows and unlabeled groups. Defaults to -100.
+    """
+    assert len(groups) > 0, "Cannot build a packed batch from zero groups"
+
+    channels, height = groups[0].query.shape[0], groups[0].query.shape[1]
+    out_width = width_bucket or max(group.width for group in groups)
+
+    support_lengths = [group.num_replicates * group.num_genotypes for group in groups]
+    total_support = sum(support_lengths)
+    num_images = total_support + len(groups)
+    if budget is not None:
+        assert num_images <= budget, f"Total of {num_images} images exceeds the budget of {budget}"
+    assert not pad or budget is not None, "budget is required when pad is True"
+    num_rows = budget if pad else num_images
+
+    images = torch.zeros((num_rows, channels, height, out_width), dtype=groups[0].query.dtype)
+    # Padding rows are genuine full-width (empty) images, so `widths` stays constant under a fixed geometry
+    widths = torch.full((num_rows,), out_width, dtype=torch.int32)
+
+    offsets = [0]  # Offset to the start of each new group in the support region of the batch
+    for group, length in zip(groups, support_lengths, strict=True):
+        next_offset = offsets[-1] + length
+        images[offsets[-1] : next_offset, :, :, : group.width] = group.flat_support()
+        widths[offsets[-1] : next_offset] = group.width
         offsets.append(next_offset)
-    for offset, query in enumerate(query_images, start=offsets[-1]):
-        images_batch[offset, ...] = image_transform(query)
+    for offset, group in enumerate(groups, start=total_support):
+        images[offset, :, :, : group.width] = group.query
+        widths[offset] = group.width
 
-    labels_batch = torch.cat(labels, dim=0)
-    if batch_size > offsets[-1] + num_variants:
-        labels_batch = F.pad(labels_batch, (0, batch_size - labels_batch.shape[0]), value=padding_value)
+    # Unpadded, labels cover only the support region; padded, they run the full height of the batch
+    labels = torch.cat([group.flat_labels() for group in groups], dim=0).to(torch.long)
+    if pad and num_rows > labels.shape[0]:
+        labels = F.pad(labels, (0, num_rows - labels.shape[0]), value=padding_value)
 
-    # Transform list of tuples into a tuple of batched values (combining tensors, etc.)
-    addl_fields = tuple(_combine_values(field) for field in zip(*addl_fields, strict=True)) if addl_fields else ()
-
-    return (images_batch, labels_batch, torch.tensor(offsets, dtype=torch.long), *addl_fields)
+    return PackedBatch(
+        images=images,
+        labels=labels,
+        offsets=torch.tensor(offsets, dtype=torch.long),
+        widths=widths,
+        genotype_label=torch.tensor(
+            [padding_value if group.genotype_label is None else group.genotype_label for group in groups],
+            dtype=torch.long,
+        ),
+        num_genotypes=torch.tensor([group.num_genotypes for group in groups], dtype=torch.int32),
+        meta=[group.meta for group in groups],
+    )
 
 
 def _pack_and_pad_images(
-    data: Iterable[tuple], *, batch_size=256, image_transform=torch.nn.Identity, pad=False, padding_value=-100
-) -> Generator[tuple, None, None]:
-    """Packs and pads real and support images into a batch <= batch_size.
+    data: Iterable[tuple],
+    *,
+    batch_size=256,
+    image_transform=None,
+    pad=False,
+    padding_value=LABEL_PADDING_VALUE,
+    width_bucket=None,
+) -> Generator[PackedBatch, None, None]:
+    """Packs and pads real and support images into batches of <= batch_size images.
+
+    Greedy and sequential with no lookahead. See `select_packs` for the buffered alternative used by
+    the energon loader.
 
     Args:
-        data (Iterable[tuple]): Iterable of (query, support, label) tuples.
+        data (Iterable[tuple]): Iterable of (query, support, label_rank, genotype_label, *meta) tuples,
+            where support is replicates-major (R, G, C, H, W).
         batch_size (int, optional): Maximum number of images in the batch. Defaults to 256.
-        pad (bool, optional): Pad batches to maximum size. Images are randomly padded, labels are padded with padding_value.
-        padding_values (int, optional): Value to use for padding labels. Defaults to -100.
+        image_transform (optional): Transform applied to the packed images, e.g. normalization. Applied to
+            the whole batch at once, so padding rows are transformed as the empty images they are. Defaults to None.
+        pad (bool, optional): Pad batches to maximum size. Images are zero padded, labels with padding_value.
+        padding_value (int, optional): Value to use for padding labels. Defaults to -100.
+        width_bucket (int | None, optional): Width to pad images out to. Defaults to the widest group in the batch.
 
     Yields:
-        Generator[tuple, None, None]: (images, labels, offset) tuples. Offsets record start of each variants support images
+        Generator[PackedBatch, None, None]: Packed batches. Offsets record the start of each group's support images.
     """
-    query_images = []
-    support_images = []
-    labels = []
-    addl_fields = []
 
+    def finish(groups: list[ImageGroup]) -> PackedBatch:
+        batch = build_packed_batch(
+            groups, budget=batch_size, pad=pad, width_bucket=width_bucket, padding_value=padding_value
+        )
+        if image_transform is not None:
+            batch.images = image_transform(batch.images)
+        return batch
+
+    groups: list[ImageGroup] = []
     num_images = 0  # Number of images in the current batch (must be <= batch_size)
     for sample in data:
-        query, support, label, *addl = sample
-        num_genotypes, num_replicates, *image_size = support.shape
+        query, support, label_rank, genotype_label, *addl = sample
+        group = ImageGroup(
+            query=query,
+            support=support,
+            label_rank=label_rank,
+            genotype_label=genotype_label,
+            meta=(addl[0] if len(addl) == 1 else tuple(addl)) if addl else None,
+        )
+        cost = group.cost(width_bucket=width_bucket)
 
-        remaining_space = batch_size - num_images
-        if num_genotypes * num_replicates + 1 > remaining_space:
-            # If the current sample doesn't fit, yield the current batch.
-            final = _pack_image_batch(
-                query_images,
-                support_images,
-                labels,
-                batch_size if pad else num_images,
-                addl_fields=addl_fields,
-                image_transform=image_transform,
-                padding_value=padding_value,
-            )
-
-            # Reset for the next batch
-            query_images.clear()
-            support_images.clear()
-            labels.clear()
-            addl_fields.clear()
+        if groups and num_images + cost > batch_size:
+            # If the current sample doesn't fit, yield the current batch and reset
+            final = finish(groups)
+            groups = []
             num_images = 0
-
             yield final
 
-        # Append the "query" (real image) to the images list as a CHW tensor
-        query_images.append(query)
-
-        # Append the "support" (simulated) images to the images list as a (G*R)CHW tensor. Expand out the ranked labels
-        # based on the number of replicates, if num_genotypes=3 and num_replicates=2, the ranked label is [0, 1, 3], then
-        # the labels would be [0, 0, 1, 1, 3, 3].
-        support_images.append(support.reshape(-1, *image_size))
-        labels.append(torch.repeat_interleave(label, num_replicates))
-
-        addl_fields.append(addl)
-
-        num_images += num_genotypes * num_replicates + 1
+        groups.append(group)
+        num_images += cost
 
     # If there are any remaining images, yield the final batch
-    yield _pack_image_batch(
-        query_images,
-        support_images,
-        labels,
-        batch_size if pad else num_images,
-        addl_fields=addl_fields,
-        image_transform=image_transform,
-        padding_value=padding_value,
-    )
+    if groups:
+        yield finish(groups)
 
 
 pack_and_pad_images = wds.pipelinefilter(_pack_and_pad_images)
@@ -239,7 +409,8 @@ pack_and_pad_images = wds.pipelinefilter(_pack_and_pad_images)
 class PackedImageDataModule(BaseDataModule):
     """Data module for loading variants images as packed batches, e.g., [s_00, ..., s_0n, s_10, ..., s_1m, ..., q_0, ..., q_v]
 
-    If pad is True, the number of images will be padded to the maximum batch size with random data.
+    If pad is True, the number of images will be padded to the maximum batch size with zeros (the
+    upstream "no data in this pixel" sentinel).
 
     Args:
         train_urls (str | None, optional): URLs for the training dataset, as webdataset '::' delimited brace URLs. Defaults to None.
@@ -250,6 +421,8 @@ class PackedImageDataModule(BaseDataModule):
         num_workers (int, optional): Number of workers in torch.DataLoader. Defaults to 1.
         shuffle_size (int, optional): Size of the shuffle buffer for training loaders. Defaults to 1000.
         pad (bool, optional): Pad batches to maximum size. Defaults to False.
+        legacy_axis_order (bool, optional): Read genotypes-major (G, R, H, W, C) shards written before the
+            replicates-major convention, transposing them on read. Defaults to False.
         resampled (bool, optional): Resample to make dataset "infinite". Defaults to False.
         epoch_batches (int | None, optional): Number of batches per epoch. Required if resampled is True. Defaults to None.
     """
@@ -288,9 +461,8 @@ class PackedImageDataModule(BaseDataModule):
         return loader
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        # We currently only need to transfer the images, labels, and offsets to the device, e.g., GPU
-        images, labels, offsets, *addl_fields = batch
-        return (images.to(device), labels.to(device), offsets.to(device), *addl_fields)
+        # PackedBatch.to only moves its tensor fields, leaving `meta` (region strings) on the host
+        return batch.to(device)
 
 
 def _mask_images(
@@ -298,7 +470,7 @@ def _mask_images(
 ) -> Generator[tuple, None, None]:
     for sample in data:
         query, support, *_ = sample
-        num_genotypes, num_replicates, *image_size = support.shape
+        num_replicates, num_genotypes, *image_size = support.shape
 
         # Total number of patches
         num_patches = (image_size[1] // patch_size[0]) * (image_size[2] // patch_size[1])
@@ -337,6 +509,8 @@ class MaskedImageDataModule(BaseDataModule):
         shuffle_size (int, optional): Size of the shuffle buffer for training loaders. Defaults to 1000.
         patch_size (tuple[int, int], optional): Size of the patches to mask. Defaults to (16, 16).
         mask_fraction (float, optional): Fraction of patches to mask. Defaults to 0.5.
+        legacy_axis_order (bool, optional): Read genotypes-major (G, R, H, W, C) shards written before the
+            replicates-major convention, transposing them on read. Defaults to False.
         resampled (bool, optional): Resample to make dataset "infinite". Defaults to False.
         epoch_batches (int | None, optional): Number of batches per epoch. Required if resampled is True. Defaults to None.
     """

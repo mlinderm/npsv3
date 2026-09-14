@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torchvision import models
 from torchvision.transforms import v2 as transforms
 
+from npsv3.models.loaders import PackedBatch
 from npsv3.models.metrics import (
     GenotypingConcordance,
     GenotypingNonRefConcordance,
@@ -276,9 +277,17 @@ class PackedVariant(L.LightningModule):
         # Reset validation metrics at the start of training to avoid effects of sanity batches
         self.val_metrics.reset()
 
-    def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
+    def forward(self, batch: PackedBatch) -> tuple[torch.Tensor]:
         """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
-        images, labels, offsets, *metadata = batch
+        images, offsets = batch.images, batch.offsets
+        # A padded batch carries labels for the full batch height so the pack has a fixed shape, but
+        # the nested tensor below indexes only the support region and requires an exact match.
+        labels = batch.labels[: offsets[-1]]
+        # Neither encoder masks its global pool, so a mixed-width pack would silently blend padding into
+        # the embeddings. This is where a varlen (cu_seqlens) path would attach if widths ever vary.
+        assert torch.all(batch.widths == batch.widths[0]), "Packed batch mixes image widths, which the encoders cannot mask"
+        # Pass the canonical positive through so predict-time consumers can name the called genotype
+        metadata = (batch.genotype_label, batch.num_genotypes, batch.meta)
         image_embeddings = self.encoder(images)
 
         # TODO: Consider padding query and support embeddings if images are padded to enable consistent tensor sizes
@@ -391,7 +400,7 @@ class WorstLossCallback(L.pytorch.callbacks.Callback):
         self.worst_losses = []
 
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
-        metric, _preds, labels, metadata = outputs
+        metric, _preds, labels, *metadata = outputs
         loss, _batch_size = model.loss(metric, labels)
 
         if len(self.worst_losses) < self.k:
@@ -401,7 +410,7 @@ class WorstLossCallback(L.pytorch.callbacks.Callback):
 
     def on_predict_end(self, trainer, model):  # noqa: ARG002
         for loss, metric, labels, metadata in sorted(self.worst_losses, reverse=True):
-            print(loss, metric.offsets(), metric.values(), labels.values(), metadata)
+            print(loss, metric.offsets(), metric.values(), labels.values(), *metadata)
 
 
 def predict(cfg, **kw_args):

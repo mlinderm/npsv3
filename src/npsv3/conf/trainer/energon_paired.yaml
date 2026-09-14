@@ -1,0 +1,22 @@
+# @package _global_
+#
+# Paired training against the energon loader (data=energon_packed_images).
+#
+# Kept separate from trainer/paired.yaml rather than folded into it, because `limit_train_batches`
+# would otherwise truncate epochs for the WebDataset loaders too, and those are meant to keep
+# working unchanged.
+defaults:
+  - /trainer/paired
+
+trainer:
+  # Energon train datasets repeat indefinitely, so max_epochs alone will not terminate the run.
+  max_steps: 100000
+
+  # A *virtual* epoch. The timm CosineLRScheduler steps on interval="epoch" and
+  # check_val_every_n_epoch counts epochs, so defining one this way keeps their current semantics
+  # instead of rewriting them to be step-driven. It also gives every DDP rank the same number of
+  # steps, which is what stops ranks reaching the all-reduce an unequal number of times.
+  limit_train_batches: 2000
+
+# Validation is fixed-length too, so ranks agree on the validation step count. It lives on the data
+# config because `runners.train` derives the trainer's limit_val_batches from `data.limit_val_batches`.
