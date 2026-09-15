@@ -77,7 +77,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             hg00733_sample,
             cfg.reads,
             filtered_kmer_path,
-            analysis_variants,
+            analysis_variants, # type: ignore
         )
 
         assert example["region"] == str(region)
@@ -124,14 +124,6 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             graph_shards=graph_shards,
             filtered_kmer_path=filtered_kmer_path,
         )
-        # for entry in Path(output_dir).rglob("*"):
-        #     print(entry)
-        # with open(os.path.join(output_dir, "dataset.yaml"), 'r') as file:
-        #     # Read the entire content and print it
-        #     print(file.read())
-        # with open(os.path.join(output_dir, "imgs_ds/.nv-meta/dataset.yaml"), 'r') as file:
-        #     # Read the entire content and print it
-        #     print(file.read())
               
         assert os.path.exists(os.path.join(output_dir, "meta_ds", "train.jsonl"))
         assert os.path.exists(os.path.join(output_dir, "meta_ds", "train.jsonl.idx"))

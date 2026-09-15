@@ -1,29 +1,14 @@
 import hashlib
 import typing
 
+from omegaconf import DictConfig
 import pysam
 
-# Variant is now the native class directly (like npsv3.util.range.Range): all the property/derived-value
-# logic that used to live in a Python wrapper class has been pushed into npsv3::Variant and its bindings
-# (src/npsv3/native/variant.{hpp,cpp}, src/npsv3/native/graph_bindings.cpp). A native Variant can only be
-# constructed by reading through VariantFileReader -- there is no bridge from an already-parsed
-# pysam.VariantRecord, and symbolic alleles are not supported (VariantFileReader raises when it hits one).
-#
-# Functionality that did NOT make the move, and why:
-#  - Variant.from_pysam(record): no replacement. Construct via `Variant(next(reader.fetch()))` from a
-#    VariantFileReader instead.
-#  - variant.num_alt / variant.allele_indices / variant.alt_allele_indices: removed as pure Python sugar
-#    over num_alleles/num_alts with no real logic. Use `v.num_alts`, `range(v.num_alleles)`,
-#    `range(1, v.num_alleles)` directly.
-#  - Renames: callers should use the native binding names directly rather than the old wrapper names:
-#    alt_reference_region -> allele_reference_region, alt_length -> allele_length, alt_seq -> allele_sequence.
-#  - variant_id caching: vg_variant_id used to be a functools.cached_property; the native `variant_id`
-#    property recomputes the SHA1 digest on every access. Deferred -- cache on the C++ side if this shows
-#    up as a hot path.
-#  - length_change() SVLEN parsing: also recomputed on every call (native `info_int("SVLEN")` re-reads and
-#    re-parses the INFO field each time). Deferred alongside variant_id caching, for the same reason.
 from npsv3._native_graph import Variant as Variant  # noqa: PLC0414
 from npsv3._native_graph import VariantFileReader as VariantFileReader  # noqa: PLC0414
+from npsv3._native_graph import VariantFileWriter as VariantFileWriter
+from npsv3.util.range import Range
+from npsv3.types import PathType  # noqa: PLC0414
 
 # Length of SHA1 hex digest used for variants IDs by vg
 VARIANT_ID_LENGTH = 40
@@ -95,28 +80,68 @@ def genotype_count(num_alleles: int, ploidy: int):
     raise NotImplementedError(msg)
 
 
-def overlapping_records(vcf_path: str | VariantFileReader, flank=0):
-    # We assume the file is in sorted order
+def overlapping_variants(vcf_file: VariantFileReader|PathType, region: Range|None = None, flank=0, min_variant_size=0):
+    """Yield separated (non-overlapping) regions and corresponding variants
+
+    Args:
+        vcf_file (VariantFileReader | str): VCF file
+        region (Range | None, optional): Region to fetch variants from. Defaults to None.
+        flank (int, optional): Required separation between variants to define region. Defaults to 0.
+        min_variant_size (int, optional): Minimum size of variant to include. Defaults to 0.
+
+    Yields:
+        tuple[Region, list[Variant]]: Region and a list of overlapping variants
+    """
+    # We assume VCF is in sorted order
     current_range = None
     current_variants = []
 
-    reader = vcf_path if isinstance(vcf_path, VariantFileReader) else VariantFileReader.open(vcf_path)
+    if not isinstance(vcf_file, VariantFileReader):
+        vcf_file = VariantFileReader.open(str(vcf_file))
+        # TODO: Automatically close this file when done
+    assert isinstance(vcf_file, VariantFileReader)
 
-    with reader:
-        for variant in reader.fetch():
-            variant_range = variant.reference_region().expand(flank)
-            if current_range is None:
-                current_range = variant_range
-                current_variants = [variant]
-            elif current_range.overlaps(variant_range):
-                current_range = current_range.union(variant_range)
-                current_variants.append(variant)
-            else:
-                # Next variant doesn't overlap, so yield current variants and then reset
-                yield current_range, current_variants
-                current_range = variant_range
-                current_variants = [variant]
+    for variant in vcf_file.fetch(region=region):
+        if min_variant_size > 0 and not any(abs(variant.allele_length_change(i) or 0) >= min_variant_size for i in range(1, variant.num_alleles)):
+            continue  # Skip variants that don't meet the minimum size requirement
 
-        # yield any remaining variants
-        if current_variants:
+        variant_range = variant.reference_region().expand(flank)
+        if current_range is None:
+            current_range = variant_range
+            current_variants = [variant]
+        elif current_range.overlaps(variant_range):
+            current_range.union_with(variant_range)
+            current_variants.append(variant)
+        else:
+            # Next variant doesn't overlap, so yield current variants and then reset
             yield current_range, current_variants
+            current_range = variant_range
+            current_variants = [variant]
+
+    # yield any remaining records
+    if current_variants:
+        yield current_range, current_variants
+
+
+def update_filter(cfg: DictConfig, vcf_path: str, output_path: str):
+    """Set variant FILTER to PASS if any defined genotype is not filtered
+
+    Used with variant combination workflow that sets genotype filters from upstream variant-level filters. This function
+    is significantly faster than the equivalent bcftools command.
+
+    Args:
+        cfg (DictConfig): Hydra configuration
+        vcf_path (str): Input VCF file
+        output_path (str): Output VCF file
+    """
+    src_vcf_file = VariantFileReader.open(vcf_path)
+    dst_vcf_file = VariantFileWriter.open(output_path, src_vcf_file.header(), cfg.get("output_format"))
+    try:
+        for variant in src_vcf_file.fetch():
+            if variant.has_passing_genotype():
+                # Set FILTER to PASS is there are any passing genotypes
+                variant.set_filter_pass()
+            dst_vcf_file.write(variant)
+    finally:
+        src_vcf_file.close()
+        dst_vcf_file.close()

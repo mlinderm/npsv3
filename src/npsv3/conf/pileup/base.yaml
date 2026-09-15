@@ -1,18 +1,19 @@
 # @package pileup
-image_width: 300
-image_height: 100
+image_width: 288
+image_height: 96
 image_channels: [0, 1, 2, 3, 4, 5, 6, 7]
 
-variant_padding: 100
+variant_padding: 96
 fetch_flank: 1000
 realigner_flank: 1000
 
-insert_bases: false
+insert_bases: true
 
+render_snv: true
 aligned_base_pixel: 255
 soft_clip_base_pixel: 128
 match_base_pixel: ${pileup.aligned_base_pixel}
-mismatch_base_pixel: ${pileup.aligned_base_pixel}
+mismatch_base_pixel: 192
 insert_base_pixel: 64
 
 insert_size_mean_pixel: 128
@@ -26,9 +27,8 @@ allele_pixel_range: 100
 min_normalized_allele_score: -.inf
 max_alleleq: 40
 
-discrete_mapq: false
+discrete_mapq: true
 mapq0_pixel: 64
-
 max_mapq: 60
 
 max_baseq: 40
@@ -82,3 +82,6 @@ max_exhaustive_records: 2
 # Per-actor shard rotation thresholds for the pixel tar (matches wds.ShardWriter's own defaults).
 example_shard_maxcount: 100000
 example_shard_maxsize: 3.0e9
+
+generator:
+  _target_: npsv3.images.generator.CoverageImageGenerator

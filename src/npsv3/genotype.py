@@ -19,7 +19,7 @@ from npsv3.models.runners import load_model_from_checkpoint
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample
-from npsv3.util.variant import Variant, overlapping_records, vg_variant_id
+from npsv3.util.variant import Variant, overlapping_variants, vg_variant_id
 from npsv3.util.vcf import bcftools_format, bcftools_index, index_variant_file
 
 PLOIDY = 2
@@ -111,7 +111,7 @@ class OnlinePackedImageDataModule(L.LightningDataModule):
         )
 
         group_padding = self.cfg.pileup.variant_padding // 2
-        self.regions = [region for region, *_ in overlapping_records(self.inference_vcf, flank=group_padding)]
+        self.regions = [region for region, *_ in overlapping_variants(self.inference_vcf, flank=group_padding)]
         logging.info("Genotyping variants in %d regions", len(self.regions))
 
     def predict_dataloader(self):

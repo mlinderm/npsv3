@@ -1,7 +1,10 @@
+import os
+import pytest
+
 from npsv3.util.range import Range
 from npsv3.util.variant import Variant, VariantFileReader
 
-from .. import create_vcf
+from .. import HG38_REF_FASTA, create_vcf
 
 
 def _first_variant(vcf_path: str) -> Variant:
@@ -163,3 +166,23 @@ chr4	99589036	.	C	TATATATATGTTCATATATATATTC	30	.	SVTYPE=INS;SVLEN=24	GT	1|0
         )  # fmt: skip
         variant = _first_variant(vcf_path)
         assert variant.reference_region() == Range("1", 5474285, 5474287), "With only * alternate allele, reference be entire REF allele"
+
+@pytest.mark.skipif(HG38_REF_FASTA is None, reason="HG38 reference fasta not found")
+@pytest.mark.cfg_overrides(f"reference={HG38_REF_FASTA}")
+class TestUpdateFilter:
+    def test_update_filter(self, tmp_path, cfg):
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
+##FILTER=<ID=GAP2,Description="Uncalled in the second haplotype">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter.">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|1:.	.:.
+chr1	3693768	.	C	G	30	GAP1	.	GT:FT	.|1:GAP1	.:.	0|.:GAP2	.:."""
+        )  # fmt: skip
+        from npsv3.util.variant import update_filter
+        output_path = os.path.join(tmp_path, "output.vcf.gz")
+        update_filter(cfg, vcf_path, output_path)
+

@@ -44,7 +44,7 @@ from npsv3.util.range import Range
 from npsv3.util.reads import downsample_reads, haplotag_reads
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, kmc_filter
 from npsv3.util.timeout import Timeout
-from npsv3.util.variant import Variant, VariantFileReader, overlapping_records
+from npsv3.util.variant import Variant, VariantFileReader
 from npsv3.util.vcf import index_variant_file, pysam_write_mode
 
 
@@ -63,7 +63,7 @@ def _reference_sequence(reference_fasta: str, region: Range) -> str:
 def example_to_image(
     cfg, example, out_path: PathType | None=None, *, with_simulations=False, margin=10, max_replicates=1, **kwargs
 ):
-    generator = hydra.utils.instantiate(cfg.generator, cfg, _recursive_=False)
+    generator = hydra.utils.instantiate(cfg.pileup.generator, cfg, _recursive_=False)
 
     image_tensor = example["image"]
     real_image = generator.render(image_tensor, **kwargs)
@@ -217,7 +217,7 @@ def make_graph_example(
         # TODO: Do we need to pad out the shorter sequences so everything has identical length?
 
         # Create generator if not provided
-        generator: ImageGenerator = generator or hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
+        generator: ImageGenerator = generator or hydra.utils.instantiate(cfg.pileup.generator, cfg=cfg, _recursive_=False)
 
         # Construct image for "real" data, possibly downsampling the reads if specified
         with tempfile.TemporaryDirectory(dir=tmp_dir) as local_read_tmp_dir:
@@ -512,7 +512,7 @@ class GraphWriter(ExampleActor):
         self.filtered_kmer_path = filtered_kmer_path
         self.ploidy = ploidy
         self.min_variant_size = min_variant_size
-        self.generator = hydra.utils.instantiate(cfg.generator, cfg=cfg, _recursive_=False)
+        self.generator = hydra.utils.instantiate(cfg.pileup.generator, cfg=cfg, _recursive_=False)
         self.sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
 
     def from_graph(
@@ -680,154 +680,3 @@ def vcf_to_graph_examples(
         from npsv3.models.energon import prepare_energon_dataset
         prepare_energon_dataset(output_dir, num_workers=cfg.threads)
 
-
-VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG", "FORMAT"])
-
-
-def _complete_genotype(record: pysam.VariantRecord, sample: str) -> bool:
-    """Return True if the sample's genotype is completely defined (no missing alleles)"""
-    return all(allele is not None for allele in record.samples[sample].allele_indices)
-
-def _non_ref_genotype(record: pysam.VariantRecord, sample: str) -> bool:
-    """Return True if the sample's genotype is defined and has non-reference allele"""
-    non_ref = False
-    for allele in record.samples[sample].allele_indices:
-        if allele is None:
-            return False
-        non_ref = non_ref or allele > 0
-    return non_ref
-
-def _write_subset_record(
-    vcf_file: pysam.VariantFile,
-    record: pysam.VariantRecord,
-    sample: str,
-    info_handlers: typing.Optional[dict] = None,
-) -> pysam.VariantRecord:
-    """Write record with just sample's genotype to vcf_file.
-
-    Args:
-        vcf_file (pysam.VariantFile): The VCF file to write to.
-        record (pysam.VariantRecord): The VCF record to write.
-        sample (str): The sample name to include.
-        info_handlers (dict): Handlers for cleaning up INFO fields.
-
-    Returns:
-        pysam.VariantRecord: The written VCF record.
-    """
-    # Create a new record with only the relevant sample
-    src_sample = record.samples[sample]
-    try:
-        dst_record = vcf_file.new_record(
-            contig=record.contig,
-            start=record.start,
-            stop=record.stop,
-            id=record.id,
-            alleles=record.alleles,
-            qual=record.qual,
-            filter=record.filter,
-            # Fix up INFO fields as needed to produce a valid VCF from ill-formed inputs
-            info={ key: (handler(value) if (handler := info_handlers and info_handlers.get(key)) else value) for key, value in record.info.items() },
-            samples=[src_sample]
-        )
-        dst_record.samples[0].phased = src_sample.phased # Reapply the phasing information (which is otherwise lost)
-    except TypeError:
-        print(record)
-        raise
-    vcf_file.write(dst_record)
-    return dst_record
-
-@dataclass
-class _SplitAndFilterStats:
-    nonref_records: int = 0
-    matching_ref_records: int = 0
-    ref_records: int = 0
-    dropped_regions: int = 0
-
-
-def split_and_filter_vcf(
-    cfg: DictConfig,
-    inference_vcf: str,
-    output_dir: str,
-):
-    """Split a multi-sample VCF into a single-samples VCFs suitable for paired-model training.
-
-    For each region with nearby or overlapping variants, we write out non-reference variants to the respective single
-    sample VCFs (if there are fewer than cfg.pileup.max_exhaustive_records non-reference variants in the region). And attempt
-    to find corresponding variants in reference-only regions in other samples.
-
-    Args:
-        cfg (DictConfig): Global configuration
-        inference_vcf (str): Path to multi-sample VCF to be split
-        output_dir (str): Directory to write the split VCFs as {sample}.vcf.gz
-    """
-    logging.info("Splitting and filtering VCF into %s", output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    with pysam.VariantFile(inference_vcf) as src_vcf_file:
-        src_header = src_vcf_file.header
-
-        # Create headers for each of the output VCFs (one per sample)
-        headers = {}
-        info_handlers = {}
-        for src_sample in src_header.samples:
-            dst_header = pysam.VariantHeader()
-            for record in src_header.records:
-                if record.type in VCF_HEADER_TYPES_TO_COPY:
-                    dst_header.add_record(record)
-                    # Certain INFO fields can be ill-formatted upstream (and PySAM is strict), so we record handlers here for cleanup
-                    if record.type == "INFO" and record["Number"] == "0":
-                        info_handlers[record["ID"]] = bool  # Force FLAG fields to be boolean
-            dst_header.add_sample(src_sample)
-            headers[src_sample] = dst_header
-
-        dst_vcf_files = {}
-        for sample, dst_header in headers.items():
-            output_vcf = os.path.join(output_dir, f"{sample}.vcf.gz")
-            dst_vcf_files[sample] = pysam.VariantFile(output_vcf, mode="wz", header=dst_header)
-
-        stats = {sample: _SplitAndFilterStats() for sample in dst_vcf_files}
-
-        for _region_count, (_region, records) in enumerate(overlapping_records(src_vcf_file, flank=cfg.pileup.variant_padding), start=1):
-            # Partition samples into reference-only and non-reference genotypes
-            non_ref_samples = {}
-            for sample in dst_vcf_files:
-                non_ref = [record for record in records if _non_ref_genotype(record, sample)]
-                if len(non_ref) > 0:
-                    non_ref_samples[sample] = non_ref
-
-            ref_samples = list(set(dst_vcf_files).difference(non_ref_samples))
-            random.shuffle(ref_samples)
-            for sample, non_ref_records in non_ref_samples.items():
-                if len(non_ref_records) > cfg.pileup.max_exhaustive_records:
-                    stats[sample].dropped_regions += 1
-                    continue  # Skip regions with too many non-reference variants
-
-                # We found a tractable number of non-ref variants. Write them to the sample's VCF file and find
-                # corresponding reference-only examples in other samples
-                for record in non_ref_records:
-                    _write_subset_record(dst_vcf_files[sample], record, sample, info_handlers)
-                stats[sample].nonref_records += len(non_ref_records)
-
-                # Select another random sample without replacement and write out the reference only records
-                while len(ref_samples) > 0:
-                    ref_sample = ref_samples.pop()
-                    ref_records = [record for record in records if record in non_ref_records and _complete_genotype(record, ref_sample)]
-                    if len(records) != len(ref_records):
-                        continue # This samples does not have fully genotyped records for all of the needed variants
-                    for record in ref_records:
-                        _write_subset_record(dst_vcf_files[ref_sample], record, ref_sample, info_handlers)
-                    stats[ref_sample].ref_records += len(ref_records)
-                    stats[sample].matching_ref_records += len(ref_records)
-                    break  # We successfully wrote a reference sample
-
-        for dst_vcf_file in dst_vcf_files.values():
-            dst_vcf_file.close()
-        for sample, sample_stats in stats.items():
-            logging.info(
-                "Sample %s: Wrote %d non-ref variants (with %d matching ref variants) and %d ref variants (%d/%d regions dropped due to too many non-ref variants)",
-                sample,
-                sample_stats.nonref_records,
-                sample_stats.matching_ref_records,
-                sample_stats.ref_records,
-                sample_stats.dropped_regions,
-                _region_count,
-            )

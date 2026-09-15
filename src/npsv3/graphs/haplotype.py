@@ -30,7 +30,7 @@ from npsv3.graphs.graph import Graph
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmers_by_unique_kmers, kmc_build_from_fasta, kmc_filter
-from npsv3.util.variant import Variant, VariantFileReader
+from npsv3.util.variant import Variant, VariantFileReader, overlapping_variants
 
 # ruff: enable[PLC0414]
 
@@ -156,48 +156,6 @@ def _filter_variants(variants, min_variant_size):
         if any(abs(variant.allele_length_change(i) or 0) >= min_variant_size for i in range(1, variant.num_alleles)):
             result.append(variant)  # noqa: PERF401
     return result
-
-def overlapping_variants(vcf_file: VariantFileReader|PathType, region: Range|None = None, flank=0, min_variant_size=0):
-    """Yield separated (non-overlapping) regions and corresponding variants
-
-    Args:
-        vcf_file (VariantFileReader | str): VCF file
-        region (Range | None, optional): Region to fetch variants from. Defaults to None.
-        flank (int, optional): Required separation between variants to define region. Defaults to 0.
-        min_variant_size (int, optional): Minimum size of variant to include. Defaults to 0.
-
-    Yields:
-        tuple[Region, list[Variant]]: Region and a list of overlapping variants
-    """
-    # We assume VCF is in sorted order
-    current_range = None
-    current_variants = []
-
-    if not isinstance(vcf_file, VariantFileReader):
-        vcf_file = VariantFileReader.open(str(vcf_file))
-        # TODO: Automatically close this file when done
-    assert isinstance(vcf_file, VariantFileReader)
-
-    for variant in vcf_file.fetch(region=region):
-        if min_variant_size > 0 and not any(abs(variant.allele_length_change(i) or 0) >= min_variant_size for i in range(1, variant.num_alleles)):
-            continue  # Skip variants that don't meet the minimum size requirement
-
-        variant_range = variant.reference_region().expand(flank)
-        if current_range is None:
-            current_range = variant_range
-            current_variants = [variant]
-        elif current_range.overlaps(variant_range):
-            current_range.union_with(variant_range)
-            current_variants.append(variant)
-        else:
-            # Next variant doesn't overlap, so yield current variants and then reset
-            yield current_range, current_variants
-            current_range = variant_range
-            current_variants = [variant]
-
-    # yield any remaining records
-    if current_variants:
-        yield current_range, current_variants
 
 @ray.remote
 class _SerializeGraphAndUniqueKmers:
