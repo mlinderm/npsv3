@@ -129,7 +129,7 @@ def cache_filter_kmc_database(cfg, sample: "Sample", vcf_path: str, region: "Ran
         from npsv3.util.sample import filter_kmers_by_unique_kmers
         if not sample.kmc_prefix:
             pytest.skip(f"KMC database for {sample.name} not found")
-            return
+            return None
         filter_kmers_by_unique_kmers(
             sample.kmc_prefix,
             unique_kmers,
@@ -150,7 +150,7 @@ def cache_graph_and_filter_kmc_database(cfg, sample: "Sample", vcf_path: str, re
     if not graph_shards or not os.path.exists(f"{filtered_kmer_path}.kmc_pre"):
         if not sample.kmc_prefix:
             pytest.skip(f"KMC database for {sample.name} not found")
-            return
+            return None
         from npsv3.graphs.haplotype import serialize_graph_and_unique_kmers
         from npsv3.util.sample import kmc_filter
         graph_shards, unique_kmer_path, _region_count = serialize_graph_and_unique_kmers(

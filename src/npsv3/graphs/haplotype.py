@@ -6,8 +6,7 @@ import itertools
 import logging
 import os
 import tempfile
-from collections.abc import Sequence
-from typing import Container
+from collections.abc import Container, Sequence
 
 import hydra
 import numpy as np
@@ -510,14 +509,13 @@ def build_kmer_evidence_index(
         return KmerEvidenceIndex(
             sequences, cfg.pileup.evidence_kmer_size, exclude_local_multi=(kmer_set == "local_unique")
         )
-    elif kmer_set == "graph_unique":
+    if kmer_set == "graph_unique":
         num_alleles = len(haplotypes)
         masks = np.zeros(sampler.num_kmers(), dtype=np.uint16)
         for allele_idx, haplotype in enumerate(haplotypes):
             masks[np.asarray(sampler.kmers_on_path(haplotype), dtype=np.int64)] |= np.uint16(1 << allele_idx)
         return KmerEvidenceIndex(unique_kmers.sequences, masks.tolist(), cfg.graph.kmer_size, num_alleles)
-    else:
-        raise ValueError(f"Unknown pileup.evidence_kmer_set: {kmer_set!r}")
+    raise ValueError(f"Unknown pileup.evidence_kmer_set: {kmer_set!r}")
 
 
 def add_population_haplotypes(
@@ -687,7 +685,7 @@ def _diplotypes_in_topk_shard(
                 missing_count = sum(allele < 0 for allele in alleles)
                 if missing_count == len(alleles) and cfg.graph.missing_are_ref:
                     # Treat fully missing genotypes as all REF alleles (e.g., when derived from high-quality assemblies)
-                    alleles = (0,) * ploidy  
+                    alleles = (0,) * ploidy
                 elif missing_count > 0:
                     continue  # Skip missing genotypes
 

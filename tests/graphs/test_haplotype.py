@@ -112,15 +112,15 @@ class _MockHaplotypeSampler:
 class TestPrepareGenotypingHaplotypes:
     # Single bi-allelic variant with variant ID "v1"
     region = Range("chr1", 100, 200)
-    variants: ClassVar = [cast(Variant, _MockVariant("v1"))]
-    sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1)}))
+    variants: ClassVar = [cast("Variant", _MockVariant("v1"))]
+    sampler = cast("HaplotypeSamplerOverlay", _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1)}))
 
     REF: ClassVar = [1, 2, 3]
     ALT: ClassVar = [1, 4, 3]
 
     def test_adds_missing_reference_haplotype(self):
         """The reference haplotype should be added at index 0 if it wasn't already sampled."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))  # No named "true" haplotype paths
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF))  # No named "true" haplotype paths
         haplotypes, alleles, true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [self.ALT], self.variants, self.region.contig, "SAMPLE"
         )
@@ -130,7 +130,7 @@ class TestPrepareGenotypingHaplotypes:
 
     def test_moves_existing_reference_haplotype_to_index_0(self):
         """An already-sampled reference haplotype should be moved to index 0, not duplicated."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF))
         haplotypes, alleles, _true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [self.ALT, self.REF], self.variants, self.region.contig, "SAMPLE"
         )
@@ -139,7 +139,7 @@ class TestPrepareGenotypingHaplotypes:
 
     def test_reference_haplotype_already_first_is_untouched(self):
         """If the reference haplotype is already at index 0, it should remain there."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF))
         haplotypes, _alleles, _true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [self.REF, self.ALT], self.variants, self.region.contig, "SAMPLE"
         )
@@ -148,7 +148,7 @@ class TestPrepareGenotypingHaplotypes:
     def test_true_haplotypes_reuse_matching_sampled_haplotype(self):
         """If a "true" haplotype path matches an already-sampled haplotype, its (possibly reordered)
         index should be reused rather than the haplotype being duplicated."""
-        graph = cast(Graph, _MockGraph(
+        graph = cast("Graph", _MockGraph(
             self.region.contig, self.REF,
             paths={"SAMPLE#0#chr1#0": self.REF, "SAMPLE#1#chr1#0": self.ALT},
         ))
@@ -160,7 +160,7 @@ class TestPrepareGenotypingHaplotypes:
 
     def test_true_haplotypes_appended_when_not_sampled(self):
         """A homozygous sample should report homozygous halotype indices"""
-        graph = cast(Graph, _MockGraph(
+        graph = cast("Graph", _MockGraph(
             self.region.contig, self.REF,
             paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.ALT},
         ))
@@ -172,7 +172,7 @@ class TestPrepareGenotypingHaplotypes:
 
     def test_true_heterozygous_haplotype(self):
         """A heterozygous sample should report heterozygous haplotype indices, but not duplicate haplotypes."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.REF}))
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.REF}))
         haplotypes, alleles, true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE",
         )
@@ -183,7 +183,7 @@ class TestPrepareGenotypingHaplotypes:
     def test_missing_true_haplotype_path_is_skipped(self):
         """A ploidy index without a corresponding path in the graph (i.e. not fully resolved) should
         be silently skipped rather than raising an error."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#1#chr1#0": self.ALT}))
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF, paths={"SAMPLE#1#chr1#0": self.ALT}))
         # No path for "SAMPLE#0#chr1#0"
         haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE"
@@ -194,7 +194,7 @@ class TestPrepareGenotypingHaplotypes:
     def test_no_true_haplotype_paths_present(self):
         """If none of the sample's "true" haplotype paths are in the graph, `true_haplotype_idxs` is
         empty and only the reference-haplotype invariant is enforced."""
-        graph = cast(Graph, _MockGraph(self.region.contig, self.REF))  # No named paths at all
+        graph = cast("Graph", _MockGraph(self.region.contig, self.REF))  # No named paths at all
         haplotypes, _alleles, true_idxs = prepare_genotyping_haplotypes(
             graph, self.sampler, [self.ALT], self.variants, self.region.contig, "SAMPLE"
         )
@@ -204,7 +204,7 @@ class TestPrepareGenotypingHaplotypes:
     def test_does_not_mutate_input_haplotypes_list(self):
         original = [self.ALT]
         prepare_genotyping_haplotypes(
-            cast(Graph, _MockGraph(self.region.contig, self.REF)), self.sampler, original, self.variants, self.region.contig, "SAMPLE"
+            cast("Graph", _MockGraph(self.region.contig, self.REF)), self.sampler, original, self.variants, self.region.contig, "SAMPLE"
         )
         assert original == [self.ALT]
 
@@ -219,13 +219,13 @@ class TestAddPopulationHaplotypes:
     ALT2: ClassVar = [11, 14, 13]
 
     def _sampler(self, scores: dict[tuple[int, ...], float] | None = None) -> HaplotypeSamplerOverlay:
-        return cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler(
+        return cast("HaplotypeSamplerOverlay", _MockHaplotypeSampler(
             {2: ("v1", 0), 4: ("v1", 1), 12: ("v2", 0), 14: ("v2", 1)}, scores=scores,
         ))
 
     def test_adds_missing_alt_allele_from_population_carrier(self):
-        variants = [cast(Variant, _MockVariant("v1"))]
-        graph = cast(Graph, _MockGraph(
+        variants = [cast("Variant", _MockVariant("v1"))]
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={
                 "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT,
@@ -239,8 +239,8 @@ class TestAddPopulationHaplotypes:
         assert alleles == [{("v1", 0)}, {("v1", 1)}]
 
     def test_does_not_duplicate_already_represented_allele(self):
-        variants = [cast(Variant, _MockVariant("v1"))]
-        graph = cast(Graph, _MockGraph(
+        variants = [cast("Variant", _MockVariant("v1"))]
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "OTHER#0#chr1#0": self.ALT},
         ))
@@ -251,8 +251,8 @@ class TestAddPopulationHaplotypes:
         assert haplotypes == [self.REF, self.ALT]
 
     def test_excludes_sample_itself_as_carrier(self):
-        variants = [cast(Variant, _MockVariant("v1"))]
-        graph = cast(Graph, _MockGraph(
+        variants = [cast("Variant", _MockVariant("v1"))]
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "SAMPLE#0#chr1#0": self.ALT},
         ))
@@ -262,8 +262,8 @@ class TestAddPopulationHaplotypes:
         assert haplotypes == [self.REF]
 
     def test_returns_unchanged_when_no_carrier_exists(self):
-        variants = [cast(Variant, _MockVariant("v1"))]
-        graph = cast(Graph, _MockGraph(
+        variants = [cast("Variant", _MockVariant("v1"))]
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT},  # no individual paths embedded at all
         ))
@@ -273,10 +273,10 @@ class TestAddPopulationHaplotypes:
         assert haplotypes == [self.REF]
 
     def test_multiallelic_variant_considers_each_allele_independently(self):
-        variant = cast(Variant, _MockVariant("v1", num_alleles=3))
+        variant = cast("Variant", _MockVariant("v1", num_alleles=3))
         alt_allele_2 = [1, 5, 3]
-        sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1), 5: ("v1", 2)}))
-        graph = cast(Graph, _MockGraph(
+        sampler = cast("HaplotypeSamplerOverlay", _MockHaplotypeSampler({2: ("v1", 0), 4: ("v1", 1), 5: ("v1", 2)}))
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={
                 "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "_alt_v1_2": alt_allele_2,
@@ -290,8 +290,8 @@ class TestAddPopulationHaplotypes:
         assert alleles == [{("v1", 0)}, {("v1", 1)}, {("v1", 2)}]
 
     def test_does_not_mutate_input_lists(self):
-        variants = [cast(Variant, _MockVariant("v1"))]
-        graph = cast(Graph, _MockGraph(
+        variants = [cast("Variant", _MockVariant("v1"))]
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={"_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "OTHER#0#chr1#0": self.ALT},
         ))
@@ -305,13 +305,13 @@ class TestAddPopulationHaplotypes:
         assert original_alleles == [{("v1", 0)}]
 
     def test_caps_at_max_haplotypes_keeping_highest_scoring_candidates(self):
-        variant = cast(Variant, _MockVariant("v1", num_alleles=3))
+        variant = cast("Variant", _MockVariant("v1", num_alleles=3))
         alt_allele_2 = [1, 5, 3]
-        sampler = cast(HaplotypeSamplerOverlay, _MockHaplotypeSampler(
+        sampler = cast("HaplotypeSamplerOverlay", _MockHaplotypeSampler(
             {2: ("v1", 0), 4: ("v1", 1), 5: ("v1", 2)},
             scores={tuple(self.ALT): 1.0, tuple(alt_allele_2): 5.0},
         ))
-        graph = cast(Graph, _MockGraph(
+        graph = cast("Graph", _MockGraph(
             self.contig, self.REF,
             paths={
                 "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT, "_alt_v1_2": alt_allele_2,
@@ -329,11 +329,11 @@ class TestAddPopulationHaplotypes:
     def test_same_candidate_found_via_two_targets_is_only_added_once(self):
         """A carrier whose single path covers ALT alleles of two different analysis variants is discovered
         independently while searching for each variant's missing allele, but must only be added once."""
-        variants = [cast(Variant, _MockVariant("v1")), cast(Variant, _MockVariant("v2"))]
+        variants = [cast("Variant", _MockVariant("v1")), cast("Variant", _MockVariant("v2"))]
         sampler = self._sampler()
         ref_combined = self.REF + self.REF2
         multi = self.ALT + self.ALT2  # carries the ALT allele of both v1 and v2 on one path
-        graph = cast(Graph, _MockGraph(
+        graph = cast("Graph", _MockGraph(
             self.contig, ref_combined,
             paths={
                 "_alt_v1_0": self.REF, "_alt_v1_1": self.ALT,
@@ -369,8 +369,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
             # The unique k-mers, which occur at the end of the event, are not present in the true data.
             # We simulate that here with an empty KMC database to speed up the test.
             with open(fasta_file, "w") as f:
-                for i, kmer in enumerate(["A" * cfg.graph.kmer_size]):
-                    f.write(f">{i}\n{kmer}\n")
+                f.writelines(f">{i}\n{kmer}\n" for i, kmer in enumerate(["A" * cfg.graph.kmer_size]))
             subprocess.check_call(
                 f"kmc -t1 -k{cfg.graph.kmer_size} -b -ci1 -fa {quote(fasta_file)} {quote(kmc_prefix)} {quote(kmc_dir)}",
                 shell=True,
@@ -416,10 +415,9 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
 
         # Create heterozygous counts (15) for the unique k-mers spanning the end of the event
         sequence ="TCTCAGATTGAGAATGGCTGGTCTAATTGATAGGGGCATACTGTGAAGAACTTGACCTCTA"
-        kmers = [sequence[i:i + cfg.graph.kmer_size] for i in range(0, len(sequence) - cfg.graph.kmer_size + 1)]
+        kmers = [sequence[i:i + cfg.graph.kmer_size] for i in range(len(sequence) - cfg.graph.kmer_size + 1)]
         with open(fasta_file, "w") as f:
-            for i, kmer in enumerate(kmers * 15):
-                f.write(f">{i}\n{kmer}\n")
+            f.writelines(f">{i}\n{kmer}\n" for i, kmer in enumerate(kmers * 15))
         subprocess.check_call(
             f"kmc -t1 -k{cfg.graph.kmer_size} -b -ci1 -fa {quote(str(fasta_file))} {quote(str(kmc_prefix))} {quote(str(tmp_path))}",
             shell=True,
@@ -462,8 +460,7 @@ chr12	21976631	.	CAGGGGCATACTGTGAAGAACTTGACCTCTAATTAATAGCTAAGGCCGATCCTAAGAGAGCCA
         # The unique k-mers, which occur at the end of the event, are not present in the true data.
         # We simulate that here with a synthetic KMC database containing only off-target k-mers.
         with open(fasta_file, "w") as f:
-            for i, kmer in enumerate(["A" * cfg.graph.kmer_size]):
-                f.write(f">{i}\n{kmer}\n")
+            f.writelines(f">{i}\n{kmer}\n" for i, kmer in enumerate(["A" * cfg.graph.kmer_size]))
         subprocess.check_call(
             f"kmc -t1 -k{cfg.graph.kmer_size} -b -ci1 -fa {quote(str(fasta_file))} {quote(str(kmc_prefix))} {quote(str(tmp_path))}",
             shell=True,

@@ -3,7 +3,6 @@ import os
 import tempfile
 import weakref
 from collections.abc import Sequence
-from typing import Optional
 
 import lightning as L
 import pysam
@@ -37,7 +36,7 @@ class VariantExamples:
         read_path: str,
         sample: Sample,
         inference_vcf: str,
-        background_vcf: Optional[str] = None,
+        background_vcf: str | None = None,
         mean=(0.5,),
         std=(0.5,),
         batch_size=64,
@@ -153,7 +152,7 @@ class OnlinePackedImageDataModule(L.LightningDataModule):
         self._ray_dir.cleanup()
 
 
-def _dict_of_alleles(genotype: Sequence[Sequence[str]]) -> dict[str, tuple[Optional[str], ...]]:
+def _dict_of_alleles(genotype: Sequence[Sequence[str]]) -> dict[str, tuple[str | None, ...]]:
     """Create a dictionary mapping variant IDs to allele indices in the predicted genotype
 
     For example, `(("alt_abc_0", "alt_def_1"), ("alt_abc_1", "alt_def_1"))` returns
@@ -232,7 +231,7 @@ class VCFWriterCallback(L.Callback):
 
 
 def genotype(
-    cfg, read_path: str, sample: Sample, inference_vcf: str, output_path: str, *, background_vcf: Optional[str] = None
+    cfg, read_path: str, sample: Sample, inference_vcf: str, output_path: str, *, background_vcf: str | None = None
 ):
     assert cfg.simulation.replicates >= 1, "At least one replicate is required for genotyping"
     torch.set_num_threads(min(4, cfg.threads))

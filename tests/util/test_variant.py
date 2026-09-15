@@ -1,4 +1,5 @@
 import os
+
 import pytest
 
 from npsv3.util.range import Range

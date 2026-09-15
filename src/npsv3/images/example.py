@@ -3,22 +3,17 @@ import gzip
 import itertools
 import json
 import logging
-import math
 import os
-import random
-import shutil
-import sys
 import tempfile
 import typing
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 import hydra
 import numpy as np
 import pysam
 import ray
 import webdataset as wds
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
 
@@ -37,15 +32,14 @@ from npsv3.graphs.haplotype import (
 from npsv3.images.generator import ImageGenerator
 from npsv3.models.loaders import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.realigner import FragmentRealigner
-from npsv3.simulation import augment_sample, simulate_variant_sequencing, split_bam_by_tag
+from npsv3.simulation import simulate_variant_sequencing, split_bam_by_tag
 from npsv3.types import PathType
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
-from npsv3.util.reads import downsample_reads, haplotag_reads
+from npsv3.util.reads import downsample_reads
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, kmc_filter
 from npsv3.util.timeout import Timeout
 from npsv3.util.variant import Variant, VariantFileReader
-from npsv3.util.vcf import index_variant_file, pysam_write_mode
 
 
 class InsufficientHaplotypesError(RuntimeError):

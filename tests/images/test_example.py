@@ -1,24 +1,18 @@
 import glob
-import gzip
 import json
 import os
-from pathlib import Path
-import tarfile
 
-import numpy as np
 import pytest
 import torch
 
-from npsv3.graphs.haplotype import _create_graph_and_sampler, _filter_variants, KmerCounts
+from npsv3.graphs.haplotype import KmerCounts, _create_graph_and_sampler, _filter_variants
 from npsv3.images.example import (
     example_to_image,
     make_graph_example,
     vcf_to_graph_examples,
 )
-from npsv3.models.loaders import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
-from npsv3.util.sample import kmc_filter
 from npsv3.util.variant import VariantFileReader
 
 from .. import (
@@ -27,7 +21,6 @@ from .. import (
     cache_filter_kmc_database,
     cache_graph_and_filter_kmc_database,
     create_vcf,
-    hash_vcf_file,
     result_path,
 )
 
@@ -124,7 +117,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             graph_shards=graph_shards,
             filtered_kmer_path=filtered_kmer_path,
         )
-              
+
         assert os.path.exists(os.path.join(output_dir, "meta_ds", "train.jsonl"))
         assert os.path.exists(os.path.join(output_dir, "meta_ds", "train.jsonl.idx"))
         imgs_shards = sorted(glob.glob(os.path.join(output_dir, "imgs_ds", "imgs-*.tar")))
@@ -150,7 +143,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         assert torch.equal(first_batch.offsets, torch.tensor([0, 10]))
         assert len(first_batch.genotype_label) == 1 and all(first_batch.genotype_label > 0)
         assert first_batch.meta == [str(region)]
-        
+
 
 
 @pytest.mark.cfg_overrides(

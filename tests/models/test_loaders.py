@@ -1,20 +1,13 @@
-import os
 import random
 
 import pytest
 import torch
-import webdataset as wds
 
-from npsv3.images.example import (
-    example_to_image,
-)
 from npsv3.models.loaders import (
     ImageGroup,
     build_packed_batch,
     select_packs,
 )
-
-from .. import EXPERIMENTS_DIR, result_path
 
 
 def make_group(num_replicates, num_genotypes, *, genotype_label=0, width=8, height=4, channels=2, fill=0, meta=None):

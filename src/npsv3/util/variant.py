@@ -1,14 +1,14 @@
 import hashlib
 import typing
 
-from omegaconf import DictConfig
 import pysam
+from omegaconf import DictConfig
 
 from npsv3._native_graph import Variant as Variant  # noqa: PLC0414
 from npsv3._native_graph import VariantFileReader as VariantFileReader  # noqa: PLC0414
 from npsv3._native_graph import VariantFileWriter as VariantFileWriter
+from npsv3.types import PathType
 from npsv3.util.range import Range
-from npsv3.types import PathType  # noqa: PLC0414
 
 # Length of SHA1 hex digest used for variants IDs by vg
 VARIANT_ID_LENGTH = 40

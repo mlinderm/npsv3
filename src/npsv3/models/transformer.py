@@ -1,10 +1,9 @@
 import io
 import os
 import random
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generator, Iterable, Optional, Tuple, Union
+from typing import Any
 
 import hydra
 import lightning as L
@@ -65,7 +64,7 @@ class MaskableVisionTransformer(timm.models.VisionTransformer):
             no_decay.add("mask_token")
         return no_decay
 
-    def forward_features(self, pixel_values: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, bool_masked_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward_features(self, pixel_values: torch.Tensor, attn_mask: torch.Tensor | None = None, bool_masked_pos: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass through feature layers (embeddings, transformer blocks, post-transformer norm)"""
         # This is a copy of timm's forward_features with the addition of the mask application
         embeddings = self.patch_embed(pixel_values)
@@ -183,7 +182,7 @@ class MaskedImageModeling(L.LightningModule):
 
 
 class VisionTransformerEncoder(timm.models.VisionTransformer):
-    def __init__(self, *args, checkpoint_path: Optional[str] = None, **kwargs):
+    def __init__(self, *args, checkpoint_path: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         # Load pre-training checkpoint (from masked image modeling) if provided. We assume the relevant weights are prefixed with "encoder."
         if checkpoint_path:
@@ -362,14 +361,14 @@ class MiM(L.LightningModule):
     def forward(self, pixel_values, bool_masked_pos):
         outputs = self.model(pixel_values, bool_masked_pos=bool_masked_pos)
         return outputs
-    
+
     def training_step(self, batch):
         pixel_values, bool_masked_pos, *_ = batch
         out = self(pixel_values, bool_masked_pos)
         loss = out.loss
         self.log('train_loss', loss, prog_bar=True)
         return loss
-    
+
     def configure_optimizers(self):
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
         return { "optimizer": optimizer }
@@ -413,10 +412,10 @@ class ModelOutput:
 
 @dataclass
 class MaskedImageModelingOutput(ModelOutput):
-    loss: Optional[torch.FloatTensor] = None
-    reconstruction: Optional[torch.FloatTensor] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
-    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    loss: torch.FloatTensor | None = None
+    reconstruction: torch.FloatTensor | None = None
+    hidden_states: tuple[torch.FloatTensor, ...] | None = None
+    attentions: tuple[torch.FloatTensor, ...] | None = None
 
     @property
     def logits(self):
@@ -442,14 +441,14 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple, MaskedImageModelingOutput]:
+        pixel_values: torch.Tensor | None = None,
+        bool_masked_pos: torch.BoolTensor | None = None,
+        head_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        interpolate_pos_encoding: bool | None = None,
+        return_dict: bool | None = None,
+    ) -> tuple | MaskedImageModelingOutput:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if bool_masked_pos is not None and (self.config.patch_size != self.config.encoder_stride):
@@ -521,7 +520,7 @@ class Classifier(L.LightningModule):
     def forward(self, pixel_values, labels):
         outputs = self.model(pixel_values, labels=labels)
         return outputs
-    
+
     def training_step(self, batch):
         pixel_values, _, _, _, labels = batch
         out = self(pixel_values, labels)
@@ -557,10 +556,10 @@ class ModelAssessmentCallback(L.pytorch.callbacks.Callback):
             predicted_label = torch.argmax(logits).item()
             if real_label == predicted_label:
                 self.results.append(1)
-            else: 
+            else:
                 self.results.append(0)
                 self.missed.append((regions[i], "prediction:", predicted_label, "logits:", logits))
-  
+
     def on_predict_end(self, trainer, model):
         print(f"\nAssessing accuracy of {len(self.results)} predictions")
         correct = sum(self.results)
@@ -624,7 +623,7 @@ def display_image(urls):
     return image
 
 def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
-    
+
     mask = Image.new("RGB", (288, 96))
     pixel_array = np.array(mask)
 
@@ -636,7 +635,7 @@ def generate_mask_visual(bool_masked_pos, patch_size, mask_path):
                 mask.putpixel((j, i), (255, 255, 255))
             else:
                 mask.putpixel((j, i), (0, 0, 0))
-                
+
     mask.save(mask_path)
 
 def data_driven_masking(pixel_values, num_patches, patch_size, i_bool_mask_pos):

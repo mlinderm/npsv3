@@ -12,6 +12,7 @@ from npsv3.util.vcf import index_variant_file
 
 from . import B37_REF_FASTA, EXPERIMENTS_DIR, HG002_DIPCALL_VCF, HG002_HG38_BAM, HG38_REF_FASTA, data_path
 
+
 def _indexed_vcf(tmp_path, vcf: bytes) -> str:
     """Create indexed VCF from literal string"""
     vcf_path = os.path.join(tmp_path, "test.vcf.gz")

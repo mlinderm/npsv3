@@ -17,7 +17,7 @@ from torchvision.transforms import v2 as transforms
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost):
-        super(VectorQuantizer, self).__init__()
+        super().__init__()
 
         # dimensionality of each codebook vector
         self._embedding_dim = embedding_dim
@@ -66,7 +66,7 @@ class VectorQuantizer(nn.Module):
 
 class VectorQuantizerEMA(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost, decay, epsilon=1e-5):
-        super(VectorQuantizerEMA, self).__init__()
+        super().__init__()
 
         # dimensionality of each codebook vector
         self._embedding_dim = embedding_dim
@@ -167,7 +167,7 @@ class VectorQuantizerEMA(nn.Module):
 
 class Residual(nn.Module):
     def __init__(self, in_channels, num_hiddens, num_residual_hiddens):
-        super(Residual, self).__init__()
+        super().__init__()
         self._block = nn.Sequential(
             nn.ReLU(True),
             nn.Conv2d(
@@ -188,7 +188,7 @@ class Residual(nn.Module):
 
 class ResidualStack(nn.Module):
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
-        super(ResidualStack, self).__init__()
+        super().__init__()
         self._layers = nn.ModuleList(
             [Residual(in_channels, num_hiddens, num_residual_hiddens) for _ in range(num_residual_layers)]
         )
@@ -210,7 +210,7 @@ class Encoder(nn.Module):
         strides=[4, 4],
         padding=[0, 0],
     ):
-        super(Encoder, self).__init__()
+        super().__init__()
         # Here is the 16x downsampling on each dimension. Alternate approaches seem to interleave downsampling with residual blocks
         # Could we use different downsampling factors for height and width?
         self._conv_1 = nn.Conv2d(
@@ -249,7 +249,7 @@ class Decoder(nn.Module):
         strides=[4, 4],
         padding=[0, 0],
     ):
-        super(Decoder, self).__init__()
+        super().__init__()
         self._conv_1 = nn.Conv2d(in_channels=in_channels, out_channels=num_hiddens, kernel_size=3, stride=1, padding=1)
         self._residual_stack = ResidualStack(
             in_channels=num_hiddens,

@@ -81,12 +81,12 @@ class TestSampleFromJson:
 
 class TestEstimateKmerCoverage:
     def test_unimodal_distribution(self):
-        # mode count (30 with 80k distinct kmers) >= median count (30 with cumulative 150k distinct kmers out of 235k total) 
+        # mode count (30 with 80k distinct kmers) >= median count (30 with cumulative 150k distinct kmers out of 235k total)
         histogram = pd.Series({28: 40_000, 29: 70_000, 30: 80_000, 31: 60_000, 32: 30_000, 33: 15_000})
         assert _estimate_coverage_from_histogram(histogram) == 30
 
     def test_bimodal_returns_secondary_peak(self):
-        # mode count (15 with 50k distinct kmers) <= median count (16 with cumulative 90k distinct kmers out of 180k total), 
+        # mode count (15 with 50k distinct kmers) <= median count (16 with cumulative 90k distinct kmers out of 180k total),
         # secondary peak at 30 with 45k distinct kmers
         histogram = pd.Series({15: 50_000, 16: 40_000, 29: 25_000, 30: 45_000, 31: 20_000})
         assert _estimate_coverage_from_histogram(histogram) == 30

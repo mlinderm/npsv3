@@ -3,6 +3,7 @@ from collections import defaultdict
 from intervaltree import IntervalTree
 
 from npsv3._native_graph import Range as Range
+
 # from pysam import AlignedSegment
 # from pysam.libcutils import parse_region
 

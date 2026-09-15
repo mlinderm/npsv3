@@ -1,10 +1,8 @@
-import random
 
 import hydra
 import pytest
 import torch
 
-from .. import B37_REF_FASTA, data_path, result_path
 
 class TestLearningRateSchedulers:
     @pytest.mark.cfg_overrides(

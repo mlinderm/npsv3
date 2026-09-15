@@ -1,5 +1,5 @@
 import heapq
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import hydra
 import lightning as L
@@ -8,7 +8,6 @@ import torchmetrics
 from torch import nn
 from torch.nn import functional as F
 from torchvision import models
-from torchvision.transforms import v2 as transforms
 
 from npsv3.models.loaders import PackedBatch
 from npsv3.models.metrics import (
@@ -18,7 +17,7 @@ from npsv3.models.metrics import (
     GenotypingNonRefPrecision,
     GenotypingNonRefRecall,
 )
-from npsv3.models.transformer import Classifier, ViTConfig, ViTModel
+from npsv3.models.transformer import ViTConfig, ViTModel
 
 
 class InceptionEncoder(nn.Module):
@@ -43,7 +42,7 @@ class InceptionEncoder(nn.Module):
 
 class ViTEncoder(nn.Module):
     def __init__(self, num_channels=8, pretrained_path=None):
-        super(ViTEncoder, self).__init__()
+        super().__init__()
         self.num_channels = num_channels
 
         config = ViTConfig(num_channels=self.num_channels, image_size = (96, 288), )
@@ -157,7 +156,7 @@ class InfoNCE(nn.Module):
 
         return -loss / metric.size(0), metric.size(0)  # Average loss across all variants
 
-    
+
 class RINCE(nn.Module):
     """
     Implements the Ranking Info Noise Contrastive Estimation (RINCE) loss for contrastive learning using precomputed similarity scores
@@ -186,10 +185,10 @@ class RINCE(nn.Module):
         for variant_metric, variant_target in zip(metric.unbind(), target.unbind(), strict=True):
             negative_mask = variant_target == 0
             hard_negatives = variant_metric[negative_mask]
-            variant_loss = 0 
-            for rank in range(1, self.max_rank + 1): 
+            variant_loss = 0
+            for rank in range(1, self.max_rank + 1):
                 #Rank 1 positives
-                
+
                 R1mask = variant_target == rank
                 positivesR1 = variant_metric[R1mask]
 
@@ -243,7 +242,7 @@ class PackedVariant(L.LightningModule):
         loss: nn.Module,
         optimizer: torch.optim.Optimizer,
         predictor: nn.Module,
-        scheduler: Optional[Callable] = None,
+        scheduler: Callable | None = None,
     ):
         super().__init__()
 
@@ -431,14 +430,14 @@ def predict(cfg, **kw_args):
               "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
         padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
         onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
- 
+
         correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
         total = labels_nt.shape[0]
-        
+
         targ = padded_target > 0
         indices = torch.arange(targ.size(0))
         non_reference_concordance = torch.sum(targ[indices, preds])
 
-        print("\nAccuracy", correct.float() / total, 
+        print("\nAccuracy", correct.float() / total,
                 "\nnon-reference concordance", non_reference_concordance.float() / total)
 

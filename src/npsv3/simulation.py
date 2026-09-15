@@ -1,7 +1,6 @@
 import atexit
 import contextlib
 import copy
-import glob
 import json
 import logging
 import os

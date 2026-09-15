@@ -83,7 +83,7 @@ exclude_lines = [
 
 [tool.ruff]
 extend = "ruff_defaults.toml"
-extend-exclude = ["lib"]
+extend-exclude = ["lib", "src/npsv3/_native_graph.pyi", "scripts/npsv2_pb2.py"]
 
 [tool.ruff.lint]
 extend-ignore = [
@@ -102,6 +102,14 @@ no-build-isolation-package = ["npsv3"]
 # Always include the "build" group so the build-time deps above are present
 # in the shared environment before npsv3 itself is built.
 default-groups = ["build", "dev"]
+# This project is Linux/HPC-only (native extension, conda-provided tooling
+# like bwa/samtools/odgi); scoping resolution avoids the universal resolver
+# forking on platforms/Python versions nothing here actually targets.
+environments = ["sys_platform == 'linux'"]
+# pytorch-cu126 is otherwise the first index with a matching tqdm version, but
+# only has an old release; let resolution pick the newer PyPI tqdm that
+# megatron-energon's multi-storage-client dependency requires.
+index-strategy = "unsafe-best-match"
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
@@ -128,13 +136,13 @@ dev = [
   "coverage[toml]~=7.11",
   "pytest~=9.0",
   "pytest-mock~=3.12",
-  "pytest-randomly~=3.15",
-  "pytest-rerunfailures~=14.0",
+  "pytest-randomly~=5.0",
+  "pytest-rerunfailures~=16.0",
   "pytest-xdist[psutil]~=3.5",
   "pytest-timeout",
   "pytest-benchmark~=5.2",
   "memray~=1.20",
   "debugpy>=1.8.0", # Needed by Ray
   "mypy>=1.0.0",
-  "ruff==0.11.2",
+  "ruff==0.16.7",
 ]
