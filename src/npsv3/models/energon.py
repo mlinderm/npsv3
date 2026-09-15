@@ -1,35 +1,30 @@
 """Megatron-Energon polylithic loader for packed pileup images.
 
-Energon-specific, so that the packing core in [loaders.py](loaders.py) -- `select_packs`,
-`build_packed_batch`, `PackedBatch` -- stays importable without the dependency and survives a loader
-swap.
-
-The shape of the thing: a region's metadata (`r`, `g`, geometry, label) lives in a tiny JSON shard,
-its pixels in a separate gzipped shard. The packing buffer therefore decides a pack from metadata
-alone and only then fetches the bytes for the groups it actually selected, which is what makes a
-512-group lookahead affordable. Compared with the greedy `PackedImageDataModule`:
-
-* every rank takes the same number of steps, because `limit_train_batches` defines a virtual epoch
-  over an indefinitely-repeating dataset rather than the shard slice deciding it;
-* the loader's position rides in the Lightning checkpoint, so a run resumes mid-epoch exactly;
-* images arrive as `uint8` and are normalized on the GPU, roughly a 4x cut in host->device bytes.
+An example's (region's) metadata (`R`, `G`, geometry, label) lives in a small JSON record, with the images themselves
+in a separate gzipped tar. Determining the packing only requires the metadata, enabling a larger lookahead buffer. The
+actual pixel data is only fetched after packing has been determined.
 """
 
+import contextlib
 import gzip
+import io
 import json
 import logging
 import math
 import os
-import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import lightning as L
 import numpy as np
 import torch
+import yaml
 from megatron.energon import (
     Cooker,
+    CrudeJsonlDatasetFactory,
     FileStore,
     FileStoreCachePool,
     Lazy,
@@ -45,29 +40,27 @@ from megatron.energon import (
     get_val_dataset,
     stateless,
 )
+from megatron.energon.epathlib import EPath
+from megatron.energon.flavors import BaseWebdatasetFactory, CrudeWebdataset
+from megatron.energon.flavors.webdataset.config import MAIN_FOLDER_NAME
 from torchvision.transforms import v2 as transforms
 
 from npsv3.models.loaders import (
     LABEL_PADDING_VALUE,
+    REAL_SUFFIX,
+    SIMS_SUFFIX,
     ImageGroup,
     PackedBatch,
     build_packed_batch,
+    ntuple,
     select_packs,
     to_tensor,
 )
 
-REAL_SUFFIX = "real.bin.gz"
-SIMS_SUFFIX = "sims.bin.gz"
-
 
 @edataclass
 class GroupMeta(Sample):
-    """One region's metadata, with lazy handles for its pixels.
-
-    Cheap enough to hold thousands of, which is the point: `packing_buffer_size` groups of these are
-    what `select_packs` sees.
-    """
-
+    """One region's metadata, with lazy handles for the actual images"""
     #: Replicates, genotypes, and the image geometry (height, width, channels)
     r: int
     g: int
@@ -79,8 +72,7 @@ class GroupMeta(Sample):
     #: The derived per-genotype rank view of `label`, recorded by the writer rather than recomputed.
     label_rank: list[int] | None
     region: str
-    #: Lazy handles into the pixel tree; no bytes are read until `.get()`. `sims` is replaced by a
-    # duck-typed `_SubsampledLazy` when genotype subsampling is on.
+    #: Lazy handles into the pixel tree; no bytes are read until `.get()`.
     real: Lazy
     sims: Any = None
     #: Image slots this group occupies in a pack. Filled in by `preencode_sample`.
@@ -89,17 +81,19 @@ class GroupMeta(Sample):
 
 @cooker(need_cache=True)
 @stateless
-def cook_group(sample: dict, px: FileStore, cache) -> GroupMeta:
-    """Turn a crude JSON sample into a `GroupMeta` with lazy pixel handles.
+def cook_group(sample: dict, imgs: FileStore, cache) -> GroupMeta:
+    """Return `GroupMeta` with lazy pixel handles from a crude JSON sample
 
-    `basic_sample_keys` is mandatory, not decorative: without `__key__` / `__restore_key__` the
-    dataset is not restorable, which is half the reason for this loader.
+    Note `basic_sample_keys` is mandatory for restorability.
     """
     meta = sample["json"]
     if isinstance(meta, (bytes, str)):
         meta = json.loads(meta)
 
-    key = sample["__key__"]
+    # `sample["__key__"]` is the jsonl row number for the CrudeJsonlDatasetFactory meta_ds (only
+    # `basic_sample_keys` needs it, for restorability) -- it is not the pixel-tar member key, which
+    # `EnergonExampleWriter` carries as an explicit `key` field in the JSON payload instead.
+    key = meta["key"]
     return GroupMeta(
         **basic_sample_keys(sample),
         r=int(meta["r"]),
@@ -110,36 +104,58 @@ def cook_group(sample: dict, px: FileStore, cache) -> GroupMeta:
         label=None if meta.get("label") is None else int(meta["label"]),
         label_rank=None if meta.get("label_rank") is None else [int(rank) for rank in meta["label_rank"]],
         region=meta.get("region", key),
-        real=cache.get_lazy(px, f"{key}.{REAL_SUFFIX}"),
-        sims=cache.get_lazy(px, f"{key}.{SIMS_SUFFIX}") if int(meta["g"]) > 0 else None,
+        real=cache.get_lazy(imgs, f"{key}.{REAL_SUFFIX}"),
+        sims=cache.get_lazy(imgs, f"{key}.{SIMS_SUFFIX}") if int(meta["g"]) > 0 else None,
     )
+
+
+def _group_cost(r: int, g: int, w: int, w_bucket: int | None) -> int:
+    """Image slots one group occupies in a pack: ``1 + r*g``, times ``ceil(w / w_bucket)`` if bucketed."""
+    slots = 1 + r * g
+    if w_bucket:
+        slots *= math.ceil(w / w_bucket)
+    return slots
+
+
+def _group_accepted(r: int, g: int, w: int, *, g_max: int | None, r_max: int | None, w_max: int | None) -> bool:
+    """Same reject rules as `PackedGroupTaskEncoder.preencode_sample`, without needing a `GroupMeta`."""
+    if g < 1 or r < 1:
+        # No simulations, so nothing for the metric-learning objective to score against
+        return False
+    if g_max is not None and g > g_max:
+        return False
+    if r_max is not None and r > r_max:
+        return False
+    if w_max is not None and w > w_max:
+        return False
+    return True
 
 
 GZIP_MAGIC = b"\x1f\x8b"
 
 
 def _fetch_array(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> np.ndarray:
-    """Fetch, gunzip and reshape one lazy pixel member.
-
-    The aux store energon hands the cooker is wrapped in a `DecodeFileStore`, whose default decoder
-    includes webdataset's `gzfilter` -- so a `.bin.gz` member usually arrives already decompressed.
-    That is decoder configuration, not a guarantee, so check the magic rather than assume either way.
-
-    `bytearray` rather than `bytes` so the array is writable: `torch.from_numpy` warns on a read-only
-    buffer, and `pytest.ini` turns warnings into errors.
-    """
+    """Return ndarray with valid shape from lazy pixel member (including fetching and any necessary decompression)"""
     raw = lazy.get(sample)
+    # The aux store energon hands the cooker is wrapped in a `DecodeFileStore`, whose default decoder
+    # includes webdataset's `gzfilter` -- so a `.bin.gz` member usually arrives already decompressed.
+    # That is decoder configuration, not a guarantee, so check the magic rather than assume either way.
     if raw[:2] == GZIP_MAGIC:
         raw = gzip.decompress(raw)
+
+    # `bytearray` rather than `bytes` so the array is writable: `torch.from_numpy` warns on a read-only
+    # buffer, and `pytest.ini` turns warnings into errors.
     return np.frombuffer(bytearray(raw), dtype=np.uint8).reshape(shape)
 
+# The base `TaskEncoder`'s `T_encoded_sample` type parameter is `Any` here rather than a concrete type:
+# `select_samples_to_pack` uses it for a flat `GroupMeta` (pre-pack metadata), while `pack_selected_samples`/`batch`
+# use it for the materialized `PackedGroupBatch` (post-pack), and no single type can honor both -- packing genuinely
+# changes representation, which `TaskEncoder`'s generic contract does not have a slot for.
+class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatch]):
+    """Pack one or more whole regions into fixed-budget `PackedBatch`es.
 
-class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, GroupMeta, PackedBatch, PackedBatch]):
-    """Packs whole regions into fixed-budget `PackedBatch`es.
-
-    A region's real image and all of its simulated candidates are one atomic unit: the metric-learning
-    objective scores the real image against every simulation for that region, so a group can never be
-    split across ranks or batches. That is what makes this a packing problem rather than a batching one.
+    A region's real image and a complete set of its simulated candidates are an atomic unit (the loss function needs to
+    score the real image vs. all possible simulated genotypes).
     """
 
     cookers = (Cooker(cook_group),)
@@ -152,18 +168,16 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, GroupMeta, PackedBatch, Pack
         w_max: int | None = None,
         g_max: int | None = None,
         r_max: int | None = None,
-        g_train: int | None = None,
         pad: bool = True,
         padding_value: int = LABEL_PADDING_VALUE,
     ):
         """
         Args:
-            budget: Image slots per pack, the same meaning as `batch_size` in `PackedImageDataModule`.
+            budget: Image slots per pack, i.e., batch size
             w_bucket: Width bucket size. Groups only share a pack if they share a bucket.
             w_max: Reject groups wider than this.
             g_max: Reject groups with more genotypes than this.
             r_max: Reject groups with more replicates than this.
-            g_train: If set, subsample to this many genotypes per group per step. Must retain the positive.
             pad: Pad each pack out to `budget` rows with zeros.
             padding_value: Label value for padding rows and unlabeled groups.
         """
@@ -173,27 +187,16 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, GroupMeta, PackedBatch, Pack
         self.w_max = w_max
         self.g_max = g_max
         self.r_max = r_max
-        self.g_train = g_train
         self.pad = pad
         self.padding_value = padding_value
 
     def _cost(self, sample: GroupMeta) -> int:
-        slots = 1 + sample.r * sample.g
-        if self.w_bucket:
-            slots *= math.ceil(sample.w / self.w_bucket)
-        return slots
+        return _group_cost(sample.r, sample.g, sample.w, self.w_bucket)
 
     @stateless
     def preencode_sample(self, sample: GroupMeta) -> GroupMeta:
-        """Compute the pack cost and reject groups that cannot be packed. Touches no pixels."""
-        if sample.g < 1 or sample.r < 1:
-            # No simulations, so nothing for the metric-learning objective to score against
-            raise SkipSample
-        if self.g_max is not None and sample.g > self.g_max:
-            raise SkipSample
-        if self.r_max is not None and sample.r > self.r_max:
-            raise SkipSample
-        if self.w_max is not None and sample.w > self.w_max:
+        """Compute the pack cost and reject groups that cannot be packed without needing images."""
+        if not _group_accepted(sample.r, sample.g, sample.w, g_max=self.g_max, r_max=self.r_max, w_max=self.w_max):
             raise SkipSample
 
         sample.cost = self._cost(sample)
@@ -209,46 +212,12 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, GroupMeta, PackedBatch, Pack
         )
         return [[samples[index] for index in pack] for pack in packs]
 
-    @stateless(restore_seeds=True)
-    def postencode_sample(self, sample: GroupMeta) -> GroupMeta:
-        """Optionally subsample the genotype axis, off by default (`g_train=None`).
-
-        Subsampling thins the G axis only, never the R axis, so every retained genotype keeps all of
-        its replicates. The retained set always includes the reference genotype (index 0, the
-        homozygous-reference candidate, and the anchor for the third-rank rule) and the positive --
-        drop the positive and the group has nothing for the loss to pull towards. `label` is then
-        remapped to its new position and `label_rank` is *sliced* rather than recomputed, so each
-        retained genotype keeps exactly the rank the generator recorded for it.
-        """
-        if self.g_train is None or sample.g <= self.g_train:
-            return sample
-
-        required = {0}
-        if sample.label is not None:
-            required.add(sample.label)
-        assert len(required) <= self.g_train, f"g_train={self.g_train} cannot retain both genotype 0 and the positive"
-
-        optional = [index for index in range(sample.g) if index not in required]
-        keep = sorted(required | set(random.sample(optional, self.g_train - len(required))))
-
-        sample.sims = _SubsampledLazy(sample.sims, keep=keep, shape=(sample.r, sample.g, sample.h, sample.w, sample.c))
-        if sample.label_rank is not None:
-            sample.label_rank = [sample.label_rank[index] for index in keep]
-        if sample.label is not None:
-            sample.label = keep.index(sample.label)
-        sample.g = len(keep)
-        sample.cost = self._cost(sample)
-        return sample
-
     @stateless
     def pack_selected_samples(self, samples: list[GroupMeta]) -> "PackedGroupBatch":
         groups = []
         for sample in samples:
             real = _fetch_array(sample.real, sample, (sample.h, sample.w, sample.c))
-            if isinstance(sample.sims, _SubsampledLazy):
-                sims = sample.sims.get(sample)
-            else:
-                sims = _fetch_array(sample.sims, sample, (sample.r, sample.g, sample.h, sample.w, sample.c))
+            sims = _fetch_array(sample.sims, sample, (sample.r, sample.g, sample.h, sample.w, sample.c))
 
             label_rank = (
                 torch.tensor(sample.label_rank, dtype=torch.long)
@@ -300,33 +269,175 @@ class PackedGroupBatch(PackedBatch):
     __restore_key__: tuple = ()
 
 
-class _SubsampledLazy:
-    """Wraps a sims `Lazy` so the fetch slices the genotype axis on arrival.
+def _prepare_imgs_tree(imgs_dir: str, *, num_workers: int) -> None:
+    """Index `imgs_ds`'s tar shards as a prepared CRUDE energon dataset.
 
-    The whole `(R, G, ...)` block is one gzip member, so subsampling cannot avoid decompressing it;
-    it only avoids carrying the dropped genotypes into the pack.
+    `imgs_ds` always gets one `train` split covering every shard: it is only ever read by key via `FileStore` as an aux
+    store, never filtered by split, however some split is still needed for energon requires to treat `imgs_ds` as a
+    prepared, directory-referenceable dataset.
     """
+    tree = EPath(imgs_dir)
+    all_tars = sorted(str(p.relative_to(Path(imgs_dir))) for p in Path(imgs_dir).glob("**/*.tar"))
+    if not all_tars:
+        msg = f"No imgs_ds/imgs-*.tar shards found under {imgs_dir!r}"
+        raise ValueError(msg)
 
-    def __init__(self, inner: Lazy, *, keep: list[int], shape: tuple[int, ...]):
-        self._inner = inner
-        self._keep = keep
-        self._shape = shape
+    # Swallow the Energon's unconditional prints
+    with contextlib.redirect_stdout(io.StringIO()):
+        BaseWebdatasetFactory.prepare_dataset(
+            tree,
+            all_tars,
+            split_parts_ratio=[("train", 1.0)],
+            shuffle_seed=None,
+            progress_fn=lambda els, length=None: els,  # noqa: ARG005
+            workers=num_workers,
+        )
+    dataset_yaml = {"__module__": "megatron.energon", "__class__": CrudeWebdataset.__name__}
+    with (Path(imgs_dir) / MAIN_FOLDER_NAME / "dataset.yaml").open("w") as dataset_yaml_file:
+        yaml.dump(dataset_yaml, dataset_yaml_file, sort_keys=False)
 
-    def get(self, sample: Any = None) -> np.ndarray:
-        return _fetch_array(self._inner, sample, self._shape)[:, self._keep]
+
+def _merge_meta_shards(meta_dir: str) -> str:
+    """Return path to concatenated `meta-*.jsonl` fragments in sorted filename order prepared as Energon dataset"""
+    fragments = sorted(Path(meta_dir).glob("meta-*.jsonl"))
+    if not fragments:
+        msg = f"No meta_ds/meta-*.jsonl fragments found under {meta_dir!r}"
+        raise ValueError(msg)
+
+    merged_path = Path(meta_dir) / "train.jsonl"
+    with merged_path.open("wb") as merged_file:
+        for fragment in fragments:
+            with fragment.open("rb") as fragment_file:
+                shutil.copyfileobj(fragment_file, merged_file)
+    for fragment in fragments:
+        fragment.unlink()
+
+    CrudeJsonlDatasetFactory.prepare_dataset(EPath(merged_path))
+    return str(merged_path)
+
+
+def prepare_energon_dataset(output_dir: str, *, num_workers: int = 2) -> str:
+    """Prepare the polylithic energon trees saved under `output_dir` as a single train split
+
+    1. `imgs_ds` (the aux pixel tree) is indexed as a single-split prepared dataset, unshuffled, so it can be referenced
+       by directory.
+    2. Every actor's metadata fragment is merged, in plain sorted (actor) order,
+       into one plain `meta_ds/train.jsonl` file that matches `imgs_ds`'s own order. `dataset.yaml` then references it
+       directly (a single `DatasetReference` with `aux: {imgs: ...}`, no blend) -- so a train dataset built with
+       `repeat=False` (see `EnergonPackedImageDataModule`) terminates after one true pass over that file rather than
+       looping.
+
+    Args:
+        output_dir: The directory `EnergonExampleWriter` wrote `meta_ds`/`imgs_ds` under.
+        num_workers: Parallelism for indexing `imgs_ds`'s tar shards.
+
+    Returns:
+        The path to the `dataset.yaml` written.
+    """
+    imgs_dir = os.path.join(output_dir, "imgs_ds")
+    _prepare_imgs_tree(imgs_dir, num_workers=num_workers)
+
+    meta_path = _merge_meta_shards(os.path.join(output_dir, "meta_ds"))
+
+    dataset = {
+        "__module__": "megatron.energon",
+        "__class__": "MetadatasetV2",
+        "splits": {"train": {"path": f"./meta_ds/{Path(meta_path).name}", "aux": {"imgs": "./imgs_ds"}}},
+    }
+    dataset_yaml_path = os.path.join(output_dir, "dataset.yaml")
+    with open(dataset_yaml_path, "w") as dataset_yaml_file:
+        yaml.safe_dump(dataset, dataset_yaml_file, sort_keys=False)
+    return dataset_yaml_path
+
+
+def estimate_epoch_batches(
+    metadataset_path: str,
+    *,
+    budget: int,
+    split_part: str = "train",
+    w_bucket: int | None = None,
+    w_max: int | None = None,
+    g_max: int | None = None,
+    r_max: int | None = None,
+    world_size: int = 1,
+    occupancy: float = 0.9,
+) -> int:
+    """Estimate the number of packed batches in one pass over `split_part`.
+
+    Streams the metadata jsonl file `prepare_energon_dataset` assigned to `split_part` directly
+    (`key, r, g, h, w, c, label, label_rank, region, sample` per group, one small flat record per
+    line) rather than going through the energon pipeline itself, so this touches no pixels and needs
+    no packing buffer -- cheap enough to run before launching training.
+
+    Sums each accepted group's pack cost (`_group_cost`, applying the same reject rules
+    `PackedGroupTaskEncoder.preencode_sample` would via `_group_accepted`) over
+    `dataset.yaml`'s `splits[split_part]["path"]` file, divides by `budget * occupancy` -- a
+    bin-packing lower bound corrected for the sub-100% occupancy packing actually achieves in
+    practice (see `test_occupancy`, typically >90%) -- then by `world_size`, since
+    `wds.split_by_node`-style sharding gives each DDP rank about `1/world_size` of the shards.
+
+    This is an approximation, not an exact count: packing is greedy and each rank's shard slice packs
+    independently, so no single number is the *exact* one-pass length for every rank.
+    `EnergonPackedImageDataModule`'s train datasets repeat indefinitely and every rank is given the
+    same `limit_train_batches` regardless, specifically so the DDP all-reduce is never reached an
+    unequal number of times -- see `test_two_rank_ddp`.
+
+    Args:
+        metadataset_path: Path to the `dataset.yaml` written by `prepare_energon_dataset`.
+        budget: Image slots per pack, i.e., `PackedGroupTaskEncoder.budget` / `batch_size`.
+        split_part: Which split to estimate, e.g. "train" or "val".
+        w_bucket, w_max, g_max, r_max: Same meaning as on `PackedGroupTaskEncoder`.
+        world_size: Number of DDP ranks the estimate should be divided across. Defaults to 1 (the
+            whole split, single-process).
+        occupancy: Expected fraction of each pack's budget that packing actually fills. Defaults to
+            0.9, a conservative reading of `test_occupancy`'s >0.90 sanity threshold.
+
+    Returns:
+        A batch count of at least 1.
+    """
+    root = Path(metadataset_path).parent
+    with Path(metadataset_path).open() as metadataset_file:
+        metadataset = yaml.safe_load(metadataset_file)
+    meta_path = metadataset["splits"][split_part]["path"]
+
+    total_cost = 0
+    with (root / meta_path).open() as jsonl_file:
+        for line in jsonl_file:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
+            if _group_accepted(r, g, w, g_max=g_max, r_max=r_max, w_max=w_max):
+                total_cost += _group_cost(r, g, w, w_bucket)
+
+    packs = total_cost / (budget * occupancy) / world_size
+    return max(1, math.ceil(packs))
+
+
+@contextlib.contextmanager
+def _quiet_energon(verbose: bool):
+    """`get_train_dataset`/`get_val_dataset` unconditionally `print()` a per-worker shard-slice summary
+    while building the dataset (energon's `_print_shard_slices`, with no verbosity flag of its own) --
+    redirected here, and only around those two calls, so nothing else's output is touched.
+    """
+    if verbose:
+        yield
+    else:
+        with contextlib.redirect_stdout(io.StringIO()):
+            yield
 
 
 class EnergonPackedImageDataModule(L.LightningDataModule):
     """Lightning DataModule over the polylithic energon trees.
 
     Args:
-        metadataset_path (str): Path to the `metadataset.yaml` written by `scripts/prepare_energon.sh`.
+        metadataset_path (str): Path to the `dataset.yaml` written by `prepare_energon_dataset`
+            (called automatically by `vcf_to_graph_examples` when writing an energon dataset).
         cache_dir (str | None, optional): Node-local scratch for the cache pool. `/storage` is NFS and
             must not be used. Defaults to None, i.e. `$TMPDIR`.
         batch_size (int, optional): Image-slot budget per pack. Defaults to 256.
         w_bucket (int | None, optional): Width bucket size. Defaults to None (single bucket).
         w_max / g_max / r_max (optional): Reject groups exceeding these. Defaults to None.
-        g_train (int | None, optional): Subsample genotypes per step; must retain the positive. Defaults to None.
         packing_buffer_size (int, optional): Groups of lookahead given to `select_packs`. Defaults to 512.
         shuffle_buffer_size (int, optional): Sample shuffle buffer. Defaults to 4096.
         max_samples_per_sequence (int | None, optional): Limit samples drawn per shard sequence. Defaults to 64.
@@ -336,6 +447,11 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             pool is a confusing ENOSPC deep inside a worker. Defaults to 64.
         limit_val_batches (int | None, optional): Fixed validation length, so ranks agree on the step count.
         pad (bool, optional): Pad packs to batch_size. Defaults to True.
+        repeat (bool, optional): Repeat the train dataset indefinitely, so `limit_train_batches` defines
+            a virtual epoch (see `train_dataloader`). Defaults to True; pass False for a single finite
+            pass over the train split, e.g. in tests that need the dataloader to exhaust.
+        verbose (bool, optional): Let energon's own per-worker shard-slice summary print to stdout
+            (see `_quiet_energon`). Defaults to False.
     """
 
     def __init__(
@@ -348,7 +464,6 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         w_max: int | None = None,
         g_max: int | None = None,
         r_max: int | None = None,
-        g_train: int | None = None,
         packing_buffer_size: int = 512,
         shuffle_buffer_size: int = 4096,
         max_samples_per_sequence: int | None = 64,
@@ -360,34 +475,32 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         mean=(0.5,),
         std=(0.5,),
         seed_offset: int = 0,
+        repeat: bool = True,
+        verbose: bool = False,
         **_kwargs,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        # Normalization moves to the GPU (`on_after_batch_transfer`), which is what buys the transfer
-        # reduction: the loader ships uint8 rather than float32.
+        # Normalization moves to the GPU (`on_after_batch_transfer`) to reduce the size of the data transferred (uint8 vs float32).
         self.transforms = transforms.Compose(
             [
                 transforms.ToDtype(torch.float32, scale=True),  # Normalize expects float input
-                transforms.Normalize(mean=self.hparams.mean, std=self.hparams.std),
+                transforms.Normalize(mean=self.hparams["mean"], std=self.hparams["std"]),
             ]
         )
 
         self._loader = None
         self._cache_pool = None
 
-    # -- construction ------------------------------------------------------------------------
-
     def _task_encoder(self) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
-            budget=self.hparams.batch_size,
-            w_bucket=self.hparams.w_bucket,
-            w_max=self.hparams.w_max,
-            g_max=self.hparams.g_max,
-            r_max=self.hparams.r_max,
-            g_train=self.hparams.g_train,
-            pad=self.hparams.pad,
+            budget=self.hparams["batch_size"],
+            w_bucket=self.hparams["w_bucket"],
+            w_max=self.hparams["w_max"],
+            g_max=self.hparams["g_max"],
+            r_max=self.hparams["r_max"],
+            pad=self.hparams["pad"],
         )
 
     def _worker_config(self) -> WorkerConfig:
@@ -399,61 +512,61 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         return WorkerConfig(
             rank=rank,
             world_size=world_size,
-            num_workers=self.hparams.num_workers,
-            seed_offset=self.hparams.seed_offset,
+            num_workers=self.hparams["num_workers"],
+            seed_offset=self.hparams["seed_offset"],
         )
 
     def _make_cache_pool(self) -> FileStoreCachePool:
         if self._cache_pool is None:
-            cache_dir = self.hparams.cache_dir or os.environ.get("TMPDIR") or "/tmp"  # noqa: S108
-            if cache_dir.startswith("/storage"):
-                msg = f"cache_dir {cache_dir!r} is on NFS; the cache pool must live on node-local scratch"
-                raise ValueError(msg)
+            cache_dir = self.hparams["cache_dir"] or tempfile.gettempdir()
             os.makedirs(cache_dir, exist_ok=True)
-            logging.info("Energon cache pool in %s (capped at %.1f GB)", cache_dir, self.hparams.max_cache_size_gbytes)
+            logging.info(
+                "Energon cache pool in %s (capped at %.1f GB)", cache_dir, self.hparams["max_cache_size_gbytes"]
+            )
             self._cache_pool = FileStoreCachePool(
                 # A Path, not a str: energon joins onto it with `/`
                 parent_cache_dir=Path(cache_dir),
-                num_workers=self.hparams.cache_workers,
-                max_cache_size_gbytes=self.hparams.max_cache_size_gbytes,
+                num_workers=self.hparams["cache_workers"],
+                max_cache_size_gbytes=self.hparams["max_cache_size_gbytes"],
             )
         return self._cache_pool
 
     def train_dataloader(self):
-        if self.hparams.num_workers < 1:
+        if self.hparams["repeat"] and self.hparams["num_workers"] < 1:
             # With workers, energon keeps one iterator alive across `iter()` calls, which is what
             # makes `limit_train_batches` a *virtual* epoch that advances through the data. Without
             # them, every epoch restarts the underlying iteration from the top.
             logging.warning("num_workers=0: each virtual epoch will restart the dataset rather than continue it")
 
-        dataset = get_train_dataset(
-            self.hparams.metadataset_path,
-            split_part="train",
-            worker_config=self._worker_config(),
-            # The pack *is* the batch; this is not a placeholder
-            batch_size=1,
-            packing_buffer_size=self.hparams.packing_buffer_size,
-            shuffle_buffer_size=self.hparams.shuffle_buffer_size,
-            max_samples_per_sequence=self.hparams.max_samples_per_sequence,
-            task_encoder=self._task_encoder(),
-        )
+        with _quiet_energon(self.hparams["verbose"]):
+            dataset = get_train_dataset(
+                self.hparams["metadataset_path"],
+                split_part="train",
+                worker_config=self._worker_config(),
+                # The pack *is* the batch; this is not a placeholder
+                batch_size=1,
+                packing_buffer_size=self.hparams["packing_buffer_size"],
+                shuffle_buffer_size=self.hparams["shuffle_buffer_size"],
+                max_samples_per_sequence=self.hparams["max_samples_per_sequence"],
+                task_encoder=self._task_encoder(),
+                repeat=self.hparams["repeat"],
+            )
         self._loader = get_savable_loader(dataset, cache_pool=self._make_cache_pool())
         return self._loader
 
     def val_dataloader(self):
-        dataset = get_val_dataset(
-            self.hparams.metadataset_path,
-            split_part="val",
-            worker_config=self._worker_config(),
-            batch_size=1,
-            packing_buffer_size=self.hparams.packing_buffer_size,
-            # A fixed length so every rank agrees on the validation step count too
-            limit=self.hparams.limit_val_batches,
-            task_encoder=self._task_encoder(),
-        )
+        with _quiet_energon(self.hparams["verbose"]):
+            dataset = get_val_dataset(
+                self.hparams["metadataset_path"],
+                split_part="val",
+                worker_config=self._worker_config(),
+                batch_size=1,
+                packing_buffer_size=self.hparams["packing_buffer_size"],
+                # A fixed length so every rank agrees on the validation step count too
+                limit=self.hparams["limit_val_batches"],
+                task_encoder=self._task_encoder(),
+            )
         return get_savable_loader(dataset, cache_pool=self._make_cache_pool())
-
-    # -- Lightning hooks ---------------------------------------------------------------------
 
     def on_after_batch_transfer(self, batch, dataloader_idx):  # noqa: ARG002
         # Normalize on the device, after the uint8 transfer
@@ -476,3 +589,47 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         if self._cache_pool is not None:
             self._cache_pool.close()
             self._cache_pool = None
+
+
+def _random_patch_mask(batch_size: int, num_patches: int, *, mask_fraction: float, device=None) -> torch.Tensor:
+    """A `(batch_size, num_patches)` bool mask, `mask_fraction` of each row's patches True, chosen
+    independently per row."""
+    num_masked = int(mask_fraction * num_patches)
+    selected = torch.rand(batch_size, num_patches, device=device).argsort(dim=1)[:, :num_masked]
+    mask = torch.zeros(batch_size, num_patches, dtype=torch.bool, device=device)
+    mask.scatter_(1, selected, True)
+    return mask
+
+
+class EnergonMaskedImageDataModule(EnergonPackedImageDataModule):
+    """Energon-backed data module for masked-image pretraining (`MaskedImageModeling` in `transformer.py`).
+
+    Reuses `EnergonPackedImageDataModule`'s packing/loading pipeline unchanged -- masked pretraining
+    needs no group/genotype/label structure, just a steady stream of same-sized images -- and replaces
+    the `PackedBatch` it would otherwise hand to the training step with `(pixel_values, bool_masked_pos)`,
+    matching `MaskedImageModeling.forward`. Since it still goes through `PackedGroupTaskEncoder`, a
+    region without any simulated genotypes (rejected by `_group_accepted`) contributes no images here
+    either, even though masked pretraining itself has no use for the simulations.
+
+    Args:
+        patch_size (int | tuple[int, int], optional): Patch size the mask is defined over. Defaults to 16.
+        mask_fraction (float, optional): Fraction of each image's patches masked. Defaults to 0.5.
+        (all other args, see `EnergonPackedImageDataModule`)
+    """
+
+    def __init__(self, *, patch_size: int | tuple[int, int] = 16, mask_fraction: float = 0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.save_hyperparameters({"patch_size": ntuple(patch_size, 2), "mask_fraction": mask_fraction})
+
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        batch = super().on_after_batch_transfer(batch, dataloader_idx)
+        patch_h, patch_w = self.hparams["patch_size"]
+        b, _c, h, w = batch.images.shape
+        num_patches = (h // patch_h) * (w // patch_w)
+        mask = _random_patch_mask(b, num_patches, mask_fraction=self.hparams["mask_fraction"], device=batch.images.device)
+        return batch.images, mask
+
+    def predict_dataloader(self):
+        # `prepare_energon_dataset` writes a single `train` split (see its docstring) -- no held-out
+        # split exists yet, so prediction/visualization runs stand in on that same split for now.
+        return self.train_dataloader()

@@ -1,7 +1,5 @@
 import contextlib
-import csv
 import gzip
-import io
 import itertools
 import json
 import logging
@@ -10,10 +8,8 @@ import os
 import random
 import shutil
 import sys
-import tarfile
 import tempfile
 import typing
-from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -39,6 +35,7 @@ from npsv3.graphs.haplotype import (
     serialize_graph_and_unique_kmers,
 )
 from npsv3.images.generator import ImageGenerator
+from npsv3.models.loaders import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.realigner import FragmentRealigner
 from npsv3.simulation import augment_sample, simulate_variant_sequencing, split_bam_by_tag
 from npsv3.types import PathType
@@ -354,102 +351,62 @@ def make_graph_example(
     return example
 
 
-
 PIXEL_COMPRESS_LEVEL = 1
 """zlib level for per-member pixel compression. Pileup pixels are ~38% exact zeros, so level 1
 already reaches ~7.6x; higher levels cost generation time for very little.
 """
 
-MANIFEST_COLUMNS = ("key", "r", "g", "h", "w", "c", "shard", "sample", "label")
-"""Per-actor manifest schema. Used offline only -- for choosing `packing_buffer_size`, simulating
-occupancy and dataset statistics -- never by energon at training time.
-"""
-
-
 def energon_key(sample_name: str, region: Range) -> str:
-    """Globally unique, dot-free key for a region's example.
-
-    Today's `__key__` is just `region.slug`, which collides across samples once the per-sample trees
-    are merged. WebDataset splits the key from the extension at the **first** dot, so a dot anywhere
-    in the key (hg38 alt/decoy contigs like `GL000207.1` have them) would silently truncate it.
-    Dots become underscores rather than being deleted, so distinct contigs stay distinct.
-    """
+    """Return globally unique, dot-free key for a region's example (incorporating sample name)"""
+    # region.slug alone collides when per-sample trees are merged. WebDataset splits the key from the extension at the
+    # **first** dot, so a dot anywhere in the key (hg38 alt/decoy contigs like `GL000207.1` have them) would silently
+    # truncate it. Dots become underscores rather than being deleted, so distinct contigs stay distinct.
     key = f"{sample_name}_{region.slug}".replace(".", "_")
     assert "." not in key, f"Energon key {key!r} must not contain a dot"
     return key
 
 
-class ExampleWriter(ABC):
-    """Writes generated examples to one shard stream owned by a single actor."""
+class EnergonExampleWriter:
+    """Writes generated examples to one shard stream owned by a single actor.
 
-    @abstractmethod
-    def write(self, example: dict, *, region: Range, sample_name: str) -> None: ...
+    Polylithic energon trees: one flat JSONL metadata file per actor beside a sharded,
+    gzipped-per-member pixel tar.
 
-    @abstractmethod
-    def close(self) -> None: ...
+    Splitting a region's metadata from its pixels is what lets the packing buffer decide a pack from
+    metadata alone -- `g`, `r` and the geometry are all the cost function needs -- and only then fetch
+    the pixels for the groups that were actually selected. `label_rank` rides along in the JSON (a few
+    dozen ints) so `pack_selected_samples` does not need a third fetch.
 
+    The metadata file does not rotate with the pixel tar's shards: `prepare_energon_dataset` merges
+    every actor's fragment, in `imgs_ds`'s own shard order, into the single `meta_ds/train.jsonl` that
+    `dataset.yaml` references, so there is no need for this writer to keep the two in lockstep, or for
+    its output to line up 1:1 with `imgs_ds`'s tar shard boundaries.
 
-class WebDatasetExampleWriter(ExampleWriter):
-    """Today's single gzipped WebDataset tar, unchanged byte-for-byte."""
+    The metadata JSONL doubles as the offline manifest that used to be a separate `manifest-*.csv.gz`
+    file: since it is already one small flat record per example, `estimate_epoch_batches` can stream
+    it directly with plain `json.loads`, no separate artifact needed.
 
-    def __init__(self, index: int, output_dir: str):
-        self.output_path = os.path.join(output_dir, f"images-{index:04d}.tar.gz")
-        self._writer = wds.TarWriter(self.output_path)
-
-    def write(self, example: dict, *, region: Range, sample_name: str) -> None:  # noqa: ARG002
-        sample = {
-            "__key__": region.slug,
-            "region.txt": example["region"],
-            "image.npy.gz": example["image"],
-        }
-        if "label" in example:
-            sample["label.cls"] = example["label"]
-        if "label.rank" in example:
-            sample["label.rank.npy"] = example["label.rank"]
-        if "sim.images" in example:
-            sample["sim.images.npy.gz"] = example["sim.images"]
-        self._writer.write(sample)
-
-    def close(self) -> None:
-        self._writer.close()
-
-
-class EnergonExampleWriter(ExampleWriter):
-    """Polylithic energon trees: a tiny JSON metadata shard beside a gzipped pixel shard.
-
-    The split is what lets the packing buffer decide a pack from metadata alone -- `g`, `r` and the
-    geometry are all the cost function needs -- and only then fetch the pixels for the groups that
-    were actually selected. `label_rank` rides along in the JSON (a few dozen ints) so
-    `pack_selected_samples` does not need a third fetch.
-
-    Both tars are plain, uncompressed `.tar` with per-member gzip: gzipping the tar itself would
+    The pixel tar stays plain and uncompressed with per-member gzip: gzipping the tar itself would
     destroy the random access within a shard that the aux lookup depends on.
     """
 
-    def __init__(self, index: int, output_dir: str):
+    def __init__(self, index: int, output_dir: str, *, maxcount: int = 100_000, maxsize: float = 3e9):
         meta_dir = os.path.join(output_dir, "meta_ds")
-        pixel_dir = os.path.join(output_dir, "pixel_ds")
+        imgs_dir = os.path.join(output_dir, "imgs_ds")
         os.makedirs(meta_dir, exist_ok=True)
-        os.makedirs(pixel_dir, exist_ok=True)
+        os.makedirs(imgs_dir, exist_ok=True)
 
-        self.meta_path = os.path.join(meta_dir, f"meta-{index:04d}.tar")
-        self.pixel_path = os.path.join(pixel_dir, f"px-{index:04d}.tar")
-        self.manifest_path = os.path.join(output_dir, f"manifest-{index:04d}.csv.gz")
-
-        self._meta_tar = tarfile.open(self.meta_path, "w")
-        self._pixel_tar = tarfile.open(self.pixel_path, "w")
-        self._manifest_file = gzip.open(self.manifest_path, "wt", newline="", compresslevel=PIXEL_COMPRESS_LEVEL)
-        self._manifest = csv.writer(self._manifest_file)
-        self._manifest.writerow(MANIFEST_COLUMNS)
-
-        self._shard_name = os.path.basename(self.pixel_path)
-
-    @staticmethod
-    def _add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
-        info = tarfile.TarInfo(name)
-        info.size = len(data)
-        info.mtime = 0  # Deterministic shards, so a regenerated shard compares byte-for-byte
-        tar.addfile(info, io.BytesIO(data))
+        pixel_pattern = os.path.join(imgs_dir, f"imgs-{index:04d}-%06d.tar")
+        self._writer = wds.ShardWriter(
+            pixel_pattern,
+            maxcount=maxcount,
+            maxsize=maxsize,
+            mtime=0,  # Deterministic shards, so a regenerated shard compares byte-for-byte
+            encoder=False,  # Members below are already-encoded, pre-gzipped bytes
+            verbose=0,
+        )
+        meta_path = os.path.join(meta_dir, f"meta-{index:04d}.jsonl")
+        self._meta_file: typing.TextIO = open(meta_path, "w")  # noqa: SIM115
 
     @staticmethod
     def _compress(array: np.ndarray) -> bytes:
@@ -471,62 +428,46 @@ class EnergonExampleWriter(ExampleWriter):
             num_replicates, num_genotypes = sims.shape[:2]
             assert sims.shape[2:] == real.shape, f"Simulated images {sims.shape} disagree with the real image {real.shape}"
 
+        pixel_sample = {"__key__": key, REAL_SUFFIX: self._compress(real)}
+        if sims is not None:
+            pixel_sample[SIMS_SUFFIX] = self._compress(sims)
+        self._writer.write(pixel_sample)
+
         # `label` is the canonical positive; `label.rank` is its derived view, recorded rather than
         # recomputed so the ranking rule can evolve without invalidating shards. Both are null for
         # unlabeled examples.
         label = example.get("label")
         label_rank = example.get("label.rank")
-        self._add(
-            self._meta_tar,
-            f"{key}.json",
+        self._meta_file.write(
             json.dumps(
                 {
+                    "key": key,
                     "r": num_replicates,
                     "g": num_genotypes,
                     "h": height,
                     "w": width,
                     "c": channels,
                     "label": None if label is None else int(label),
-                    "label_rank": None if label_rank is None else [int(rank) for rank in label_rank],
+                    "label_rank": (
+                        None if label_rank is None else [int(rank) for rank in label_rank]
+                    ),
                     "region": example["region"],
                     "sample": sample_name,
                 }
-            ).encode(),
-        )
-
-        self._add(self._pixel_tar, f"{key}.real.bin.gz", self._compress(real))
-        if sims is not None:
-            self._add(self._pixel_tar, f"{key}.sims.bin.gz", self._compress(sims))
-
-        self._manifest.writerow(
-            (
-                key,
-                num_replicates,
-                num_genotypes,
-                height,
-                width,
-                channels,
-                self._shard_name,
-                sample_name,
-                "" if label is None else int(label),
             )
         )
+        self._meta_file.write("\n")
 
     def close(self) -> None:
-        self._meta_tar.close()
-        self._pixel_tar.close()
-        self._manifest_file.close()
+        self._writer.close()
+        self._meta_file.close()
 
 
-def make_example_writer(cfg, index: int, output_dir: str) -> ExampleWriter:
-    """Create the writer named by `pileup.example_format`."""
-    example_format = OmegaConf.select(cfg, "pileup.example_format", default="wds")
-    if example_format == "wds":
-        return WebDatasetExampleWriter(index, output_dir)
-    if example_format == "energon":
-        return EnergonExampleWriter(index, output_dir)
-    msg = f"Unknown pileup.example_format {example_format!r}, expected 'wds' or 'energon'"
-    raise ValueError(msg)
+def make_example_writer(cfg, index: int, output_dir: str) -> EnergonExampleWriter:
+    """Create the per-actor energon example writer."""
+    maxcount = OmegaConf.select(cfg, "pileup.example_shard_maxcount", default=100_000)
+    maxsize = OmegaConf.select(cfg, "pileup.example_shard_maxsize", default=3e9)
+    return EnergonExampleWriter(index, output_dir, maxcount=maxcount, maxsize=maxsize)
 
 
 class ExampleActor:
@@ -735,7 +676,9 @@ def vcf_to_graph_examples(
         ray.get([actor.close.remote() for actor in actors]) # type: ignore
         del pool, actors
 
-
+        # Programmatic preparation of the energon dataset
+        from npsv3.models.energon import prepare_energon_dataset
+        prepare_energon_dataset(output_dir, num_workers=cfg.threads)
 
 
 VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG", "FORMAT"])

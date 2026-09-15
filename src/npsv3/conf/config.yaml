@@ -3,7 +3,7 @@ defaults:
   - simulation
   - generator: coverage
   - model: paired_packed_inception_contrastive
-  - data: packed_images
+  - data: energon_packed_images
   - trainer: paired
   - graph: kmc
   - command: genotype

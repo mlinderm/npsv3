@@ -12,11 +12,10 @@ trainer:
   # Energon train datasets repeat indefinitely, so max_epochs alone will not terminate the run.
   max_steps: 100000
 
-  # A *virtual* epoch. The timm CosineLRScheduler steps on interval="epoch" and
-  # check_val_every_n_epoch counts epochs, so defining one this way keeps their current semantics
-  # instead of rewriting them to be step-driven. It also gives every DDP rank the same number of
-  # steps, which is what stops ranks reaching the all-reduce an unequal number of times.
-  limit_train_batches: 2000
-
-# Validation is fixed-length too, so ranks agree on the validation step count. It lives on the data
-# config because `runners.train` derives the trainer's limit_val_batches from `data.limit_val_batches`.
+# The virtual epoch length (limit_train_batches) and validation length (limit_val_batches) both live
+# on the data config -- `data.limit_train_batches` (null -> models.energon.estimate_epoch_batches)
+# and `data.limit_val_batches` -- because `runners.train` derives both from there rather than from
+# this trainer config. The timm CosineLRScheduler steps on interval="epoch" and
+# check_val_every_n_epoch counts epochs, so a fixed virtual-epoch length keeps their current
+# semantics instead of rewriting them to be step-driven. It also gives every DDP rank the same
+# number of steps, which is what stops ranks reaching the all-reduce an unequal number of times.

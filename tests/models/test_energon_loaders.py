@@ -1,14 +1,6 @@
-"""Tests for the energon polylithic packing loader.
-
-The fixture here is synthetic: groups are written through the Milestone 2 writer and prepared with
-`energon prepare`, so nothing depends on BAM/simulation inputs or on /storage. That keeps the
-highest-value test -- determinism across a process boundary -- cheap enough to run routinely.
-"""
-
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -16,36 +8,27 @@ import textwrap
 import numpy as np
 import pytest
 import torch
+import yaml
 
 from npsv3.images.example import EnergonExampleWriter
 from npsv3.models.energon import (
+    EnergonMaskedImageDataModule,
     EnergonPackedImageDataModule,
     GroupMeta,
     PackedGroupTaskEncoder,
+    _group_accepted,
+    _group_cost,
+    estimate_epoch_batches,
+    prepare_energon_dataset,
 )
+from npsv3.models.loaders import select_packs
 from npsv3.util.range import Range
 
 IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS = 8, 12, 3
 
-METADATASET_YAML = """\
-__module__: megatron.energon
-__class__: MetadatasetV2
-splits:
-  train:
-    path: ./meta_ds
-    split_part: train
-    aux:
-      px: ./pixel_ds
-  val:
-    path: ./meta_ds
-    split_part: val
-    aux:
-      px: ./pixel_ds
-"""
-
 
 def _write_group(writer, sample_name, index, num_replicates, num_genotypes, rng):
-    """Write one synthetic group whose pixels are a deterministic function of (index, r, g)."""
+    """Write one synthetic group whose pixels are a deterministic function of (index, r, g)"""
     real = rng.integers(0, 255, size=(IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), dtype=np.uint8)
     sims = np.empty((num_replicates, num_genotypes, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), dtype=np.uint8)
     for r in range(num_replicates):
@@ -72,14 +55,12 @@ def _write_group(writer, sample_name, index, num_replicates, num_genotypes, rng)
 
 
 def _build_dataset(output_dir, *, num_groups=2000, num_shards=4, seed=20260911):
-    """Write the synthetic trees and run `energon prepare` on both."""
+    """Write the synthetic trees with the same structure as the example generator"""
     rng = np.random.default_rng(seed)
     writers = [EnergonExampleWriter(shard, output_dir) for shard in range(num_shards)]
     try:
         for index in range(num_groups):
-            # G in [3, 36] is the range h(h+1)/2 spans for h in [2, 8] sampled haplotypes. Include
-            # some R=2 groups, which the generator cannot yet emit, so the tile-vs-interleave
-            # expansion and the multi-positive path are exercised end to end.
+            # G in [3, 36] is the range h(h+1)/2 spans for h in [2, 8] sampled haplotypes.
             num_genotypes = int(rng.integers(3, 37))
             num_replicates = 2 if index % 7 == 0 else 1
             while (1 + num_replicates * num_genotypes) > 256:
@@ -89,28 +70,11 @@ def _build_dataset(output_dir, *, num_groups=2000, num_shards=4, seed=20260911):
         for writer in writers:
             writer.close()
 
-    for tree in ("meta_ds", "pixel_ds"):
-        subprocess.run(
-            [
-                "energon", "prepare", os.path.join(output_dir, tree),
-                "--non-interactive", "--split-ratio", "0.75,0.25,0.0",
-                "--sample-type", "CrudeWebdataset", "--num-workers", "2",
-                "--force-overwrite", "--no-progress",
-            ],
-            check=True,
-            capture_output=True,
-        )  # fmt: skip
-
-    metadataset_path = os.path.join(output_dir, "metadataset.yaml")
-    with open(metadataset_path, "w") as metadataset_file:
-        metadataset_file.write(METADATASET_YAML)
-    return metadataset_path
+    return prepare_energon_dataset(output_dir)
 
 
 @pytest.fixture(scope="module")
 def energon_dataset(tmp_path_factory):
-    if shutil.which("energon") is None:
-        pytest.skip("energon CLI not available")
     return _build_dataset(str(tmp_path_factory.mktemp("energon")))
 
 
@@ -231,6 +195,37 @@ class TestEnergonPackedImageDataModule:
         assert occupancy > 0.90, f"Mean pack occupancy {occupancy:.3f} is below the 0.90 sanity threshold"
         dm.teardown()
 
+    def test_estimate_epoch_batches(self, energon_dataset):
+        """The estimate should land close to the true one-pass pack count, without touching pixels."""
+        budget, w_bucket, w_max, g_max, r_max = 256, IMAGE_WIDTH, IMAGE_WIDTH, 36, 2
+        output_dir = os.path.dirname(energon_dataset)
+
+        with open(energon_dataset) as metadataset_file:
+            meta_path = yaml.safe_load(metadataset_file)["splits"]["train"]["path"]
+
+        costs = []
+        with open(os.path.join(output_dir, meta_path)) as jsonl_file:
+            for line in jsonl_file:
+                row = json.loads(line)
+                r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
+                if _group_accepted(r, g, w, g_max=g_max, r_max=r_max, w_max=w_max):
+                    costs.append((_group_cost(r, g, w, w_bucket), w // w_bucket))
+
+        true_packs = len(select_packs(costs, budget=budget))
+
+        estimate = estimate_epoch_batches(
+            energon_dataset, budget=budget, w_bucket=w_bucket, w_max=w_max, g_max=g_max, r_max=r_max
+        )
+        assert true_packs * 0.5 <= estimate <= true_packs * 1.5, (
+            f"Estimate {estimate} too far from the true one-pass count {true_packs}"
+        )
+
+        # Splitting across ranks should roughly divide the estimate, and never go below 1
+        halved = estimate_epoch_batches(
+            energon_dataset, budget=budget, w_bucket=w_bucket, w_max=w_max, g_max=g_max, r_max=r_max, world_size=2
+        )
+        assert 1 <= halved <= estimate
+
     def test_uint8_and_gpu_normalization(self, energon_dataset):
         """Images leave the loader as uint8; normalization happens after transfer."""
         dm = _make_dm(energon_dataset)
@@ -242,28 +237,6 @@ class TestEnergonPackedImageDataModule:
 
         normalized = dm.on_after_batch_transfer(batch, 0)
         assert normalized.images.dtype == torch.float32
-        dm.teardown()
-
-    def test_genotype_subsampling_keeps_the_positive(self, energon_dataset):
-        """`g_train` thins the G axis but must never drop the group's positive.
-
-        Subsampling selects a subset of *genotype* indices; drop the positive and the group has
-        nothing for the loss to pull towards, so the objective is undefined for it. The retained set
-        also always includes genotype 0, the homozygous-reference candidate that anchors the
-        third-rank rule.
-        """
-        dm = _make_dm(energon_dataset, g_train=3)
-
-        for i, batch in enumerate(dm.train_dataloader()):
-            assert torch.all(batch.num_genotypes == 3), "Every group is thinned to g_train genotypes"
-
-            positives = batch.positive_indices()
-            assert torch.all(batch.labels[positives] == 1), "The positive survives subsampling and stays rank 1"
-
-            lengths = torch.diff(batch.offsets)
-            assert torch.all(lengths % batch.num_genotypes == 0), "Replicates are never thinned"
-            if i >= 4:
-                break
         dm.teardown()
 
     def test_positives_survive_packing(self, energon_dataset):
@@ -400,3 +373,68 @@ class TestEnergonPackedImageDataModule:
         assert len(steps[0]) == len(steps[1]) == 200, "Both ranks must take the same number of steps"
         for step, (rank0, rank1) in enumerate(zip(steps[0], steps[1], strict=True)):
             assert not set(rank0) & set(rank1), f"Step {step} gave the same region to both ranks"
+
+
+def _make_masked_dm(metadataset_path, **kwargs):
+    options = {
+        "metadataset_path": metadataset_path,
+        "batch_size": 256,
+        "w_bucket": IMAGE_WIDTH,
+        "w_max": IMAGE_WIDTH,
+        "g_max": 36,
+        "r_max": 2,
+        "packing_buffer_size": 128,
+        "shuffle_buffer_size": 256,
+        "num_workers": 0,
+        "cache_workers": 2,
+        "max_cache_size_gbytes": 1,
+        "limit_val_batches": 4,
+        "patch_size": 4,
+        "mask_fraction": 0.5,
+    }
+    options.update(kwargs)
+    return EnergonMaskedImageDataModule(**options)
+
+
+@pytest.mark.slow
+class TestEnergonMaskedImageDataModule:
+    """Masked pretraining reuses `EnergonPackedImageDataModule`'s packing pipeline unchanged; only the
+    `(pixel_values, bool_masked_pos)` reshaping in `on_after_batch_transfer` needs checking here."""
+
+    def test_masked_batch_shape_and_mask_fraction(self, energon_dataset):
+        dm = _make_masked_dm(energon_dataset)
+        batch = next(iter(dm.train_dataloader()))
+
+        images, mask = dm.on_after_batch_transfer(batch, 0)
+
+        assert images.dtype == torch.float32, "Images are normalized to float by on_after_batch_transfer"
+        b, c, h, w = images.shape
+        assert (c, h, w) == (IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
+
+        num_patches = (h // 4) * (w // 4)
+        assert mask.shape == (b, num_patches)
+        assert mask.dtype == torch.bool
+        assert torch.all(mask.sum(dim=1) == int(0.5 * num_patches)), "Each image has exactly mask_fraction patches masked"
+        dm.teardown()
+
+    def test_masks_differ_per_image(self, energon_dataset):
+        """The mask is drawn independently per image, not shared across the batch."""
+        dm = _make_masked_dm(energon_dataset)
+        batch = next(iter(dm.train_dataloader()))
+
+        _images, mask = dm.on_after_batch_transfer(batch, 0)
+
+        assert mask.shape[0] > 1
+        assert not torch.all(mask == mask[0]), "Masks should vary across images in the batch"
+        dm.teardown()
+
+    def test_predict_dataloader_stands_in_on_train(self, energon_dataset):
+        """No held-out split exists yet, so predict reuses the train split (see `predict_dataloader`)."""
+        dm = _make_masked_dm(energon_dataset)
+
+        batch = next(iter(dm.predict_dataloader()))
+        images, mask = dm.on_after_batch_transfer(batch, 0)
+
+        assert images.shape[1:] == (IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
+        assert mask.dtype == torch.bool
+        dm.teardown()

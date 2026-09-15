@@ -1,9 +1,27 @@
 import hydra
 import lightning as L
 import torch
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
+from npsv3.models.energon import estimate_epoch_batches
 from npsv3.models.paired import WorstLossCallback
+
+
+def _resolve_world_size(cfg) -> int:
+    """Best-effort DDP world size from `cfg.trainer`, for scaling a `limit_train_batches` estimate.
+
+    Not authoritative -- Lightning only resolves the real world size once the `Trainer`/strategy are
+    built -- but good enough to scale an *estimate* computed before that happens. `devices` left unset
+    or `"auto"` falls back to the visible GPU count, matching Lightning's own "auto" resolution for the
+    GPU accelerator.
+    """
+    devices = OmegaConf.select(cfg, "trainer.devices", default=1)
+    num_nodes = OmegaConf.select(cfg, "trainer.num_nodes", default=1)
+    if devices is None or devices == "auto":
+        devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    elif isinstance(devices, (list, ListConfig)):
+        devices = len(devices)
+    return max(1, int(devices) * int(num_nodes))
 
 
 def load_model_from_checkpoint(cfg, *, strict=True):
@@ -60,6 +78,26 @@ def train(cfg, output_dir=None, **kw_args):
         else 0
     )
 
+    # Energon train datasets repeat indefinitely (see EnergonPackedImageDataModule), so a virtual
+    # epoch length is mandatory, not optional -- Lightning's own default (a full pass) would never
+    # terminate. `data.limit_train_batches` wins when set; otherwise estimate one true pass from the
+    # dataset's metadata jsonl shards, scaled by the (best-effort) DDP world size so every rank gets
+    # the same count and none reaches the all-reduce an unequal number of times (see test_two_rank_ddp).
+    if is_metadataset:
+        limit_train_batches = OmegaConf.select(cfg, "data.limit_train_batches", default=None)
+        if limit_train_batches is None:
+            limit_train_batches = estimate_epoch_batches(
+                cfg.data.metadataset_path,
+                budget=cfg.data.batch_size,
+                w_bucket=OmegaConf.select(cfg, "data.w_bucket", default=None),
+                w_max=OmegaConf.select(cfg, "data.w_max", default=None),
+                g_max=OmegaConf.select(cfg, "data.g_max", default=None),
+                r_max=OmegaConf.select(cfg, "data.r_max", default=None),
+                world_size=_resolve_world_size(cfg),
+            )
+    else:
+        limit_train_batches = 1.0
+
     trainer = hydra.utils.instantiate(
         cfg.trainer,
         # Decrease TQDM progress refresh rate to mitigate performance issues
@@ -67,6 +105,7 @@ def train(cfg, output_dir=None, **kw_args):
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
+        limit_train_batches=limit_train_batches,
         **kw_args,
     )
 

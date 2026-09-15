@@ -74,7 +74,11 @@ aligner: "bwa"
 example_fn: "npsv3.images.example.vcf_to_graph_examples"
 max_exhaustive_records: 2
 
-# Output layout for generated examples:
-#   wds     - today's single gzipped WebDataset tar per actor (images-%04d.tar.gz)
-#   energon - polylithic meta_ds/pixel_ds trees plus a per-actor manifest
-example_format: "wds"
+# Output layout for generated examples: polylithic meta_ds/imgs_ds trees -- each actor writes a
+# gzipped-per-member pixel tar (imgs-%04d-%06d.tar, rotated by the thresholds below) alongside one
+# flat, unsharded metadata JSONL file (meta-%04d.jsonl), which `prepare_energon_dataset` later merges
+# into the single `meta_ds/train.jsonl` `dataset.yaml` references. The metadata JSONL doubles as the
+# offline manifest, so there is no separate manifest file.
+# Per-actor shard rotation thresholds for the pixel tar (matches wds.ShardWriter's own defaults).
+example_shard_maxcount: 100000
+example_shard_maxsize: 3.0e9

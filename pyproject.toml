@@ -41,7 +41,6 @@ dependencies = [
   "transformers",
   "timm",
   "tensorboard",
-  "mosaicml-streaming",
   "megatron-energon>=7.4,<8",
 ]
 
