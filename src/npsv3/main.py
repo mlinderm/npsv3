@@ -30,6 +30,20 @@ def _make_paths_absolute(cfg: DictConfig, keys: typing.Iterable[str]):
             OmegaConf.update(cfg, key, hydra.utils.to_absolute_path(OmegaConf.select(cfg, key)))
 
 
+def _make_path_or_list_absolute(cfg: DictConfig, key: str):
+    """Like `_make_paths_absolute`, but `key`'s value may be a single path or a list of paths, e.g.
+    `data.train_metadataset_paths` (see `EnergonPackedImageDataModule`)."""
+    if OmegaConf.is_missing(cfg, key):
+        return
+    value = OmegaConf.select(cfg, key)
+    if value is None:
+        return
+    if isinstance(value, str):
+        OmegaConf.update(cfg, key, hydra.utils.to_absolute_path(value))
+    else:
+        OmegaConf.update(cfg, key, [hydra.utils.to_absolute_path(path) for path in value])
+
+
 def _to_webdataset_urls(urls: str | typing.Iterable[str]) -> str:
     # Join multiple URLs with "::" separator expected by WebDataset
     list_of_urls = urls.split("::") if isinstance(urls, str) else urls
@@ -110,7 +124,6 @@ def main(cfg: DictConfig) -> None:
 
     elif cfg.command == "train":
         import torch
-
         from npsv3.models.runners import train
 
         torch.set_num_threads(cfg.threads)
@@ -118,17 +131,20 @@ def main(cfg: DictConfig) -> None:
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
-        _make_paths_absolute(cfg, ["model.encoder.checkpoint_path"])
+        _make_paths_absolute(cfg, ["model.encoder.checkpoint_path", "data.cache_dir"])
 
-        if OmegaConf.select(cfg, "data.metadataset_path") is not None:
-            # The energon data config is addressed by metadataset rather than by WebDataset URLs
-            _make_paths_absolute(cfg, ["data.metadataset_path", "data.cache_dir"])
-        else:
-            OmegaConf.update(cfg, "data.train_urls", _to_webdataset_urls(cfg.data.train_urls), merge=False)
-            if not OmegaConf.is_missing(cfg, "data.validate_urls") and OmegaConf.select(cfg, "data.validate_urls") is not None:
-                OmegaConf.update(cfg, "data.validate_urls", _to_webdataset_urls(cfg.data.validate_urls), merge=False)
-
+        # The energon data config is addressed by metadataset(s) rather than by WebDataset URLs,
+        # either a single pre-combined `metadataset_path` or per-split `*_metadataset_paths`.
+        for key in (
+            "data.metadataset_path",
+            "data.train_metadataset_paths",
+            "data.val_metadataset_paths",
+            "data.test_metadataset_paths",
+        ):
+            _make_path_or_list_absolute(cfg, key)
+       
         checkpoint = train(cfg, output_dir=output)
+
         if not OmegaConf.select(cfg, "trainer.fast_dev_run", default=False):
             # If checkpoints are active, create a symlink to the returned checkpoint, removing existing symlink if it exists
             final_checkpoint = os.path.join(output, "model.ckpt")
@@ -153,17 +169,27 @@ def main(cfg: DictConfig) -> None:
         with open(os.path.join(output, "metrics.json"), "w") as file:
             json.dump(metrics, file, indent=2)
 
-    elif cfg.command == "predict":
+    elif cfg.command == "loss":
         import torch
 
         from npsv3.models.runners import predict
+        from npsv3.models.paired import WorstLossCallback
 
         torch.set_num_threads(cfg.threads)
 
-        _make_paths_absolute(cfg, ["model.checkpoint"])
-        OmegaConf.update(cfg, "data.predict_urls", _to_webdataset_urls(cfg.data.predict_urls), merge=False)
+        _make_paths_absolute(cfg, ["model.checkpoint", "data.cache_dir"])
+        
+        # The energon data config is addressed by metadataset(s) rather than by WebDataset URLs,
+        # either a single pre-combined `metadataset_path` or per-split `*_metadataset_paths`.
+        for key in (
+            "data.metadataset_path",
+            "data.train_metadataset_paths",
+            "data.val_metadataset_paths",
+            "data.test_metadataset_paths",
+        ):
+            _make_path_or_list_absolute(cfg, key)
 
-        predict(cfg, return_predictions=False)
+        predict(cfg, return_predictions=False, callbacks=[WorstLossCallback(k=OmegaConf.select(cfg, "worst_losses", default=5))])
 
     elif cfg.command == "encode":
         import torch

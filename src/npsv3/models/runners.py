@@ -1,19 +1,52 @@
+import logging
+
 import hydra
 import lightning as L
 import torch
 from omegaconf import ListConfig, OmegaConf
 
-from npsv3.models.energon import estimate_epoch_batches
+from npsv3.models.energon import available_splits, estimate_epoch_batches
 from npsv3.models.paired import WorstLossCallback
 
 
-def _resolve_world_size(cfg) -> int:
-    """Best-effort DDP world size from `cfg.trainer`, for scaling a `limit_train_batches` estimate.
+class TextLoggingCallback(L.pytorch.callbacks.Callback):
+    """Log current metrics as one plain-text line every `trainer.log_every_n_steps` steps.
 
-    Not authoritative -- Lightning only resolves the real world size once the `Trainer`/strategy are
-    built -- but good enough to scale an *estimate* computed before that happens. `devices` left unset
-    or `"auto"` falls back to the visible GPU count, matching Lightning's own "auto" resolution for the
-    GPU accelerator.
+    `TQDMProgressBar` rewrites its line in place using `\\r`, which a terminal renders as a single
+    updating line but when written to a file (the common case) produces multiple lines.
+    """
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):  # noqa: ARG002
+        if not trainer.is_global_zero or (batch_idx + 1) % trainer.log_every_n_steps != 0:
+            return
+        metrics = ", ".join(f"{name}={value:.4g}" for name, value in trainer.progress_bar_metrics.items())
+        logging.info(
+            "Epoch %d, step %d/%d: %s", trainer.current_epoch, batch_idx + 1, trainer.num_training_batches, metrics
+        )
+
+    def on_validation_epoch_end(self, trainer, pl_module):  # noqa: ARG002
+        if not trainer.is_global_zero or trainer.sanity_checking:
+            return
+        metrics = ", ".join(
+            f"{name}={value:.4g}" for name, value in trainer.callback_metrics.items() if name.startswith("val_")
+        )
+        logging.info("Epoch %d validation: %s", trainer.current_epoch, metrics)
+
+    def on_test_epoch_end(self, trainer, pl_module):  # noqa: ARG002
+        if not trainer.is_global_zero:
+            return
+        metrics = ", ".join(
+            f"{name}={value:.4g}" for name, value in trainer.callback_metrics.items() if name.startswith("test_")
+        )
+        logging.info("Test: %s", metrics)
+
+
+def _resolve_world_size(cfg) -> int:
+    """Return a best-effort DDP world size from `cfg.trainer`, for scaling a `limit_train_batches` estimate.
+
+    Not authoritative, since Lightning only resolves the real world size once the `Trainer`/strategy are built, but good
+    enough to scale an *estimate*. `devices` left unset or `"auto"` falls back to the visible GPU count, matching
+    Lightning's own "auto" resolution for the GPU accelerator.
     """
     devices = OmegaConf.select(cfg, "trainer.devices", default=1)
     num_nodes = OmegaConf.select(cfg, "trainer.num_nodes", default=1)
@@ -24,7 +57,7 @@ def _resolve_world_size(cfg) -> int:
     return max(1, int(devices) * int(num_nodes))
 
 
-def load_model_from_checkpoint(cfg, *, strict=True):
+def load_model_from_checkpoint(cfg, *, strict=True, weights_only=None):
     # Load the model from the checkpoint, instantiating any "child" objects that were not saved as part of the checkpoint
     model_cls = hydra.utils.get_class(cfg.model._target_)
 
@@ -37,16 +70,26 @@ def load_model_from_checkpoint(cfg, *, strict=True):
         cfg.model.checkpoint,
         strict=strict,
         **model_args,
+        weights_only=weights_only,
     )
 
 def train(cfg, output_dir=None, **kw_args):
+    """Train a Lightning model from scratch or resume from a checkpoint 
+
+    Args:
+        cfg: The configuration for the training.
+        output_dir (_type_, optional): The directory to save the training output. Defaults to None.
+
+    Returns:
+        The path to the saved checkpoint.
+    """
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
 
-    if OmegaConf.is_missing(cfg, "model.checkpoint") or OmegaConf.select(cfg, "model.checkpoint") is None:
+    if OmegaConf.select(cfg, "model.checkpoint", default=None) is None:
         model = hydra.utils.instantiate(cfg.model)
     else:
         model = load_model_from_checkpoint(cfg, strict=False)
@@ -61,10 +104,22 @@ def train(cfg, output_dir=None, **kw_args):
         dirpath=output_dir,
     )
 
-    # The energon data config is addressed by metadataset rather than by per-split WebDataset URLs,
-    # and its metadataset always carries a validation split.
-    is_metadataset = OmegaConf.select(cfg, "data.metadataset_path") is not None
-    if is_metadataset or OmegaConf.select(cfg, "data.validate_urls"):
+    # The energon data config is addressed by metadataset(s), either a single pre-combined `metadataset_path`
+    # with its own real train/val/test splits, or per-split `*_metadataset_paths` lists.
+    combined_metadataset_path = OmegaConf.select(cfg, "data.metadataset_path", default=None)
+    train_metadataset_paths = OmegaConf.select(cfg, "data.train_metadataset_paths", default=None)
+
+    if combined_metadataset_path is not None:
+        splits = available_splits(combined_metadataset_path)
+        has_val_metadataset = "val" in splits
+        has_test_metadataset = "test" in splits
+    elif train_metadataset_paths is not None:
+        has_val_metadataset = OmegaConf.select(cfg, "data.val_metadataset_paths", default=None) is not None
+        has_test_metadataset = OmegaConf.select(cfg, "data.test_metadataset_paths", default=None) is not None
+    else:
+        raise ValueError("Either `data.metadataset_path` or `data.train_metadataset_paths` must be specified in the config.")
+
+    if has_val_metadataset:
         limit_val_batches = OmegaConf.select(cfg, "data.limit_val_batches", default=1.0)
         num_sanity_val_steps = OmegaConf.select(cfg, "data.num_sanity_val_steps", default=2)
     else:
@@ -73,35 +128,31 @@ def train(cfg, output_dir=None, **kw_args):
 
     # Skip testing if no testing data provided
     limit_test_batches = (
-        OmegaConf.select(cfg, "data.limit_test_batches", default=1.0)
-        if OmegaConf.select(cfg, "data.test_urls")
-        else 0
+        OmegaConf.select(cfg, "data.limit_test_batches", default=1.0) if has_test_metadataset else 0
     )
 
-    # Energon train datasets repeat indefinitely (see EnergonPackedImageDataModule), so a virtual
-    # epoch length is mandatory, not optional -- Lightning's own default (a full pass) would never
-    # terminate. `data.limit_train_batches` wins when set; otherwise estimate one true pass from the
-    # dataset's metadata jsonl shards, scaled by the (best-effort) DDP world size so every rank gets
-    # the same count and none reaches the all-reduce an unequal number of times (see test_two_rank_ddp).
-    if is_metadataset:
-        limit_train_batches = OmegaConf.select(cfg, "data.limit_train_batches", default=None)
-        if limit_train_batches is None:
-            limit_train_batches = estimate_epoch_batches(
-                cfg.data.metadataset_path,
-                budget=cfg.data.batch_size,
-                w_bucket=OmegaConf.select(cfg, "data.w_bucket", default=None),
-                w_max=OmegaConf.select(cfg, "data.w_max", default=None),
-                g_max=OmegaConf.select(cfg, "data.g_max", default=None),
-                r_max=OmegaConf.select(cfg, "data.r_max", default=None),
-                world_size=_resolve_world_size(cfg),
-            )
-    else:
-        limit_train_batches = 1.0
+    # Energon train datasets repeat indefinitely so a virtual epoch length is mandatory. `data.limit_train_batches`
+    # is used if set, otherwise estimate one true pass from the dataset's metadata jsonl shards, scaled by the
+    # (best-effort) DDP world size so every rank gets the same count and none reaches the all-reduce an unequal number
+    # of times.
+    limit_train_batches = OmegaConf.select(cfg, "data.limit_train_batches", default=None)
+    if limit_train_batches is None:
+        limit_train_batches = estimate_epoch_batches(
+            combined_metadataset_path if combined_metadataset_path is not None else train_metadataset_paths,
+            budget=cfg.data.batch_size,
+            w_bucket=OmegaConf.select(cfg, "data.w_bucket", default=None),
+            w_max=OmegaConf.select(cfg, "data.w_max", default=None),
+            g_max=OmegaConf.select(cfg, "data.g_max", default=None),
+            r_max=OmegaConf.select(cfg, "data.r_max", default=None),
+            world_size=_resolve_world_size(cfg),
+        )
 
     trainer = hydra.utils.instantiate(
         cfg.trainer,
-        # Decrease TQDM progress refresh rate to mitigate performance issues
-        callbacks=[checkpoint_callback, L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        # Text logging in place of a progress bar, which redraws via "\r" and so leaves duplicate lines
+        # once stdout is redirected to a file (see `TextLoggingCallback`)
+        enable_progress_bar=False,
+        callbacks=[checkpoint_callback, TextLoggingCallback()],
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,
@@ -124,7 +175,8 @@ def test(cfg, **kw_args):
     model = load_model_from_checkpoint(cfg)
 
     trainer_args = {
-        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50)],
+        "enable_progress_bar": False,
+        "callbacks": [TextLoggingCallback()],
         **kw_args,
     }
 
@@ -137,10 +189,10 @@ def predict(cfg, return_predictions=None, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+    model = load_model_from_checkpoint(cfg, weights_only=False)
 
     trainer_args = {
-        "callbacks": [L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50), WorstLossCallback()],
+        "enable_progress_bar": False,
         **kw_args,
     }
 

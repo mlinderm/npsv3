@@ -1,16 +1,9 @@
 # @package _global_
 #
-# Paired training against the energon loader (data=energon_packed_images).
-#
-# Kept separate from trainer/paired.yaml rather than folded into it, because `limit_train_batches`
-# would otherwise truncate epochs for the WebDataset loaders too, and those are meant to keep
-# working unchanged.
+# Paired training against the energon loader (data=energon_packed_images). /trainer/paired it global, so
+# we don't scope its inheritance in this global configuration.
 defaults:
   - /trainer/paired
-
-trainer:
-  # Energon train datasets repeat indefinitely, so max_epochs alone will not terminate the run.
-  max_steps: 100000
 
 # The virtual epoch length (limit_train_batches) and validation length (limit_val_batches) both live
 # on the data config -- `data.limit_train_batches` (null -> models.energon.estimate_epoch_batches)

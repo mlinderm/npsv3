@@ -1,4 +1,0 @@
-# @package _global_
-command: predict
-model:
-  checkpoint: ???

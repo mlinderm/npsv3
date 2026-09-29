@@ -1,9 +1,12 @@
+import os
+
 import pytest
 
 from npsv3._native_graph import HaplotypePriorOverlay, UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
 from npsv3.util.range import Range
 from npsv3.util.variant import VariantFileReader
+from tests.conftest import cfg
 
 from .. import HG38_REF_FASTA, create_vcf
 
@@ -43,6 +46,18 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
         ref_samples = set(reader.samples()) - set(graph.samples_including(list(exclude_nodes)))
         assert ref_samples == {"Sample1"}
 
+
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23-mc-chm13.GRCh38.vcfbub.a100k.wave.passing.training.hg38.vcf.gz",
+    )
+    @pytest.mark.parametrize("region_str", [
+        "chr1:595411-595602",
+    ])
+    def test_hprc_hgsv3_population_errors(self, cfg, region_str):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input)):
+            pytest.skip("Missing necessary inputs")
+        graph = Graph(cfg.reference, cfg.input, Range(region_str))
 
 @pytest.mark.skipif(HG38_REF_FASTA is None, reason="HG38 reference FASTA not available")
 class TestSerializationBytes:

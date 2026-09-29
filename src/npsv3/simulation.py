@@ -203,7 +203,15 @@ def split_bam_by_tag(bam_path: PathType, output_dir: PathType, tag: str) -> dict
     bam_path = pathlib.Path(bam_path)
     output_dir = pathlib.Path(output_dir)
     with contextlib.chdir(output_dir):
-        pysam.split("-d", tag, str(bam_path.absolute()), catch_stdout=False)
+        # These split files are small, immediately-consumed-then-discarded intermediates (one region's worth
+        # of simulated reads per haplotype), so a low compression level trades a larger on-disk size we never
+        # keep for less time spent deflating. `--write-index` has samtools build each output's index (a CSI,
+        # for BAM) inline while it writes it, in the same process, rather than a second pysam.index() pass
+        # that reopens and re-reads every split file from scratch -- profiling showed splitting itself (not
+        # indexing) dominates this step, and both changes together roughly halve its cost.
+        pysam.split(
+            "-d", tag, "--output-fmt-option", "level=1", "--write-index", str(bam_path.absolute()), catch_stdout=False
+        )
 
     # Extract tag from samtools split output files, e.g., <basename>_<tag>.bam, to { tag: path } mapping
     tag_pattern = fr"{bam_path.stem}_([^.]+)\.bam"
@@ -211,7 +219,6 @@ def split_bam_by_tag(bam_path: PathType, output_dir: PathType, tag: str) -> dict
     tag_paths = {}
     for path in output_dir.iterdir():
         if match := path.is_file() and re.fullmatch(tag_pattern, path.name):
-            pysam.index(str(path))
             tag_paths[match.group(1)] = path
     return tag_paths
 

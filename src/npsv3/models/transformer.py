@@ -1,7 +1,7 @@
 import io
 import os
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,8 +16,32 @@ from torch import nn
 from torchvision.transforms import v2 as transforms
 from transformers import ViTConfig, ViTForImageClassification, ViTModel, ViTPreTrainedModel
 
-from npsv3.models.dvae import Denormalize
 from npsv3.models.loaders import ntuple
+
+
+class Denormalize(transforms.Transform):
+    def __init__(self, mean: Sequence[float], std: Sequence[float], inplace: bool = False):
+        super().__init__()
+        self.mean = list(mean)
+        self.std = list(std)
+        self.inplace = inplace
+
+    def transform(self, image: Any, params: dict[str, Any]) -> Any:
+        if type(image) == torch.Tensor:
+            mean = torch.as_tensor(self.mean, dtype=image.dtype, device=image.device)
+            std = torch.as_tensor(self.std, dtype=image.dtype, device=image.device)
+            if mean.ndim == 1:
+                mean = mean.view(-1, 1, 1)
+            if std.ndim == 1:
+                std = std.view(-1, 1, 1)
+
+            if self.inplace:
+                image = image.mul_(std)
+            else:
+                image = image.mul(std)
+
+            return image.add_(mean).clamp_(0, 1)  # Make sure in the range [0, 1]
+        return image
 
 # https://github.com/huggingface/pytorch-image-models/issues/1477
 

@@ -198,7 +198,6 @@ do
             -o SAM "@RG\tID:synth${s}\tSM:${SM}\tLB:synth${s}\tPL:illumina\tPU:ART" \
             -f "${READS_PREFIX}1.fq" "${READS_PREFIX}2.fq" 
     else
-        # bwa mem -Y -v 1 -I "${FRAGMEAN},${FRAGSD}" \
         bwa mem -c 250 -M -v 1 -I "${FRAGMEAN},${FRAGSD}" \
             -R "@RG\tID:synth${s}\tSM:${SM}\tLB:synth${s}\tPL:illumina\tPU:ART" \
             "$SHAREDREF" \

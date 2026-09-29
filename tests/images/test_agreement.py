@@ -140,8 +140,8 @@ class TestAgreementSinkRecord:
         read = _read("r1", 1000, "150M")
         fragment = Fragment(read)
 
-        bwa_allele = AlleleRealignment(5.0, 15.0, agreement.AlleleAssignment.ALT)
-        bwa_read1 = AlleleRealignment(5.0, 15.0, agreement.AlleleAssignment.ALT)
+        bwa_allele = AlleleRealignment(5, 15, agreement.AlleleAssignment.ALT)
+        bwa_read1 = AlleleRealignment(5, 15, agreement.AlleleAssignment.ALT)
 
         sink.record(fragment, bwa_allele, bwa_read1, None, None, None)
         row = sink.rows[0]
@@ -211,5 +211,5 @@ class TestAnalysisFunctions:
 
     def test_format_report_runs(self, sample_df):
         report = agreement.format_report(sample_df, assign_delta=1.0)
-        assert "Confusion matrix" in report
+        assert "Confusion matrices" in report
         assert "Stratified agreement rate by fragment_class" in report

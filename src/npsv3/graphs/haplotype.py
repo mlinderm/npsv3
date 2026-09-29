@@ -364,7 +364,7 @@ def haplotype_alleles(
     """Return the set of compatible variant alleles, as (variant_id, allele) tuples, for each haplotype.
 
     Since a '*' allele has no path of its own, we consider a haplotype compatible with a '*' allele whenever
-    none of the other alleles for that variant are in the haplotype.
+    none of the other alternate alleles for that variant are in the haplotype.
 
     Args:
         sampler (HaplotypeSamplerOverlay): Haplotype sampler
@@ -384,6 +384,16 @@ def haplotype_alleles(
                 paths.add((variant_id, star_idx))
         haplotype_paths.append(paths)
     return haplotype_paths
+
+
+def _resolved_alleles(alleles: set[tuple[str, int]]) -> set[tuple[str, int]]:
+    """Drop a variant's star-allele tuple from `alleles` when that variant's reference tuple is also present.
+
+    We tag a haplotype with a variant's star allele whenever it carries none of that variant's other (non-star) ALT
+    alleles. But it the reference allele is already present, the star allele is redundant compatibility artifact rather
+    than a second true call, and must be dropped before any set-equality identity checks.
+    """
+    return {(variant_id, allele) for variant_id, allele in alleles if allele == 0 or (variant_id, 0) not in alleles}
 
 
 def prepare_genotyping_haplotypes(
@@ -423,7 +433,8 @@ def prepare_genotyping_haplotypes(
               the graph. Empty if none of the sample's "true" haplotype paths are present in the graph.
     """
     haplotypes = list(haplotypes) # Make copy of haplotypes so we can modify it without affecting the caller
-    alleles = haplotype_alleles(sampler, haplotypes, analysis_variants)
+    # Resolved once here so every identity comparison below is a plain set equality against already-resolved sets.
+    alleles = [_resolved_alleles(a) for a in haplotype_alleles(sampler, haplotypes, analysis_variants)]
 
     # Ensure the reference haplotype is present and at index 0
     ref_alleles = {(variant.variant_id, 0) for variant in analysis_variants}
@@ -449,7 +460,7 @@ def prepare_genotyping_haplotypes(
     if not true_hap_allele_idxs:
         return haplotypes, alleles, []
 
-    true_hap_alleles = haplotype_alleles(sampler, true_hap_paths, analysis_variants)
+    true_hap_alleles = [_resolved_alleles(a) for a in haplotype_alleles(sampler, true_hap_paths, analysis_variants)]
 
     true_hap_idxs: list[int | None] = [None] * ploidy
     for allele_idx, hap_path, hap_alleles in zip(true_hap_allele_idxs, true_hap_paths, true_hap_alleles, strict=True):
@@ -473,31 +484,26 @@ def build_kmer_evidence_index(
     left_flank: str,
     right_flank: str,
 ) -> KmerEvidenceIndex:
-    """Build the per-region k-mer allele-evidence index feeding image channel 8 (Stage 1 of the "Cheaper
-    allele evidence for image generation" plan), from the same sampled haplotypes already prepared for
-    genotyping (`prepare_genotyping_haplotypes`/`add_population_haplotypes`; the reference haplotype is
-    guaranteed to be at index 0).
+    """Build the per-region k-mer allele-evidence index for image generation using haplotypes prepared for genotyping 
+    (the reference haplotype is guaranteed to be at index 0).
 
     The k-mer set is selected by `cfg.pileup.evidence_kmer_set`:
-      - "all" / "local_unique": index every k-mer of the (flanked) haplotype sequences already
-        materialized for the realigner's FASTA, exact-matched at `cfg.pileup.evidence_kmer_size`.
-        "local_unique" additionally drops any k-mer occurring more than once within a single haplotype
-        (plan constraint 2's cheap multi-occurrence fix); "all" does not.
-      - "graph_unique": reuse the already-built, already-deserialized `unique_kmers` overlay k-mer set
-        (locked to `cfg.graph.kmer_size`), transposing `sampler.kmers_on_path()` over the sampled
-        haplotypes into a per-k-mer allele mask (plan constraint 2's `graph_unique` setting).
+      - "all": index every k-mer of the (flanked) haplotype sequences already materialized for the realigner's FASTA,
+        exact-matched at `cfg.pileup.evidence_kmer_size`.
+      - "local_unique": Drop any k-mer occurring more than once within a single haplotype
+      - "graph_unique": reuse the already-built, already-deserialized `unique_kmers` overlay k-mer set (locked to
+        `cfg.graph.kmer_size`).
 
     Args:
-        cfg: Global configuration (reads `pileup.evidence_kmer_set`, `pileup.evidence_kmer_size`, and,
-            for "graph_unique", `graph.kmer_size`).
+        cfg: Global configuration.
         graph (Graph): Graph for the region, used to obtain each haplotype's sequence for "all"/"local_unique".
         sampler (HaplotypeSamplerOverlay): Used to translate haplotypes into graph-unique k-mer membership
             for "graph_unique".
         unique_kmers (UniqueKmersOverlay): The region's graph-unique k-mer set, for "graph_unique".
         haplotypes (Sequence[Sequence[int]]): Sampled haplotypes (each a sequence of node IDs), reference
             haplotype at index 0. Not modified.
-        left_flank (str): Reference-derived flank sequence prepended to every haplotype's own sequence,
-            matching the realigner FASTA (see `make_graph_example`). Only used for "all"/"local_unique".
+        left_flank (str): Reference-derived flank sequence prepended to every haplotype's own sequence. Only used for
+            "all"/"local_unique".
         right_flank (str): As `left_flank`, appended after every haplotype's own sequence.
 
     Returns:
@@ -621,6 +627,30 @@ def _find_matching_diplotype(diplotypes: Sequence[Diplotype], matching_haplotype
                 return diplotype_idx
     return -1
 
+def resolve_genotype_alleles(genotype, *, ploidy: int, missing_are_ref: bool) -> tuple[int, ...] | None:
+    """Return the sample's alleles for `genotype`, or None if it should be treated as unresolved.
+
+    Failing or partially missing genotypes are always unresolved. Fully missing genotypes are returned
+    as homozygous REF if `missing_are_ref` is True, otherwise unresolved.
+
+    Args:
+        genotype (Genotype): The genotype to resolve
+        ploidy (int): The ploidy of the sample
+        missing_are_ref (bool): Whether to treat fully missing genotypes as homozygous REF
+
+    Returns:
+        tuple[int, ...] | None: Genotype allele indices
+    """   
+    if genotype.is_filtered:
+        return None
+    alleles = genotype.alleles
+    missing_count = sum(allele < 0 for allele in alleles)
+    if missing_count == 0:
+        return alleles
+    if missing_count == len(alleles) and missing_are_ref:
+        return (0,) * ploidy
+    return None
+
 @ray.remote # type: ignore
 def _diplotypes_in_topk_shard(
     cfg,
@@ -678,16 +708,9 @@ def _diplotypes_in_topk_shard(
             all_matching_haplotypes = []
             for variant in analysis_variants:
                 genotype = variant.genotype(sample_idx)
-                if genotype.is_filtered:
-                    continue  # Skip genotypes explicitly marked as failing filters
-
-                alleles = genotype.alleles
-                missing_count = sum(allele < 0 for allele in alleles)
-                if missing_count == len(alleles) and cfg.graph.missing_are_ref:
-                    # Treat fully missing genotypes as all REF alleles (e.g., when derived from high-quality assemblies)
-                    alleles = (0,) * ploidy
-                elif missing_count > 0:
-                    continue  # Skip missing genotypes
+                alleles = resolve_genotype_alleles(genotype, ploidy=ploidy, missing_are_ref=cfg.graph.missing_are_ref)
+                if alleles is None:
+                    continue  # Skip filtered or unresolved (missing) genotypes
 
                 # alleles x haplotypes boolean array indicating indicating compatible haplotypes for each allele
                 matching_haplotypes = np.array([

@@ -1,8 +1,10 @@
+import collections
 import random
 import sys
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
 import pysam
 
 from npsv3.types import PathType
@@ -91,35 +93,24 @@ def read_start(read):
     return read.reference_start
 
 
-_IUPAC_TO_ALLELES = {
-    "A": frozenset("A"),
-    "C": frozenset("C"),
-    "G": frozenset("G"),
-    "T": frozenset("T"),
-    "R": frozenset("AG"),
-    "Y": frozenset("CT"),
-    "S": frozenset("GC"),
-    "W": frozenset("AT"),
-    "K": frozenset("GT"),
-    "M": frozenset("AC"),
-    "B": frozenset("CGT"),
-    "D": frozenset("AGT"),
-    "H": frozenset("ACT"),
-    "V": frozenset("ACG"),
-    "N": frozenset("ACGTN"),
-}
+_REF_N_BYTE = ord("N")
 
 
-def _refine_cigar_op(base: str, ref: str):
-    # Treat any of the IUPAC alleles as matching
-    match = base.upper() in _IUPAC_TO_ALLELES[ref.upper()]
-    return pysam.CEQUAL if match else pysam.CDIFF
+def _refine_base_alignment(query: str, ref: str) -> list[BaseAlignment]:
+    """Classify every base of a CMATCH run as MATCH/MISMATCH against `ref`, vectorized over the whole run.
 
-
-def _refine_base_alignment(base: str, ref: str):
-    # Treat any of the IUPAC alleles as matching
-    match = base.upper() in _IUPAC_TO_ALLELES[ref.upper()]
-    return BaseAlignment.MATCH if match else BaseAlignment.MISMATCH
+    `query` (from pysam's `read.query_sequence`) and `ref` (from images.example._reference_sequence, which
+    upper-cases the whole fetched region up front) are both already upper-case ACGT[N] -- real sequencer
+    output and reference FASTAs don't use the broader IUPAC ambiguity alphabet (R/Y/S/W/K/M/B/D/H/V) that
+    an earlier version of this function matched against. That table was a holdover from before haplotypes
+    were explicit graph paths, when multi-allelic sites were packed into the "reference" string itself
+    using ambiguity codes; it's unreachable now. Reference N (an assembly gap) is kept as a wildcard match,
+    since that one does still occur in a real genome.
+    """
+    query_arr = np.frombuffer(query.encode("ascii"), dtype=np.uint8)
+    ref_arr = np.frombuffer(ref.encode("ascii"), dtype=np.uint8)
+    matches = ((query_arr == ref_arr) | (ref_arr == _REF_N_BYTE)).tolist()
+    return [BaseAlignment.MATCH if match else BaseAlignment.MISMATCH for match in matches]
 
 
 @dataclass
@@ -367,10 +358,8 @@ class ReadPileup:
                 if align is None:
                     continue
                 elif ref_seq and cigar_op == pysam.CMATCH:
-                    # Refine CMATCH to CEQUAL or CDIFF so that we can render match/mismatch
-                    align = list(
-                        map(_refine_base_alignment, pileup_item._read.query_sequence[read_slice], ref_seq[col_slice])
-                    )
+                    # Refine CMATCH to MATCH/MISMATCH so that we can render match/mismatch
+                    align = _refine_base_alignment(pileup_item._read.query_sequence[read_slice], ref_seq[col_slice])
                 yield (col_slice, align, read_slice)
         elif isinstance(pileup_item, PileupInsert):
             for col_slice in _region_columns(region, pileup_item.region):
@@ -426,13 +415,43 @@ class ReadPileup:
             self.add_insert(fragment.insert_region, phase=read1.phase, **attributes)
 
 
+# Bounded LRU of open pysam.AlignmentFile handles, keyed by (path, reference). Opening a CRAM/BAM handle
+# re-parses its index (and, for CRAM, re-touches the reference) every time, which previously happened on
+# every fetch_reads() call -- once per region for the (constant, reused) "real" reads path, and once per
+# per-genotype simulated split BAM. Caching lets the dominant repeat case (the same real reads path,
+# reopened once per region for the life of the worker) skip that cost entirely. The bound keeps memory/fd
+# usage low for the many one-off simulated split-BAM paths, which are guaranteed cache misses regardless.
+_ALIGNMENT_FILE_CACHE_SIZE = 4
+_alignment_file_cache: collections.OrderedDict[tuple[str, str | None], pysam.AlignmentFile] = collections.OrderedDict()
+
+
+def _cached_alignment_file(read_path: PathType, reference: str | None) -> pysam.AlignmentFile:
+    key = (str(read_path), reference)
+    alignment_file = _alignment_file_cache.pop(key, None)
+    if alignment_file is None:
+        alignment_file = pysam.AlignmentFile(str(read_path), reference_filename=reference)
+    _alignment_file_cache[key] = alignment_file  # (re-)insert as most-recently-used
+
+    if len(_alignment_file_cache) > _ALIGNMENT_FILE_CACHE_SIZE:
+        _, evicted = _alignment_file_cache.popitem(last=False)
+        evicted.close()
+    return alignment_file
+
+
+def close_alignment_file_cache() -> None:
+    """Close and drop every handle cached by fetch_reads(). Call when a worker is done processing regions."""
+    while _alignment_file_cache:
+        _, alignment_file = _alignment_file_cache.popitem()
+        alignment_file.close()
+
+
 def fetch_reads(read_path: PathType, fetch_region: Range, reference: str | None = None) -> FragmentTracker:
     fragments = FragmentTracker()
-    with pysam.AlignmentFile(str(read_path), reference_filename=reference) as alignment_file:
-        for read in alignment_file.fetch(**fetch_region.pysam_fetch):
-            if read.is_duplicate or read.is_qcfail or read.is_unmapped or read.is_secondary or read.is_supplementary:
-                # TODO: Potentially recover secondary/supplementary alignments if primary is outside pileup region
-                continue
+    alignment_file = _cached_alignment_file(read_path, reference)
+    for read in alignment_file.fetch(**fetch_region.pysam_fetch):
+        if read.is_duplicate or read.is_qcfail or read.is_unmapped or read.is_secondary or read.is_supplementary:
+            # TODO: Potentially recover secondary/supplementary alignments if primary is outside pileup region
+            continue
 
-            fragments.add_read(read)
+        fragments.add_read(read)
     return fragments

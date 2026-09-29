@@ -27,10 +27,12 @@ from npsv3.graphs.haplotype import (
     add_population_haplotypes,
     build_kmer_evidence_index,
     prepare_genotyping_haplotypes,
+    resolve_genotype_alleles,
     serialize_graph_and_unique_kmers,
 )
 from npsv3.images.generator import ImageGenerator
 from npsv3.models.loaders import REAL_SUFFIX, SIMS_SUFFIX
+from npsv3.pileup import close_alignment_file_cache
 from npsv3.realigner import FragmentRealigner
 from npsv3.simulation import simulate_variant_sequencing, split_bam_by_tag
 from npsv3.types import PathType
@@ -94,7 +96,7 @@ def make_graph_example(
     sampler: HaplotypeSamplerOverlay,
     unique_kmers: UniqueKmersOverlay,
     region: Range,
-    vcf_path: str,
+    sample_idx: int,
     sample: Sample,
     read_path: PathType,
     filtered_kmer_path: str,
@@ -137,15 +139,28 @@ def make_graph_example(
                 ploidy=ploidy,
             )
         if len(haplotypes) < 2:  # noqa: PLR2004
-            msg = (
-                f"Fewer than 2 haplotypes for region {region} in {sample.name} even after population-panel "
-                f"top-up (have {len(haplotypes)})"
-            )
+            msg = f"Fewer than 2 haplotypes for region {region} in {sample.name} even after population-panel top-up (have {len(haplotypes)})"
             raise InsufficientHaplotypesError(msg)
         assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
         # Allow for all possible genotypes, or TODO: apply sampling here to reduce the potential number considered
         possible_genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), ploidy))
+        # Recorded even if no label is defined or no simulated images are generated below, since packing cost
+        # and downstream consumers may want the genotype count independent of `label`/`sim.images`.
+        example["num_genotypes"] = len(possible_genotypes)
+
+        # Graph construction embeds a sample's "true" haplotype path as reference nodes wherever a variant's genotype
+        # for that sample was missing, making a missing genotype indistinguishable from an explicit homozygous-REF call.
+        # Update the true_haplotype_idxs to None for any filtered or missing genotypes, unless cfg.graph.missing_are_ref
+        # is specified to translate fully missing genotypes to homozygous REF (relevant for merged high-quality assemblies
+        # where missing vairants are assumed to be identical to the reference rather than "not genotyped").
+        if analysis_variants and None not in true_haplotype_idxs and any(
+            resolve_genotype_alleles(
+                variant.genotype(sample_idx), ploidy=ploidy, missing_are_ref=cfg.graph.missing_are_ref
+            ) is None
+            for variant in analysis_variants
+        ):
+            true_haplotype_idxs = [None] * ploidy
 
         # Generate labels if the true haplotype combination is fully defined (i.e., no missing alleles)
         if None not in true_haplotype_idxs:
@@ -190,10 +205,6 @@ def make_graph_example(
                 fasta.write(right_flank)
                 fasta.write("\n")
 
-        # The BWA realigner (channels 6/7) and the k-mer evidence index (channel 8, Stage 1 of the
-        # "Cheaper allele evidence" plan) are independently gated by `pileup.allele_evidence` so that the
-        # `kmer`-only production path can skip the realigner's per-(fragment, allele) BWA cost entirely --
-        # the whole point of the k-mer path. `both` builds both, for the dual-run agreement harness.
         realigner = None
         if cfg.pileup.allele_evidence in ("bwa", "both"):
             addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
@@ -268,7 +279,6 @@ def make_graph_example(
             # No more work to be done if there are no simulations specified
             return example
         assert cfg.simulation.replicates == 1, "Multiple replicates not yet supported"
-
 
         # Simulate reads for `ploidy`` copies of all haplotypes as a single step, then construct genotype images from
         # subsets of the simulated reads. Copy the (flanked) sequences already written to the realigner fasta above,
@@ -413,13 +423,17 @@ class EnergonExampleWriter:
         real = np.asarray(example["image"])
         height, width, channels = real.shape
 
+        # `num_genotypes` (`g`) reflects the number of genotypes considered during example generation, even
+        # if there are no simulated images.
+        num_genotypes = example.get("num_genotypes", 0)
         sims = example.get("sim.images")
         if sims is None:
-            num_replicates = num_genotypes = 0
+            num_replicates = 0
         else:
             sims = np.asarray(sims)
             # Replicates-major (R, G, H, W, C), the single convention in the codebase
-            num_replicates, num_genotypes = sims.shape[:2]
+            num_replicates, sims_genotypes = sims.shape[:2]
+            assert sims_genotypes == num_genotypes, f"Simulated genotypes {sims_genotypes} disagree with genotypes considered {num_genotypes}"
             assert sims.shape[2:] == real.shape, f"Simulated images {sims.shape} disagree with the real image {real.shape}"
 
         pixel_sample = {"__key__": key, REAL_SUFFIX: self._compress(real)}
@@ -483,6 +497,7 @@ class ExampleActor:
         # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
         # remote method before using the webdataset files.
         self._writer.close()
+        close_alignment_file_cache()
 
 @ray.remote
 class GraphWriter(ExampleActor):
@@ -516,6 +531,7 @@ class GraphWriter(ExampleActor):
         sampler: HaplotypeSamplerOverlay,
         unique_kmers: UniqueKmersOverlay,
         analysis_variants: Sequence[Variant],
+        sample_idx: int,
     ) -> dict:
         return make_graph_example(
             self.cfg,
@@ -523,7 +539,7 @@ class GraphWriter(ExampleActor):
             sampler,
             unique_kmers,
             region,
-            self.vcf_path,
+            sample_idx,
             self.sample,
             self.read_path,
             self.filtered_kmer_path,
@@ -535,6 +551,7 @@ class GraphWriter(ExampleActor):
     def from_shard(self, shard_path: PathType) -> int:
         num_regions = 0
         with VariantFileReader.open(self.vcf_path) as vcf_file:
+            sample_idx = vcf_file.samples().index(self.sample.name)
             for record in wds.WebDataset([shard_path], shardshuffle=False):
                 region_string = record["region.txt"].decode()
                 region = Range(region_string)
@@ -564,7 +581,7 @@ class GraphWriter(ExampleActor):
                 try:
                     # Attempt to gracefully timeout long running regions.
                     with Timeout(self.cfg.timeout):
-                        example = self.from_graph(region, graph, sampler, unique_kmers, analysis_variants)
+                        example = self.from_graph(region, graph, sampler, unique_kmers, analysis_variants, sample_idx)
                 except TimeoutError:
                     logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
                     continue
@@ -637,9 +654,9 @@ def vcf_to_graph_examples(
         assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.graph.kmer_size, "Filtered k-mer database has unexpected k"
 
         if region_count is not None:
-            logging.info("Generating exhaustive images for %d regions (across %d threads)", region_count, cfg.threads)
+            logging.info("Generating images into %s for %d regions (across %d threads)", output_dir, region_count, cfg.threads)
         else:
-            logging.info("Generating exhaustive images across %d threads", cfg.threads)
+            logging.info("Generating images into %s across %d threads", output_dir, cfg.threads)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -661,7 +678,7 @@ def vcf_to_graph_examples(
         pool = ray.util.ActorPool(actors)
 
         gen = pool.map_unordered(lambda actor, shard: actor.from_shard.remote(shard), graph_shards) # type: ignore
-        with tqdm(disable=not progress_bar) as progress:
+        with tqdm(disable=not progress_bar, total=region_count) as progress:
             for num_regions in gen:
                 progress.update(num_regions) # type: ignore
 
@@ -673,4 +690,3 @@ def vcf_to_graph_examples(
         # Programmatic preparation of the energon dataset
         from npsv3.models.energon import prepare_energon_dataset
         prepare_energon_dataset(output_dir, num_workers=cfg.threads)
-

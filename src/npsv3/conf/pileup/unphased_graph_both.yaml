@@ -1,0 +1,7 @@
+defaults:
+  - base
+
+image_channels: [0, 1, 2, 3, 4, 6, 7, 8]
+allele_evidence: "both"
+
+example_fn: "npsv3.images.example.vcf_to_graph_examples"

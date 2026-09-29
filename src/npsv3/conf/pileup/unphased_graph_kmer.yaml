@@ -1,13 +1,9 @@
 defaults:
   - base
 
-# Stage 1 ("Cheaper allele evidence for image generation"): same as unphased_graph, but channel 8 (k-mer
-# allele evidence) replaces channels 6/7 (BWA realignment allele/read-allele), and allele_evidence=kmer
+# Channel 8 (k-mer allele evidence) replaces channels 6/7 (BWA realignment allele/read-allele), and allele_evidence=kmer
 # so the per-(fragment, allele) BWA realignment is skipped entirely rather than just unused.
-image_width: 288
-image_height: 96
 image_channels: [0, 1, 2, 3, 4, 8]
-variant_padding: 96
-example_fn: "npsv3.images.example.vcf_to_graph_examples"
-
 allele_evidence: "kmer"
+
+example_fn: "npsv3.images.example.vcf_to_graph_examples"

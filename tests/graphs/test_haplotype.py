@@ -25,13 +25,17 @@ from npsv3.graphs.haplotype import (
     UniqueKmersOverlay,
     _create_graph_and_sampler,
     _diplotypes_in_topk_shard,
+    _filter_variants,
     _sample_diplotypes_from_counts,
     add_population_haplotypes,
     diplotypes_in_topk,
     prepare_genotyping_haplotypes,
+    resolve_genotype_alleles,
     sample_diplotypes,
     serialize_graph_and_unique_kmers,
 )
+from npsv3.images.example import make_graph_example
+from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
 from npsv3.util.variant import Variant, VariantFileReader
 
@@ -207,6 +211,37 @@ class TestPrepareGenotypingHaplotypes:
             cast("Graph", _MockGraph(self.region.contig, self.REF)), self.sampler, original, self.variants, self.region.contig, "SAMPLE"
         )
         assert original == [self.ALT]
+
+
+@dataclass(frozen=True)
+class _MockGenotype:
+    """Minimal mock `Genotype` class for testing."""
+
+    alleles: tuple[int, ...]
+    is_filtered: bool = False
+
+
+class TestResolveGenotypeAlleles:
+    def test_called_genotype_returns_alleles(self):
+        assert resolve_genotype_alleles(_MockGenotype((0, 1)), ploidy=2, missing_are_ref=False) == (0, 1)
+
+    def test_filtered_genotype_is_unresolved_regardless_of_missing_are_ref(self):
+        genotype = _MockGenotype((0, 1), is_filtered=True)
+        assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=False) is None
+        assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=True) is None
+
+    def test_fully_missing_genotype_is_unresolved_by_default(self):
+        assert resolve_genotype_alleles(_MockGenotype((-1, -1)), ploidy=2, missing_are_ref=False) is None
+
+    def test_fully_missing_genotype_resolves_to_ref_when_missing_are_ref(self):
+        assert resolve_genotype_alleles(_MockGenotype((-1, -1)), ploidy=2, missing_are_ref=True) == (0, 0)
+
+    def test_partially_missing_genotype_is_always_unresolved(self):
+        """Even one missing allele means the genotype can't be trusted, regardless of missing_are_ref --
+        unlike a fully missing genotype, there's a real (non-missing) call here that just isn't complete."""
+        genotype = _MockGenotype((0, -1))
+        assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=False) is None
+        assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=True) is None
 
 
 class TestAddPopulationHaplotypes:

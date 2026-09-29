@@ -3,6 +3,7 @@ import torch
 import torchmetrics
 
 from npsv3.models.metrics import (
+    ExponentialMovingAverage,
     GenotypingConcordance,
     GenotypingNonRefConcordance,
     GenotypingNonRefF1,
@@ -56,3 +57,26 @@ class TestGenotypingMetrics:
             "nonrefrecall": pytest.approx(1.0),
             "nonreff1": pytest.approx(4/(4 + 1 + 0)),
         }.items() <= results.items(), "Should have 1 false positive"
+
+
+class TestExponentialMovingAverage:
+    def test_first_update_is_bias_corrected_to_raw_value(self):
+        metric = ExponentialMovingAverage(decay=0.9)
+        assert metric(torch.tensor(2.0)) == pytest.approx(2.0)
+
+    def test_converges_to_constant_series(self):
+        metric = ExponentialMovingAverage(decay=0.9)
+        for _ in range(100):
+            result = metric(torch.tensor(3.0))
+        assert result == pytest.approx(3.0)
+
+    def test_smooths_noisy_series_between_its_extremes(self):
+        metric = ExponentialMovingAverage(decay=0.9)
+        values = [1.0, 5.0, 1.0, 5.0, 1.0, 5.0]
+        for value in values:
+            result = metric(torch.tensor(value))
+        assert 1.0 < result < 5.0
+
+    def test_rejects_out_of_range_decay(self):
+        with pytest.raises(ValueError, match="decay"):
+            ExponentialMovingAverage(decay=1.0)

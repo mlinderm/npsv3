@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -80,7 +81,7 @@ def energon_dataset(tmp_path_factory):
 
 def _make_dm(metadataset_path, **kwargs):
     options = {
-        "metadataset_path": metadataset_path,
+        "train_metadataset_paths": metadataset_path,
         "batch_size": 256,
         "w_bucket": IMAGE_WIDTH,
         "w_max": IMAGE_WIDTH,
@@ -132,7 +133,13 @@ class TestTaskEncoder:
 
         from megatron.energon import SkipSample
 
-        for rejected in (self._meta(g=40), self._meta(r=3), self._meta(w=IMAGE_WIDTH + 1), self._meta(g=0)):
+        for rejected in (
+            self._meta(g=40),
+            self._meta(r=3),
+            self._meta(w=IMAGE_WIDTH + 1),
+            self._meta(g=0),
+            self._meta(label=None, label_rank=None),
+        ):
             with pytest.raises(SkipSample):
                 encoder.preencode_sample(rejected)
 
@@ -208,7 +215,7 @@ class TestEnergonPackedImageDataModule:
             for line in jsonl_file:
                 row = json.loads(line)
                 r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
-                if _group_accepted(r, g, w, g_max=g_max, r_max=r_max, w_max=w_max):
+                if _group_accepted(r, g, w, label=row.get("label"), g_max=g_max, r_max=r_max, w_max=w_max):
                     costs.append((_group_cost(r, g, w, w_bucket), w // w_bucket))
 
         true_packs = len(select_packs(costs, budget=budget))
@@ -375,9 +382,87 @@ class TestEnergonPackedImageDataModule:
             assert not set(rank0) & set(rank1), f"Step {step} gave the same region to both ranks"
 
 
+def _combine_as_train_and_val(metadataset_path: str, tmp_path) -> str:
+    """Build a pre-combined, multi-split `dataset.yaml` (see `EnergonPackedImageDataModule`'s
+    `metadataset_path` argument) out of one `prepare_energon_dataset` tree, reused for both the "train"
+    and "val" splits -- enough to check that a pre-combined file, not just per-split lists, is read
+    correctly.
+    """
+    root = os.path.dirname(metadataset_path)
+    with open(metadataset_path) as metadataset_file:
+        single = yaml.safe_load(metadataset_file)
+    (leaf,) = single["splits"].values()
+    leaf_abs = {
+        "path": os.path.join(root, leaf["path"]),
+        "aux": {name: os.path.join(root, aux_path) for name, aux_path in leaf["aux"].items()},
+    }
+    combined = {
+        "__module__": "megatron.energon",
+        "__class__": "MetadatasetV2",
+        # Deep copies, not the same dict twice: PyYAML would otherwise emit a YAML anchor/alias for the
+        # repeated object, which energon's own loader does not resolve.
+        "splits": {"train": leaf_abs, "val": copy.deepcopy(leaf_abs)},
+    }
+    combined_path = os.path.join(str(tmp_path), "combined_dataset.yaml")
+    with open(combined_path, "w") as combined_file:
+        yaml.safe_dump(combined, combined_file, sort_keys=False)
+    return combined_path
+
+
+class TestMetadatasetPathModes:
+    """`EnergonPackedImageDataModule` accepts either a single, pre-combined `metadataset_path` (its own
+    real train/val/test splits) or per-split `*_metadataset_paths` lists that it combines itself (see
+    `_build_metadataset`) -- these check the former mode and the guard between the two."""
+
+    def test_combined_metadataset_path_serves_train_and_val(self, energon_dataset, tmp_path):
+        combined_path = _combine_as_train_and_val(energon_dataset, tmp_path)
+
+        dm = EnergonPackedImageDataModule(
+            metadataset_path=combined_path,
+            batch_size=256,
+            w_bucket=IMAGE_WIDTH,
+            w_max=IMAGE_WIDTH,
+            g_max=36,
+            r_max=2,
+            packing_buffer_size=128,
+            shuffle_buffer_size=256,
+            num_workers=0,
+            cache_workers=2,
+            max_cache_size_gbytes=1,
+            limit_val_batches=2,
+        )
+
+        train_batch = next(iter(dm.train_dataloader()))
+        val_batch = next(iter(dm.val_dataloader()))
+        assert train_batch.images.shape == val_batch.images.shape == (256, IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
+        dm.teardown()
+
+    def test_estimate_epoch_batches_reads_named_split_from_combined_metadataset(self, energon_dataset, tmp_path):
+        """Unlike a plain `prepare_energon_dataset` tree (a single split, any name), a pre-combined file
+        has more than one real split, so `split_part` must actually select by name."""
+        combined_path = _combine_as_train_and_val(energon_dataset, tmp_path)
+
+        train_estimate = estimate_epoch_batches(combined_path, budget=256, split_part="train")
+        val_estimate = estimate_epoch_batches(combined_path, budget=256, split_part="val")
+
+        assert train_estimate == val_estimate > 0, "Both splits point at the same leaf tree here"
+
+    def test_metadataset_path_and_train_metadataset_paths_are_mutually_exclusive(self, energon_dataset):
+        with pytest.raises(AssertionError, match="not both"):
+            EnergonPackedImageDataModule(
+                metadataset_path=energon_dataset,
+                train_metadataset_paths=energon_dataset,
+                batch_size=32,
+            )
+
+    def test_requires_one_of_metadataset_path_or_train_metadataset_paths(self):
+        with pytest.raises(AssertionError, match="Must pass either"):
+            EnergonPackedImageDataModule(batch_size=32)
+
+
 def _make_masked_dm(metadataset_path, **kwargs):
     options = {
-        "metadataset_path": metadataset_path,
+        "train_metadataset_paths": metadataset_path,
         "batch_size": 256,
         "w_bucket": IMAGE_WIDTH,
         "w_max": IMAGE_WIDTH,
@@ -429,7 +514,7 @@ class TestEnergonMaskedImageDataModule:
         dm.teardown()
 
     def test_predict_dataloader_stands_in_on_train(self, energon_dataset):
-        """No held-out split exists yet, so predict reuses the train split (see `predict_dataloader`)."""
+        """Predict defaults to a single pass over the train split (see `predict_dataloader`)."""
         dm = _make_masked_dm(energon_dataset)
 
         batch = next(iter(dm.predict_dataloader()))

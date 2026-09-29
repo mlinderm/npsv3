@@ -1,5 +1,14 @@
 _target_: npsv3.models.energon.EnergonPackedImageDataModule
-metadataset_path: ???
+# Two ways to specify the data -- set exactly one of these two (see EnergonPackedImageDataModule):
+# (a) metadataset_path: a single, pre-combined dataset.yaml that already defines its own real
+#     train/val/test splits (e.g. hand-built, or prepared once and reused as-is).
+# (b) train_metadataset_paths: one or more dataset.yaml paths written by `prepare_energon_dataset`,
+#     per split -- e.g. one per sample -- combined in memory (_build_metadataset). Blended with equal
+#     weight when more than one. val/test are each optional; omit to skip that split entirely.
+metadataset_path: null
+train_metadataset_paths: null
+val_metadataset_paths: null
+test_metadataset_paths: null
 # Node-local scratch for the pixel cache pool. /storage is NFS and must not be used; null -> $TMPDIR
 cache_dir: null
 # image-slot budget per pack (same meaning as data=packed_images)
@@ -13,11 +22,15 @@ shuffle_buffer_size: 4096
 max_samples_per_sequence: 64
 num_workers: ${threads}
 cache_workers: 4
-max_cache_size_gbytes: 64
+max_cache_size_gbytes: 54
 # Virtual-epoch length in packed batches. null -> runners.train estimates one true pass from the
 # dataset's manifests scaled by the DDP world size.
 limit_train_batches: null
 limit_val_batches: 32
+limit_test_batches: 32
+# Split `predict` makes a single pass over, and an optional cap on that pass (null -> the whole split)
+predict_split: train
+limit_predict_batches: null
 pad: true
 mean: [0.5]
 std: [0.5]

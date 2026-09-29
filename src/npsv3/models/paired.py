@@ -1,4 +1,5 @@
 import heapq
+import itertools
 from collections.abc import Callable
 
 import hydra
@@ -11,6 +12,7 @@ from torchvision import models
 
 from npsv3.models.loaders import PackedBatch
 from npsv3.models.metrics import (
+    ExponentialMovingAverage,
     GenotypingConcordance,
     GenotypingNonRefConcordance,
     GenotypingNonRefF1,
@@ -26,6 +28,8 @@ class InceptionEncoder(nn.Module):
         self.num_channels = num_channels
         self.projection_size = projection_size
 
+        # TODO: How do we handle the variable batch size? Slice or replace BatchNorm2D with GroupNorm? Does the latter require
+        # Weight Standardization?
         self.inception = models.inception_v3(init_weights=True, aux_logits=False)
 
         # Replace the first layer for our number of channels
@@ -253,6 +257,7 @@ class PackedVariant(L.LightningModule):
         self.loss = loss
         self.predictor = predictor
 
+        self.train_loss_ema = ExponentialMovingAverage()
         self.train_metrics = torchmetrics.MetricCollection({
             "concordance": GenotypingConcordance(),
             "nonrefconcordance": GenotypingNonRefConcordance(),
@@ -313,29 +318,6 @@ class PackedVariant(L.LightningModule):
 
         return (metrics, preds, labels_nt, *metadata)
 
-    # def forward(self, batch: tuple[torch.Tensor]) -> tuple[torch.Tensor]:
-    #     """Compute (metric, preds, labels) as nested tensors from a batch of packed images, labels, and offsets."""
-    #     images, labels, offsets = batch
-    #     images_embeddings = self.encoder(images)
-
-    #     variant_lengths = torch.diff(offsets)
-    #     query_embeddings = images_embeddings[offsets[:-1]].unsqueeze(1)
-    #     support_embeddings_nt = torch.nested.nested_tensor_from_jagged(images_embeddings, offsets=offsets, max_seqlen=torch.max(variant_lengths))
-    #     support_embeddings = support_embeddings_nt.to_padded_tensor(0.0)
-
-    #     metrics = self.metric(query_embeddings, support_embeddings).squeeze(1)
-    #     metrics_nt = torch.nested.as_nested_tensor([metrics[i,1:variant_lengths[i]] for i in range(len(offsets) - 1)], layout=torch.jagged)
-
-    #     preds = self.predictor(metrics_nt)
-
-    #     # Construct labels as nested tensor with offsets shared with metrics so the ragged dimension is recognized as matching.
-    #     # Set the max_seqlen, since known, so that the nested tensor won't be padded more than needed.
-    #     labels_nt = torch.nested.nested_tensor_from_jagged(
-    #         labels, offsets=metrics_nt.offsets(), max_seqlen=torch.max(variant_lengths) - 1
-    #     )
-
-    #     return (metrics_nt, preds, labels_nt)
-
     def _model_step(self, batch, batch_idx):  # noqa: ARG002
         metric, preds, labels, *_ = self(batch)
         # The different loss functions should return their relevant batch size (which may be pairs or number of variants)
@@ -346,6 +328,7 @@ class PackedVariant(L.LightningModule):
         loss, preds, label, *_ = self._model_step(batch, batch_idx)
 
         self.log("train_loss", loss, prog_bar=True)
+        self.log("train_loss_ema", self.train_loss_ema(loss), on_step=True, on_epoch=False, prog_bar=True)
         batch_value = self.train_metrics(preds, label)
         num_variants = label.size(0)
         self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
@@ -393,51 +376,79 @@ class PackedVariant(L.LightningModule):
 
 
 class WorstLossCallback(L.pytorch.callbacks.Callback):
+    """Print the `k` regions with the highest loss seen during prediction.
+
+    Each packed batch holds many regions (groups), so the loss is recomputed per group rather than
+    ranking whole batches.
+    """
+
     def __init__(self, k=5):
         super().__init__()
         self.k = k
-        self.worst_losses = []
+        self.worst_losses = []  # Min-heap of (loss, tiebreaker, region, genotype_label, pred, metric, labels)
+        self._counter = itertools.count()  # Break loss ties so the heap never compares the tensors
 
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
-        metric, _preds, labels, *metadata = outputs
-        loss, _batch_size = model.loss(metric, labels)
+        metric, preds, labels, genotype_label, num_genotypes, regions = outputs
+        offsets = metric.offsets()
+        metric_values, label_values = metric.values(), labels.values()
 
-        if len(self.worst_losses) < self.k:
-            heapq.heappush(self.worst_losses, (loss.item(), metric, labels, metadata))
-        elif loss.item() > self.worst_losses[0][0]:
-            heapq.heappushpop(self.worst_losses, (loss.item(), metric, labels, metadata))
+        for group, region in enumerate(regions):
+            start, end = offsets[group], offsets[group + 1]
+            group_offsets = torch.tensor([0, end - start], device=offsets.device)
+            group_metric = torch.nested.nested_tensor_from_jagged(metric_values[start:end], offsets=group_offsets)
+            group_labels = torch.nested.nested_tensor_from_jagged(label_values[start:end], offsets=group_offsets)
+            loss = model.loss(group_metric, group_labels)[0].item()
+
+            if len(self.worst_losses) >= self.k and loss <= self.worst_losses[0][0]:
+                continue
+            entry = (
+                loss,
+                next(self._counter),
+                region,
+                int(genotype_label[group]),
+                # Supports are replicates of the G genotypes, so reduce the support index to a genotype
+                int(preds[group]) % int(num_genotypes[group]),
+                metric_values[start:end].float().cpu(),
+                label_values[start:end].cpu(),
+            )
+            if len(self.worst_losses) < self.k:
+                heapq.heappush(self.worst_losses, entry)
+            else:
+                heapq.heappushpop(self.worst_losses, entry)
 
     def on_predict_end(self, trainer, model):  # noqa: ARG002
-        for loss, metric, labels, metadata in sorted(self.worst_losses, reverse=True):
-            print(loss, metric.offsets(), metric.values(), labels.values(), *metadata)
+        print("loss\tregion\tgenotype\tprediction\tmetric\tlabels")
+        for loss, _, region, genotype, pred, metric, labels in sorted(self.worst_losses, reverse=True):
+            print(f"{loss:.6g}\t{region}\t{genotype}\t{pred}\t{metric.tolist()}\t{labels.tolist()}")
 
 
-def predict(cfg, **kw_args):
-    dm = hydra.utils.instantiate(cfg.data)
+# def predict(cfg, **kw_args):
+#     dm = hydra.utils.instantiate(cfg.data)
 
-    model_cls = hydra.utils.get_class(cfg.model._target_)
-    model = model_cls.load_from_checkpoint(
-        cfg.model.checkpoint,
-        encoder=hydra.utils.instantiate(cfg.model.encoder),
-        metric=hydra.utils.instantiate(cfg.model.metric),
-        loss=hydra.utils.instantiate(cfg.model.loss),
-        predictor=hydra.utils.instantiate(cfg.model.predictor),
-    )
-    trainer = L.Trainer(limit_predict_batches=2)
-    for prediction in trainer.predict(model, dm):
-        metrics, preds, labels_nt, *metadata = prediction
-        print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
-              "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
-        padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
-        onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
+#     model_cls = hydra.utils.get_class(cfg.model._target_)
+#     model = model_cls.load_from_checkpoint(
+#         cfg.model.checkpoint,
+#         encoder=hydra.utils.instantiate(cfg.model.encoder),
+#         metric=hydra.utils.instantiate(cfg.model.metric),
+#         loss=hydra.utils.instantiate(cfg.model.loss),
+#         predictor=hydra.utils.instantiate(cfg.model.predictor),
+#     )
+#     trainer = L.Trainer(limit_predict_batches=2)
+#     for prediction in trainer.predict(model, dm):
+#         metrics, preds, labels_nt, *metadata = prediction
+#         print("\nOffsets", metrics.offsets(),"\nMetric",  metrics.values(),
+#               "\nPredictions", preds, "\nLabels",  labels_nt.values(),"\nMetadata", *metadata)
+#         padded_target = torch.nested.to_padded_tensor(labels_nt, 0)
+#         onehot_preds = torch.nn.functional.one_hot(preds, num_classes=padded_target.size(1))
 
-        correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
-        total = labels_nt.shape[0]
+#         correct = torch.sum(torch.any(onehot_preds & (torch.eq(padded_target, 1) | torch.eq(padded_target, 2)), dim=1))
+#         total = labels_nt.shape[0]
 
-        targ = padded_target > 0
-        indices = torch.arange(targ.size(0))
-        non_reference_concordance = torch.sum(targ[indices, preds])
+#         targ = padded_target > 0
+#         indices = torch.arange(targ.size(0))
+#         non_reference_concordance = torch.sum(targ[indices, preds])
 
-        print("\nAccuracy", correct.float() / total,
-                "\nnon-reference concordance", non_reference_concordance.float() / total)
+#         print("\nAccuracy", correct.float() / total,
+#                 "\nnon-reference concordance", non_reference_concordance.float() / total)
 

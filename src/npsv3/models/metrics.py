@@ -75,3 +75,39 @@ class GenotypingNonRefRecall(GenotypingMetrics):
 class GenotypingNonRefF1(GenotypingMetrics):
     def compute(self) -> torch.Tensor:
         return _safe_divide(2.0 * self.tp, 2.0 * self.tp + self.fp + self.fn)
+
+
+class ExponentialMovingAverage(torchmetrics.Metric):
+    """Bias-corrected exponential moving average of a scalar, e.g. for a smoothed training loss curve
+    alongside the raw per-step value.
+
+    Kept local to each process (never synchronized across DDP ranks): like the raw per-step loss, it is
+    logged without `sync_dist` for progress/log readability rather than as an aggregate metric.
+    """
+
+    is_differentiable = False
+    higher_is_better = None
+    # Since EMA's `update` is a recurrence over the running average itself it needs to call `update` directly against
+    # the live state.
+    full_state_update = True
+
+    def __init__(self, decay: float = 0.98, **kwargs):
+        if not 0.0 <= decay < 1.0:
+            raise ValueError(f"decay must be in [0, 1), got {decay}")
+        # `forward()`'s per-step `compute()` is already unsynced via `dist_sync_on_step` (default
+        # False); this instead covers a bare `.compute()` call, e.g. if this metric were ever logged
+        # directly rather than via `forward()`. Either way, a per-rank running average isn't something a
+        # cross-rank reduction could combine correctly, so keep it local.
+        kwargs.setdefault("sync_on_compute", False)
+        super().__init__(**kwargs)
+        self.decay = decay
+        self.add_state("average", default=torch.tensor(0.0), dist_reduce_fx=None)
+        self.add_state("bias_correction", default=torch.tensor(1.0), dist_reduce_fx=None)
+
+    def update(self, value: torch.Tensor) -> None:
+        value = value.detach().to(self.average.dtype)
+        self.average = self.decay * self.average + (1.0 - self.decay) * value
+        self.bias_correction = self.decay * self.bias_correction
+
+    def compute(self) -> torch.Tensor:
+        return self.average / (1.0 - self.bias_correction)
