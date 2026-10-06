@@ -1,9 +1,10 @@
-import heapq
-import itertools
+import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import hydra
 import lightning as L
+import pandas as pd
 import torch
 import torchmetrics
 from torch import nn
@@ -375,23 +376,35 @@ class PackedVariant(L.LightningModule):
             scheduler.step(epoch=self.current_epoch + 1)
 
 
-class WorstLossCallback(L.pytorch.callbacks.Callback):
-    """Print the `k` regions with the highest loss seen during prediction.
+class RecordLossCallback(L.pytorch.callbacks.Callback):
+    """Record the loss, prediction, etc. of every region seen during prediction as a pickled DataFrame.
 
-    Each packed batch holds many regions (groups), so the loss is recomputed per group rather than
-    ranking whole batches.
+    Each packed batch holds many regions (groups), so the loss is recomputed per group rather than for whole batches.
+    The DataFrame is intended for offline analysis, e.g., loss histograms to identify likely label errors. Under DDP
+    each rank writes its own file with `.rank<N>` inserted before the suffix(es).
+
+    Columns:
+        region, loss, genotype (label), prediction, correct, num_genotypes, num_replicates,
+        label_rank: (G,) per-genotype label ranks
+        metric: (R, G) support metric
+        genotype_metric: (G,) per-genotype metric averaged over the replicates
+        label_metric, prediction_metric: `genotype_metric` of the labeled and predicted genotypes
     """
 
-    def __init__(self, k=5):
+    def __init__(self, path):
         super().__init__()
-        self.k = k
-        self.worst_losses = []  # Min-heap of (loss, tiebreaker, region, genotype_label, pred, metric, labels)
-        self._counter = itertools.count()  # Break loss ties so the heap never compares the tensors
+        self.path = path
+        self.rows = []
+
+    def on_predict_start(self, trainer, model):  # noqa: ARG002
+        self.rows = []
 
     def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
         metric, preds, labels, genotype_label, num_genotypes, regions = outputs
         offsets = metric.offsets()
         metric_values, label_values = metric.values(), labels.values()
+        cpu_offsets = offsets.tolist()
+        cpu_metric, cpu_labels = metric_values.float().cpu().numpy(), label_values.cpu().numpy()
 
         for group, region in enumerate(regions):
             start, end = offsets[group], offsets[group + 1]
@@ -400,27 +413,38 @@ class WorstLossCallback(L.pytorch.callbacks.Callback):
             group_labels = torch.nested.nested_tensor_from_jagged(label_values[start:end], offsets=group_offsets)
             loss = model.loss(group_metric, group_labels)[0].item()
 
-            if len(self.worst_losses) >= self.k and loss <= self.worst_losses[0][0]:
-                continue
-            entry = (
-                loss,
-                next(self._counter),
-                region,
-                int(genotype_label[group]),
-                # Supports are replicates of the G genotypes, so reduce the support index to a genotype
-                int(preds[group]) % int(num_genotypes[group]),
-                metric_values[start:end].float().cpu(),
-                label_values[start:end].cpu(),
-            )
-            if len(self.worst_losses) < self.k:
-                heapq.heappush(self.worst_losses, entry)
-            else:
-                heapq.heappushpop(self.worst_losses, entry)
+            # Supports are replicate-major replicates of the G genotypes, i.e., support index = r*G + g, and the labels
+            # are the per-genotype label ranks tiled R times
+            num_genotype = int(num_genotypes[group])
+            genotype = int(genotype_label[group])
+            prediction = int(preds[group]) % num_genotype
+            support_metric = cpu_metric[cpu_offsets[group] : cpu_offsets[group + 1]].reshape(-1, num_genotype)
+            genotype_metric = support_metric.mean(axis=0)
+
+            self.rows.append({
+                "region": region,
+                "loss": loss,
+                "genotype": genotype,
+                "prediction": prediction,
+                "correct": genotype == prediction,
+                "num_genotypes": num_genotype,
+                "num_replicates": support_metric.shape[0],
+                "label_rank": cpu_labels[cpu_offsets[group] : cpu_offsets[group] + num_genotype].copy(),
+                "metric": support_metric.copy(),
+                "genotype_metric": genotype_metric,
+                "label_metric": genotype_metric[genotype].item() if 0 <= genotype < num_genotype else float("nan"),
+                "prediction_metric": genotype_metric[prediction].item(),
+            })
 
     def on_predict_end(self, trainer, model):  # noqa: ARG002
-        print("loss\tregion\tgenotype\tprediction\tmetric\tlabels")
-        for loss, _, region, genotype, pred, metric, labels in sorted(self.worst_losses, reverse=True):
-            print(f"{loss:.6g}\t{region}\t{genotype}\t{pred}\t{metric.tolist()}\t{labels.tolist()}")
+        path = Path(self.path)
+        if trainer.world_size > 1:
+            suffixes = "".join(path.suffixes)
+            path = path.with_name(f"{path.name.removesuffix(suffixes)}.rank{trainer.global_rank}{suffixes}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        pd.DataFrame(self.rows).to_pickle(path)
+        logging.info("Wrote losses for %d regions to %s", len(self.rows), path)
 
 
 # def predict(cfg, **kw_args):

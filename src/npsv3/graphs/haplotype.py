@@ -404,6 +404,7 @@ def prepare_genotyping_haplotypes(
     contig: str,
     sample_name: str,
     ploidy: int = 2,
+    exact_reference: bool = False,
 ) -> tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]:
     """Extend and reorder sampled haplotypes so they are suitable for genotyping.
 
@@ -423,6 +424,10 @@ def prepare_genotyping_haplotypes(
         contig (str): The contig for the reference path.
         sample_name (str): Sample name used to look up "true" haplotype paths in the graph.
         ploidy (int, optional): Number of "true" haplotype paths to look for. Defaults to 2.
+        exact_reference (bool, optional): If True, the haplotype at index 0 is guaranteed to be exactly the
+            graph's `contig` path (i.e., the reference sequence). By default, index 0 is any haplotype
+            with only reference alleles for `analysis_variants`, which may differ from the reference path
+            elsewhere (e.g., at non-analysis variants). Defaults to False.
 
     Returns:
         tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]: A tuple of:
@@ -449,6 +454,18 @@ def prepare_genotyping_haplotypes(
         # Move the reference haplotype to index 0
         haplotypes.insert(0, haplotypes.pop(ref_haplotype_idx))
         alleles.insert(0, alleles.pop(ref_haplotype_idx))
+
+    if exact_reference:
+        # Swap in the exact reference path for the (reference-allele compatible) haplotype at index 0
+        ref_path = graph.path_nodes(contig)
+        if list(haplotypes[0]) != list(ref_path):
+            existing_idx = next((i for i, h in enumerate(haplotypes) if list(h) == list(ref_path)), None)
+            if existing_idx is None:
+                haplotypes[0] = ref_path
+            else:
+                # Exact reference already sampled with identical alleles, so drop the inexact index 0 duplicate
+                haplotypes[0] = haplotypes.pop(existing_idx)
+                alleles.pop(existing_idx)
 
     # For each ploidy index with a fully resolved "true" path in the graph, ensure that haplotype is
     # present in the haplotype list and report its index (i.e., the sample's genotype).

@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import shutil
+import tarfile
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -46,10 +47,9 @@ from megatron.energon.flavors import BaseWebdatasetFactory, CrudeWebdataset
 from megatron.energon.flavors.webdataset.config import MAIN_FOLDER_NAME
 from torchvision.transforms import v2 as transforms
 
+from npsv3.constants import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.models.loaders import (
     LABEL_PADDING_VALUE,
-    REAL_SUFFIX,
-    SIMS_SUFFIX,
     ImageGroup,
     PackedBatch,
     build_packed_batch,
@@ -290,7 +290,18 @@ def _prepare_imgs_tree(imgs_dir: str, *, num_workers: int) -> None:
     prepared, directory-referenceable dataset.
     """
     tree = EPath(imgs_dir)
-    all_tars = sorted(str(p.relative_to(Path(imgs_dir))) for p in Path(imgs_dir).glob("**/*.tar"))
+    all_tars = []
+    for tar_path in sorted(Path(imgs_dir).glob("**/*.tar")):
+        # Energon asserts every shard has at least one sample. An actor that wrote no examples (e.g., more actors
+        # than graph shards, or every region skipped) still leaves an empty tar behind, so drop those here.
+        with tarfile.open(tar_path) as tar:
+            is_empty = tar.next() is None
+        if is_empty:
+            logging.warning("Removing empty image shard %s", tar_path)
+            tar_path.unlink()
+            tar_path.with_name(tar_path.name + ".idx").unlink(missing_ok=True)
+        else:
+            all_tars.append(str(tar_path.relative_to(Path(imgs_dir))))
     if not all_tars:
         msg = f"No imgs_ds/imgs-*.tar shards found under {imgs_dir!r}"
         raise ValueError(msg)

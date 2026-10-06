@@ -7,12 +7,14 @@ import textwrap
 import hydra
 import lightning as L
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 from npsv3.images.example import EnergonExampleWriter
 from npsv3.models import runners
 from npsv3.models.energon import prepare_energon_dataset
+from npsv3.models.paired import RecordLossCallback
 from npsv3.util.range import Range
 
 # Pins the Hydra config groups this module's `dm`/`model` are instantiated from (see `_make_dm`/
@@ -40,7 +42,7 @@ def _write_group(writer, sample_name, chrom, index, rng, *, height, width, chann
 
     region = f"{chrom}:{index * 1000 + 1}-{index * 1000 + 500}"
     writer.write(
-        {"region": region, "image": real, "label": label, "label.rank": label_rank, "sim.images": sims},
+        {"region": region, "image": real, "label": label, "label.rank": label_rank, "num_genotypes": NUM_GENOTYPES, "sim.images": sims},
         region=Range(region),
         sample_name=sample_name,
     )
@@ -205,10 +207,10 @@ class TestPackedVariantWithEnergonLoader:
 
         assert checkpoint_path is not None and os.path.exists(checkpoint_path)
 
-    def test_predict_reports_worst_loss_regions(self, paired_energon_datasets, tmp_path, capsys):
-        """`runners.predict` (the `predict` command) must run over the energon loader and print the
-        highest-loss regions. Regression test for Lightning's `MisconfigurationException` when it tried
-        to re-instantiate energon's `SavableDataLoader` to inject a predict batch sampler."""
+    def test_loss_records_region_losses(self, paired_energon_datasets, tmp_path):
+        """`runners.predict` (the `loss` command) must run over the energon loader and record every region's loss.
+        Regression test for Lightning's `MisconfigurationException` when it tried to re-instantiate energon's
+        `SavableDataLoader` to inject a predict batch sampler."""
         train_overrides = [
             f"data.metadataset_path={paired_energon_datasets['train']}",
             *(f"data.{key}={value}" for key, value in {**_DATA_TEST_OVERRIDES, "limit_train_batches": 1}.items()),
@@ -217,27 +219,30 @@ class TestPackedVariantWithEnergonLoader:
         ]
         train_cfg = hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *train_overrides])
         checkpoint_path = runners.train(train_cfg, output_dir=str(tmp_path))
-        capsys.readouterr()
 
         predict_cfg = hydra.compose(
             config_name="config",
             overrides=[
                 *CFG_OVERRIDES,
                 *train_overrides,
-                "command=predict",
+                "command=loss",
                 f"model.checkpoint='{checkpoint_path}'",
-                "worst_losses=3",
             ],
         )
-        runners.predict(predict_cfg, return_predictions=False)
+        losses_path = tmp_path / "losses.pkl.gz"
+        runners.predict(predict_cfg, return_predictions=False, callbacks=[RecordLossCallback(str(losses_path))])
 
-        lines = capsys.readouterr().out.strip().splitlines()
-        assert lines[0].startswith("loss\tregion")
-        rows = [line.split("\t") for line in lines[1:]]
-        assert len(rows) == 3
-        losses = [float(row[0]) for row in rows]
-        assert losses == sorted(losses, reverse=True)
-        assert all(row[1].startswith("chr1:") for row in rows), "Rows are the train split's regions"
+        df = pd.read_pickle(losses_path)
+        assert len(df) > 0
+        assert df["region"].str.startswith("chr1:").all(), "Rows are the train split's regions"
+        assert np.isfinite(df["loss"]).all()
+        assert (df["correct"] == (df["genotype"] == df["prediction"])).all()
+        for row in df.itertuples():
+            assert row.label_rank.shape == (row.num_genotypes,)
+            assert row.metric.shape == (row.num_replicates, row.num_genotypes)
+            np.testing.assert_allclose(row.genotype_metric, row.metric.mean(axis=0))
+            assert row.label_metric == pytest.approx(row.genotype_metric[row.genotype])
+            assert row.prediction_metric == pytest.approx(row.genotype_metric[row.prediction])
 
     def test_ddp_two_rank_training(self, paired_energon_datasets, tmp_path):
         """Two ranks train without hanging and finish with identical weights, confirming DDP's

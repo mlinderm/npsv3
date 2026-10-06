@@ -6,7 +6,6 @@ import torch
 from omegaconf import ListConfig, OmegaConf
 
 from npsv3.models.energon import available_splits, estimate_epoch_batches
-from npsv3.models.paired import WorstLossCallback
 
 
 class TextLoggingCallback(L.pytorch.callbacks.Callback):

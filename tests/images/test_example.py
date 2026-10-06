@@ -13,6 +13,7 @@ from npsv3.images.example import (
     make_graph_example,
     vcf_to_graph_examples,
 )
+from npsv3.models.loaders import group_to_image
 from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
 from npsv3.util.variant import VariantFileReader
@@ -95,9 +96,8 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         # This region has 10 possible genotypes for the available haplotypes (4 haplotypes, so 4*(4+1)/2 genotypes)
         assert example["sim.images"].shape == (local_cfg.simulation.replicates, 10, *example["image"].shape)
 
-        all_png_path = result_path("all.png")
-        # select_channels=[0, 1, 4]
-        example_to_image(local_cfg, example, all_png_path, render_channels=True, with_simulations=True) # ALIGNED, PAIRED, BASEQ
+        all_png_path = tmp_path / "all.png" # result_path("all.png")
+        example_to_image(local_cfg, example, all_png_path, render_channels=True, with_simulations=True)
         assert os.path.exists(all_png_path)
 
     @pytest.mark.parametrize(("missing_are_ref", "expected_label"), [
@@ -410,3 +410,76 @@ class TestHGSVC3HPRCPopulationGraphExamples:
         [example] = rows
         assert example.get("label") is None
         assert example.get("label.rank") is None
+
+
+@pytest.mark.cfg_overrides(
+    f"reference={HG38_REF_FASTA}",
+    "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23-mc-chm13/hgsvc3-hprc-2024-02-23-mc-chm13.pav.population.passing.training.hg38.vcf.gz",
+    "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
+    "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
+    "graph.population_prior=True",
+    "graph.missing_are_ref=True",
+    "pileup=unphased_graph_kmer",
+    "simulation.replicates=1",
+)
+class TestHGSVC3HPRCPAVPopulationGraphExamples:
+    @pytest.mark.usefixtures("ray_setup")
+    @pytest.mark.parametrize("region_str", [
+        # "chr17:940789-941433",
+        # "chr20:31640012-31640510",
+        # "chr4:109850391-109850582",
+        "chr7:125624057-125624248",
+    ])
+    def test_high_loss_regions(self, cfg, hg00096_sample, region_str, tmp_path):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+            pytest.skip("Missing necessary inputs")
+        if not bwa_index_loaded(cfg.reference):
+            pytest.skip("BWA index not loaded")
+
+        region = Range(region_str)
+        # Use cached files to speed up repeated runs of the test
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00096_sample, cfg.input, region)
+
+        output_dir = str(tmp_path / "shards")
+        vcf_to_graph_examples(
+            cfg,
+            cfg.reads,
+            hg00096_sample,
+            cfg.input,
+            output_dir,
+            graph_shards=graph_shards,
+            filtered_kmer_path=filtered_kmer_path,
+            exact_reference=False, #True,
+        )
+        assert os.path.exists(output_dir)
+
+        with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+            rows = [json.loads(line) for line in meta_file if line.strip()]
+        assert len(rows) == 1, f"Expected exactly one example for region {region}"
+
+        # Render the images as read back from the Energon dataset, i.e., the tensors the model actually sees. (The
+        # metadata rows don't carry the image tensors.)
+        from npsv3.models.energon import EnergonPackedImageDataModule
+
+        dm = EnergonPackedImageDataModule(
+            train_metadataset_paths=os.path.join(output_dir, "dataset.yaml"),
+            cache_dir=str(tmp_path / "cache"),
+            batch_size=32,
+            num_workers=0,
+            repeat=False,
+        )
+        batches = list(dm.train_dataloader())
+        dm.teardown()
+
+        assert len(batches) == 1, "This single region should be a single batch"
+        [batch] = batches
+        assert batch.num_groups == 1
+        assert batch.meta == [str(region)]
+
+        assert int(batch.offsets[1]) // int(batch.num_genotypes[0]) == cfg.simulation.replicates
+
+        all_png_path = result_path("all.png")
+        image = group_to_image(cfg, batch, 0, all_png_path, render_channels=True)
+        assert os.path.exists(all_png_path)
+        assert image.width > 0
+        assert image.height > 0

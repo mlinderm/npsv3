@@ -1206,3 +1206,73 @@ class TestTopkHaplotypeSamplingInPopulation:
         graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
         statistics = diplotypes_in_topk(cfg, cfg.input, hg00733_sample, region=region, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path)
         assert len(statistics) == 1 # 1 SV in this region, but not present in HG00733
+
+@pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA not found")
+class TestGenotypePreparationInPopulation:
+    @pytest.mark.parametrize("region_str", [
+        "chr4:109850391-109850582",
+    ])
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23-mc-chm13/hgsvc3-hprc-2024-02-23-mc-chm13.pav.population.passing.training.hg38.vcf.gz",
+        "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
+        "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
+        "graph.population_prior=True",
+        "graph.missing_are_ref=True",
+    )
+    def test_variants_included_in_reference(self, cfg, hg00096_sample, region_str, tmp_path):
+        """Test that variants in the reference are included in the graph and sampled haplotypes"""
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+            pytest.skip("Missing necessary inputs")
+
+        region = Range(region_str)
+        ref_kmer_counts = KmerCounts(cfg.graph.ref_kmer_counts_kmc_prefix)
+        graph, unique_kmers, _ = _create_graph_and_sampler(
+            cfg.reference,
+            cfg.input,
+            region,
+            k=cfg.graph.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+        filtered_kmer_path = cache_filter_kmc_database(cfg, hg00096_sample, cfg.input, region, unique_kmers, tmp_path=tmp_path)
+
+        # Match actual use: the sampler uses the population haplotype prior
+        haplotype_prior = HaplotypePriorOverlay(graph, cfg.graph.population_excluded_samples)
+        sampler = HaplotypeSamplerOverlay(
+            graph,
+            unique_kmers,
+            str(cfg.input),
+            region,
+            min_size=50,
+            prior=haplotype_prior,
+            params=hydra.utils.instantiate(cfg.graph.haplotype_sampler_params),
+        )
+        sampler.initialize_scores(KmerClassify(filtered_kmer_path, hg00096_sample.kmer_coverage))
+        haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
+        assert len(haplotypes) > 0, "There should be haplotypes sampled in this region"
+
+        analysis_variants: list[Variant] = []
+        with VariantFileReader.open(cfg.input) as vcf_file:
+            analysis_variants = _filter_variants(list(vcf_file.fetch(region)), 50)
+        assert len(analysis_variants) > 0, "There should be analysis variants in this region"
+
+        # Mimic make_graph_example: the reference haplotype is guaranteed to be at index 0
+        sampled_haplotypes = haplotypes
+        haplotypes, alleles, _ = prepare_genotyping_haplotypes(
+            graph, sampler, sampled_haplotypes, analysis_variants, region.contig, hg00096_sample.name, ploidy=2
+        )
+        assert len(haplotypes) == len(alleles)
+
+        # By default, index 0 only lacks the analysis variant alleles, it is not necessarily the reference path
+        ref_path = list(graph.path_nodes(region.contig))
+        assert list(haplotypes[0]) != ref_path
+        print(haplotypes)
+        print(ref_path)
+
+        # But with `exact_reference` it must match the reference contig path exactly, and thus the reference sequence
+        exact_haplotypes, exact_alleles, _ = prepare_genotyping_haplotypes(
+            graph, sampler, sampled_haplotypes, analysis_variants, region.contig, hg00096_sample.name, ploidy=2,
+            exact_reference=True,
+        )
+        assert len(exact_haplotypes) == len(exact_alleles)
+        assert list(exact_haplotypes[0]) == ref_path

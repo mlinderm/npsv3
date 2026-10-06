@@ -49,6 +49,7 @@ def _write_group(writer, sample_name, index, num_replicates, num_genotypes, rng)
             "label": label,
             "label.rank": label_rank,
             "sim.images": sims,
+            "num_genotypes": num_genotypes,
         },
         region=Range(f"chr1:{index * 1000 + 1}-{index * 1000 + 500}"),
         sample_name=sample_name,
@@ -156,6 +157,26 @@ class TestTaskEncoder:
         assert sorted(sample.region for pack in packs for sample in pack) == sorted(s.region for s in samples)
         for pack in packs:
             assert sum(sample.cost for sample in pack) <= 64
+
+
+def test_prepare_skips_empty_shards(tmp_path):
+    """An actor that wrote no examples (e.g., more actors than graph shards) leaves empty shards that are dropped."""
+    output_dir = str(tmp_path)
+    rng = np.random.default_rng(0)
+    writers = [EnergonExampleWriter(shard, output_dir) for shard in range(3)]
+    try:
+        for index in range(10):
+            _write_group(writers[index % 2], "S0", index, 1, 3, rng)  # Writer 2 never receives an example
+    finally:
+        for writer in writers:
+            writer.close()
+
+    prepare_energon_dataset(output_dir)
+
+    imgs_dir = tmp_path / "imgs_ds"
+    assert sorted(p.name for p in imgs_dir.glob("*.tar")) == ["imgs-0000-000000.tar", "imgs-0001-000000.tar"]
+    with open(tmp_path / "meta_ds" / "train.jsonl") as meta_file:
+        assert sum(1 for _ in meta_file) == 10
 
 
 @pytest.mark.slow

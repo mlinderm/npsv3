@@ -2,5 +2,3 @@
 command: loss
 model:
   checkpoint: ???
-# Number of highest-loss regions to report
-worst_losses: 5

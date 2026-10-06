@@ -8,14 +8,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from npsv3.types import PathType
+
 LABEL_PADDING_VALUE = -100
 """Label value for padding rows and for groups without a defined genotype label."""
-
-REAL_SUFFIX = "real.image.bin.gz"
-SIMS_SUFFIX = "sims.image.bin.gz"
-"""Pixel-shard tar member suffixes for the polylithic energon layout: `{key}.{REAL_SUFFIX}` /
-`{key}.{SIMS_SUFFIX}`. Shared between `images.example.EnergonExampleWriter` (writer) and
-`models.energon` (reader) so the two cannot drift apart."""
 
 
 # Adapted from timm library
@@ -308,3 +304,46 @@ def _pack_and_pad_images(
     # If there are any remaining images, yield the final batch
     if groups:
         yield finish(groups)
+
+
+def group_to_image(cfg, batch: PackedBatch, group: int = 0, out_path: PathType | None = None, **kwargs):
+    """Render one region (group) of a `PackedBatch`, i.e., its real image and simulated images, via `example_to_image`.
+
+    Batch images are (B, C, H, W) tensors holding only `cfg.pileup.image_channels`, whereas the generator renders
+    (H, W, C) arrays. Unless `select_channels` is provided, we composite the aligned, paired and allele channels, using
+    the k-mer evidence channel when the BWA allele channel isn't stored in the batch.
+    """
+    # Deferred import, as `images.example` imports from this module
+    from npsv3.images.example import example_to_image
+    from npsv3.images.generator import ALIGNED_CHANNEL, ALLELE_CHANNEL, KMER_EVIDENCE_CHANNEL, PAIRED_CHANNEL
+
+    num_support = int(batch.offsets[-1])
+    start, end = int(batch.offsets[group]), int(batch.offsets[group + 1])
+    num_genotypes = int(batch.num_genotypes[group])
+    replicates = (end - start) // num_genotypes
+
+    width = int(batch.widths[num_support + group])
+    height, channels = batch.images.shape[2], batch.images.shape[1]
+
+    def to_hwc(image: torch.Tensor):
+        return image.permute(1, 2, 0).contiguous().numpy()
+
+    # Support images are laid out replicate-major, with the query (real) images following all of the support images
+    sims = batch.images[start:end, :, :, :width].reshape(replicates, num_genotypes, channels, height, width)
+    example = {
+        "image": to_hwc(batch.images[num_support + group, :, :, :width]),
+        "sim.images": np.stack([np.stack([to_hwc(sims[r, g]) for g in range(num_genotypes)]) for r in range(replicates)])
+        if replicates > 0
+        else np.empty((0, num_genotypes, height, width, channels), dtype=np.uint8),
+    }
+    label = int(batch.genotype_label[group])
+    if label >= 0:
+        example["label"] = label
+
+    if "select_channels" not in kwargs:
+        stored = list(cfg.pileup.image_channels)
+        allele_channel = ALLELE_CHANNEL if ALLELE_CHANNEL in stored else KMER_EVIDENCE_CHANNEL
+        kwargs["select_channels"] = [stored.index(c) for c in (ALIGNED_CHANNEL, PAIRED_CHANNEL, allele_channel)]
+
+    return example_to_image(cfg, example, out_path, with_simulations=replicates > 0, **kwargs)
+

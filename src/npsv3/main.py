@@ -173,7 +173,7 @@ def main(cfg: DictConfig) -> None:
         import torch
 
         from npsv3.models.runners import predict
-        from npsv3.models.paired import WorstLossCallback
+        from npsv3.models.paired import RecordLossCallback
 
         torch.set_num_threads(cfg.threads)
 
@@ -189,7 +189,10 @@ def main(cfg: DictConfig) -> None:
         ):
             _make_path_or_list_absolute(cfg, key)
 
-        predict(cfg, return_predictions=False, callbacks=[WorstLossCallback(k=OmegaConf.select(cfg, "worst_losses", default=5))])
+        # If no output file is specified, create a fixed file in the Hydra output directory
+        output = "losses.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        predict(cfg, return_predictions=False, callbacks=[RecordLossCallback(output)])
 
     elif cfg.command == "encode":
         import torch

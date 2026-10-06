@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
 
+from npsv3.constants import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.graphs.graph import Graph
 from npsv3.graphs.haplotype import (
     HaplotypePriorOverlay,
@@ -31,7 +32,6 @@ from npsv3.graphs.haplotype import (
     serialize_graph_and_unique_kmers,
 )
 from npsv3.images.generator import ImageGenerator
-from npsv3.models.loaders import REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.pileup import close_alignment_file_cache
 from npsv3.realigner import FragmentRealigner
 from npsv3.simulation import simulate_variant_sequencing, split_bam_by_tag
@@ -104,6 +104,7 @@ def make_graph_example(
     generator: ImageGenerator | None = None,
     addl_features: dict | None = None,
     ploidy: int = 2,
+    exact_reference: bool = False,
     agreement_sink=None,
     **kwargs,
 ):
@@ -121,7 +122,8 @@ def make_graph_example(
         # Prepare haplotypes for genotyping by ensuring the reference haplotype, and any "true" haplotypes, if present
         # in the graph, are included with the reference haplotype guaranteed to be at index 0.
         haplotypes, alleles, true_haplotype_idxs = prepare_genotyping_haplotypes(
-            graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy
+            graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy,
+            exact_reference=exact_reference,
         )
         if len(haplotypes) < 2 and cfg.graph.population_haplotype_topup:  # noqa: PLR2004
             # Only attempt "top-up" from the population if the sampler did not produce any haplotype diversity (and if
@@ -513,6 +515,7 @@ class GraphWriter(ExampleActor):
         *,
         ploidy: int = 2,
         min_variant_size: int = 50,
+        exact_reference: bool = False,
     ):
         super().__init__(index, output_dir, cfg)
         self.vcf_path = vcf_path
@@ -521,6 +524,7 @@ class GraphWriter(ExampleActor):
         self.filtered_kmer_path = filtered_kmer_path
         self.ploidy = ploidy
         self.min_variant_size = min_variant_size
+        self.exact_reference = exact_reference
         self.generator = hydra.utils.instantiate(cfg.pileup.generator, cfg=cfg, _recursive_=False)
         self.sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
 
@@ -546,6 +550,7 @@ class GraphWriter(ExampleActor):
             analysis_variants,
             generator=self.generator,
             ploidy=self.ploidy,
+            exact_reference=self.exact_reference,
         )
 
     def from_shard(self, shard_path: PathType) -> int:
@@ -612,6 +617,7 @@ def vcf_to_graph_examples(
     filtered_kmer_path: PathType | None = None,
     region: Range|None=None,
     min_variant_size: int = 50,
+    exact_reference: bool = False,
 ):
     with contextlib.ExitStack() as stack:
         # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
@@ -660,7 +666,9 @@ def vcf_to_graph_examples(
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Phase 2: Process each shard as a Ray task in parallel to generate images
+        # Phase 2: Process each shard as a Ray task in parallel to generate images. Every actor creates its own output
+        # shard, so don't create more actors than there are graph shards to process.
+        num_actors = min(cfg.threads, len(graph_shards))
         actors = [
             GraphWriter.remote(
                 i,
@@ -672,8 +680,9 @@ def vcf_to_graph_examples(
                 str(filtered_kmer_path),
                 ploidy=ploidy,
                 min_variant_size=min_variant_size,
+                exact_reference=exact_reference,
             )
-            for i in range(cfg.threads)
+            for i in range(num_actors)
         ]
         pool = ray.util.ActorPool(actors)
 
