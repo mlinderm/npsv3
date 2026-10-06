@@ -1,0 +1,3282 @@
+{
+ "truvari_version": "5.3.0",
+ "param_sets": {
+  "project": {
+   "refdist": 20,
+   "pctseq": 0.7,
+   "pctsize": 0.7,
+   "pctovl": 0.6,
+   "sizemin": 30,
+   "sizefilt": 30
+  },
+  "truvari_defaults": {
+   "refdist": 500,
+   "pctseq": 0.7,
+   "pctsize": 0.7,
+   "pctovl": 0.0,
+   "sizemin": 50,
+   "sizefilt": 30
+  },
+  "strict": {
+   "refdist": 5,
+   "pctseq": 0.9,
+   "pctsize": 0.9,
+   "pctovl": 0.8,
+   "sizemin": 20,
+   "sizefilt": 10
+  },
+  "loose": {
+   "refdist": 100,
+   "pctseq": 0.5,
+   "pctsize": 0.5,
+   "pctovl": 0.0,
+   "sizemin": 10,
+   "sizefilt": 5
+  },
+  "no_roll": {
+   "refdist": 100,
+   "pctseq": 0.7,
+   "pctsize": 0.5,
+   "pctovl": 0.0,
+   "sizemin": 20,
+   "sizefilt": 10,
+   "roll": false
+  }
+ },
+ "cases": {
+  "snv": {
+   "variants": [
+    {
+     "pos": 101,
+     "ref": "A",
+     "alt": "C",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "insertion": {
+   "variants": [
+    {
+     "pos": 120,
+     "ref": "T",
+     "alt": "TAACAACTTTAGCAAATTTTACGGTTAGGGACATTGCTGTTGCGCACTAAGCGCCTACAGC",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "deletion": {
+   "variants": [
+    {
+     "pos": 90,
+     "ref": "GTATTTGTGGCATGAGCCCGGGCAAAGTTTTCTGAAATAAGCAAGACGCCCACCAATGAGT",
+     "alt": "G",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "mnv_in_place": {
+   "variants": [
+    {
+     "pos": 101,
+     "ref": "A",
+     "alt": "G",
+     "carriers": [
+      "a"
+     ]
+    },
+    {
+     "pos": 102,
+     "ref": "T",
+     "alt": "G",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "delete_at_start": {
+   "variants": [
+    {
+     "pos": 0,
+     "ref": "AATTCC",
+     "alt": "A",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "insert_at_start": {
+   "variants": [
+    {
+     "pos": 0,
+     "ref": "N",
+     "alt": "NACGTACGTAC",
+     "carriers": [
+      "a"
+     ]
+    }
+   ],
+   "results": {}
+  },
+  "repeat_expansions": {
+   "variants": [
+    {
+     "pos": 79,
+     "ref": "G",
+     "alt": "GTCTTTCTTTCTTTCTTTCTT",
+     "carriers": [
+      "b"
+     ]
+    },
+    {
+     "pos": 79,
+     "ref": "G",
+     "alt": "GTCTTTCTTTCTT",
+     "carriers": [
+      "a",
+      "c"
+     ]
+    }
+   ],
+   "results": {
+    "a>b|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ]
+    },
+    "a>b|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": -8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": -8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ]
+    },
+    "a>c|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ],
+     "fp": []
+    },
+    "b>a|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|no_roll": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ],
+     "fp": []
+    },
+    "b>c|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|no_roll": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": 8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ]
+    },
+    "c>b|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": -8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 0.7646999955177307,
+        "PctSizeSimilarity": 0.6000000238418579,
+        "PctRecOverlap": 0.6190000176429749,
+        "SizeDiff": -8.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 66
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTTTCTT"
+      }
+     ]
+    }
+   }
+  },
+  "shifted_repeat_insertions": {
+   "variants": [
+    {
+     "pos": 79,
+     "ref": "G",
+     "alt": "GTCTTTCTTTCTTTCTT",
+     "carriers": [
+      "left",
+      "right"
+     ]
+    }
+   ],
+   "results": {
+    "left>right|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "left>right|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "left>right|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "left>right|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "left>right|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "right>left|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "right>left|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "right>left|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "right>left|loose": {
+     "tp_base": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 79,
+       "ref": "G",
+       "alt": "GTCTTTCTTTCTTTCTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "right>left|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    }
+   }
+  },
+  "identical_haplotypes": {
+   "variants": [
+    {
+     "pos": 50,
+     "ref": "G",
+     "alt": "GAAAA",
+     "carriers": [
+      "a",
+      "b"
+     ]
+    }
+   ],
+   "results": {
+    "a>b|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>c|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>c|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>a|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "c>b|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    }
+   }
+  },
+  "multiple_variants": {
+   "variants": [
+    {
+     "pos": 30,
+     "ref": "C",
+     "alt": "CGGTTGTACTGTACAGGAACTTATAG",
+     "carriers": [
+      "a"
+     ]
+    },
+    {
+     "pos": 200,
+     "ref": "CCTTAACTTCA",
+     "alt": "C",
+     "carriers": [
+      "a"
+     ]
+    },
+    {
+     "pos": 59,
+     "ref": "TCAGGGCCGTG",
+     "alt": "T",
+     "carriers": [
+      "b"
+     ]
+    }
+   ],
+   "results": {
+    "a>b|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "a>b|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      }
+     ],
+     "fp": []
+    },
+    "a>b|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      },
+      {
+       "pos": 200,
+       "ref": "CCTTAACTTCA",
+       "alt": "C"
+      }
+     ],
+     "fp": [
+      {
+       "pos": 59,
+       "ref": "TCAGGGCCGTG",
+       "alt": "T"
+      }
+     ]
+    },
+    "a>b|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      }
+     ],
+     "fp": []
+    },
+    "b>a|project": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "b>a|strict": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      }
+     ]
+    },
+    "b>a|loose": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [
+      {
+       "pos": 59,
+       "ref": "TCAGGGCCGTG",
+       "alt": "T"
+      }
+     ],
+     "fp": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      },
+      {
+       "pos": 200,
+       "ref": "CCTTAACTTCA",
+       "alt": "C"
+      }
+     ]
+    },
+    "b>a|no_roll": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 30,
+       "ref": "C",
+       "alt": "CGGTTGTACTGTACAGGAACTTATAG"
+      }
+     ]
+    }
+   }
+  },
+  "chr4_109850391_109850582": {
+   "variants": [
+    {
+     "pos": 28,
+     "ref": "C",
+     "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+     "carriers": [
+      "hap1"
+     ]
+    },
+    {
+     "pos": 29,
+     "ref": "C",
+     "alt": "CT",
+     "carriers": [
+      "asm",
+      "hap0",
+      "hap1"
+     ]
+    },
+    {
+     "pos": 32,
+     "ref": "C",
+     "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+     "carriers": [
+      "asm",
+      "hap1"
+     ]
+    },
+    {
+     "pos": 96,
+     "ref": "T",
+     "alt": "TTTTC",
+     "carriers": [
+      "asm",
+      "hap1"
+     ]
+    },
+    {
+     "pos": 28,
+     "ref": "C",
+     "alt": "CTTCTTTCTTTCTTT",
+     "carriers": [
+      "asm"
+     ]
+    },
+    {
+     "pos": 32,
+     "ref": "C",
+     "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+     "carriers": [
+      "hap0"
+     ]
+    }
+   ],
+   "results": {
+    "asm>hap0|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap0|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap0|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap0|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "asm>hap0|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "asm>hap1|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "asm>hap1|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "asm>hap1|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap0>asm|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap0>asm|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "hap0>asm|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap0>asm|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap0>asm|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap0>hap1|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap0>hap1|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "hap0>hap1|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap0>hap1|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap0>hap1|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap1>asm|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>asm|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>asm|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CTTCTTTCTTTCTTT"
+      }
+     ]
+    },
+    "hap1>asm|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>hap0|project": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>hap0|truvari_defaults": {
+     "tp_base": [],
+     "tp_comp": [],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap0|strict": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>hap0|loose": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    },
+    "hap1>hap0|no_roll": {
+     "tp_base": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 32,
+       "ref": "C",
+       "alt": "CTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTT",
+       "info": {
+        "PctSeqSimilarity": 0.9437000155448914,
+        "PctSizeSimilarity": 0.9714000225067139,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 97
+       }
+      }
+     ],
+     "fn": [
+      {
+       "pos": 28,
+       "ref": "C",
+       "alt": "CCTTTCTTCCTTCCTTCCTTCTTTCTTTCTTTCTTTCTTTCTTTCTTT"
+      }
+     ],
+     "fp": []
+    }
+   }
+  },
+  "chr7_125624057_125624248": {
+   "variants": [
+    {
+     "pos": 96,
+     "ref": "C",
+     "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+     "carriers": [
+      "hap2"
+     ]
+    },
+    {
+     "pos": 191,
+     "ref": "G",
+     "alt": "A",
+     "carriers": [
+      "asm",
+      "hap1",
+      "hap2"
+     ]
+    },
+    {
+     "pos": 96,
+     "ref": "C",
+     "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+     "carriers": [
+      "asm",
+      "hap1"
+     ]
+    }
+   ],
+   "results": {
+    "asm>hap1|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap1|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap2|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap2|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap2|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap2|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "asm>hap2|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>asm|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 1.0,
+        "PctSizeSimilarity": 1.0,
+        "PctRecOverlap": 1.0,
+        "SizeDiff": 0.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 100
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap2|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap2|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap2|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap2|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap1>hap2|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": -1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>asm|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>asm|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>asm|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>asm|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>asm|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>hap1|project": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>hap1|truvari_defaults": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>hap1|strict": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>hap1|loose": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    },
+    "hap2>hap1|no_roll": {
+     "tp_base": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "tp_comp": [
+      {
+       "pos": 96,
+       "ref": "C",
+       "alt": "CAAAACTAAAATATCATTATATTATAATATTTAAATTAAATTTCCCATCCTTACTTCAAAATTTTTTTTGTTCAATAGATCCAAGTGGGCCTTAGAAGCTGTATTTTTAACAAACTGTCTCAGATGCATTGCATTAAAATTAAAACTGTATACCAATTGTTCAAAAAAAAAA",
+       "info": {
+        "PctSeqSimilarity": 0.9970999956130981,
+        "PctSizeSimilarity": 0.9941999912261963,
+        "PctRecOverlap": 0.9883999824523926,
+        "SizeDiff": 1.0,
+        "StartDistance": 0,
+        "EndDistance": 0,
+        "TruScore": 99
+       }
+      }
+     ],
+     "fn": [],
+     "fp": []
+    }
+   }
+  }
+ }
+}

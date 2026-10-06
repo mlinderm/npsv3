@@ -44,6 +44,14 @@ dependencies = [
   "megatron-energon>=7.4,<8",
 ]
 
+[project.optional-dependencies]
+# Truvari-style haplotype harmonization (src/npsv3/graphs/harmonize.py): multiple sequence alignment and edit distance
+harmonize = [
+  "edlib",
+  "pyabpoa",
+  "pywfa",
+]
+
 [project.urls]
 Documentation = "https://github.com/mlinderm/npsv3#readme"
 Issues = "https://github.com/mlinderm/npsv3/issues"
