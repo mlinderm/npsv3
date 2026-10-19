@@ -44,10 +44,10 @@ def _resolve_world_size(cfg) -> int:
     """Return a best-effort DDP world size from `cfg.trainer`, for scaling a `limit_train_batches` estimate.
 
     Not authoritative, since Lightning only resolves the real world size once the `Trainer`/strategy are built, but good
-    enough to scale an *estimate*. `devices` left unset or `"auto"` falls back to the visible GPU count, matching
-    Lightning's own "auto" resolution for the GPU accelerator.
+    enough to scale an *estimate*. `devices` left unset (Lightning's default is `"auto"`) or `"auto"` falls back to the
+    visible GPU count, matching Lightning's own "auto" resolution for the GPU accelerator.
     """
-    devices = OmegaConf.select(cfg, "trainer.devices", default=1)
+    devices = OmegaConf.select(cfg, "trainer.devices", default="auto")
     num_nodes = OmegaConf.select(cfg, "trainer.num_nodes", default=1)
     if devices is None or devices == "auto":
         devices = torch.cuda.device_count() if torch.cuda.is_available() else 1

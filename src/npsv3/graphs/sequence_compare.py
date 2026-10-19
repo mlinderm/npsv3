@@ -1,14 +1,16 @@
-"""Truvari-style comparison of harmonized haplotypes.
+"""Sequence comparison of harmonized haplotypes (Truvari-style variant matching).
 
 Answers two questions about a pair of haplotypes over a region:
 
-* *Would Truvari consider them different?* `truvari_differ` / `HaplotypeComparison.differs`. The haplotypes are harmonized
+* *Are they different?* `haplotypes_differ` / `HaplotypeComparison.differs`. The haplotypes are harmonized
   together with the reference (`harmonize`, the `truvari phab` step) and the variants of one are then benchmarked against the
   variants of the other with Truvari `bench` matching, as `truvari refine` does. They differ if any benchmarked variant is
   left unmatched (a false negative or false positive).
 * *How similar are they?* `Comparison.matches` etc. carry per-pair sequence/size similarity, reciprocal overlap and distance
   (computed for every candidate pair, not short-circuited, so near misses are quantified), and `HaplotypeComparison.score`
   summarizes them. `MatchResult.required` gives, per criterion, the threshold at which a pair would start to match.
+
+`compare_genotypes` lifts both to genotypes: which candidate genotypes differ from a labeled genotype, and how similar they are.
 
 The matching is a port of Truvari 5.3.0 (`variant_record.py`, `comparisons.py`, `matching.py`, `bench.py`; MIT license,
 https://github.com/ACEnglish/truvari): same-type check, `refdist` position test, `pctsize`, reciprocal overlap with insertion
@@ -17,7 +19,7 @@ base, `sizefilt` for the comparison, `sizemax`), and the greedy one-to-one `pick
 (haplotypes are single-copy). Ties in the pick order are broken by position in the input, whereas Truvari's are arbitrary.
 
 Defaults are *not* Truvari's `bench` defaults but the criteria used in this project (`refdist` 20, `pctovl` 0.6, `sizemin`
-30); use `TruvariParams.truvari_defaults()` for the stock values. Needs the optional `harmonize` extra.
+30); use `ComparisonParams.truvari_defaults()` for the stock values. Needs the optional `harmonize` extra.
 """
 
 import itertools
@@ -26,11 +28,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from npsv3.graphs.harmonize import AlignedVariant, Harmonized, harmonize
+from npsv3.graphs.sequence_harmonize import AlignedVariant, Harmonized, harmonize
 
 
 @dataclass(frozen=True)
-class TruvariParams:
+class ComparisonParams:
     refdist: int = 20  # max distance between the calls' boundaries
     pctseq: float = 0.7  # minimum sequence similarity (0 disables)
     pctsize: float = 0.7  # minimum min(size)/max(size)
@@ -42,26 +44,21 @@ class TruvariParams:
     roll: bool = True  # compare rotations/unrolled sequences to tolerate shifted placement in repeats (`bench` default)
 
     @classmethod
-    def truvari_defaults(cls, **overrides) -> "TruvariParams":
+    def truvari_defaults(cls, **overrides) -> "ComparisonParams":
         """Truvari 5.3.0 `bench` defaults (`refdist` 500, `pctovl` 0, `sizemin` 50, ...)."""
         return cls(refdist=500, pctovl=0.0, sizemin=50, **overrides)
 
 
-DEFAULT_PARAMS = TruvariParams()
+DEFAULT_PARAMS = ComparisonParams()
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Truvari primitives
-# --------------------------------------------------------------------------------------------------------------------
-
-
-def edit_similarity(a: str, b: str) -> float:
-    """Truvari `seqsim`: (len_a + len_b - edit_distance) / (len_a + len_b)."""
+def edit_similarity(seq_a: str, seq_b: str) -> float:
+    """Return sequence simlarity (Truvari's `seqsim`), defined as (len_a + len_b - edit_distance) / (len_a + len_b)."""
     import edlib
 
-    a, b = a.upper(), b.upper()
-    total = len(a) + len(b)
-    return (total - edlib.align(a, b)["editDistance"]) / total
+    seq_a, seq_b = seq_a.upper(), seq_b.upper()
+    total = len(seq_a) + len(seq_b)
+    return (total - edlib.align(seq_a, seq_b)["editDistance"]) / total
 
 
 def _smallest_rotation(sequence: str) -> str:
@@ -70,32 +67,32 @@ def _smallest_rotation(sequence: str) -> str:
     return min(doubled[i : i + n] for i in range(n))
 
 
-def roll_similarity(a: str, b: str) -> float:
-    """Similarity of the lexicographically smallest rotations of the sequences."""
-    return edit_similarity(_smallest_rotation(a), _smallest_rotation(b))
+def roll_similarity(seq_a: str, seq_b: str) -> float:
+    """Return the similarity of the lexicographically smallest rotations of the sequences `seq_a` and `seq_b`."""
+    return edit_similarity(_smallest_rotation(seq_a), _smallest_rotation(seq_b))
 
 
 def unroll_similarity(seq_a: str, seq_b: str, offset: int) -> float:
-    """Similarity of `seq_a` and `seq_b` rotated by `offset`, how far `seq_a` is upstream of `seq_b`."""
+    """Return the similarity of `seq_a` and `seq_b` rotated by `offset`, how far `seq_a` is upstream of `seq_b`."""
     f = offset % len(seq_b)
     return edit_similarity(seq_a, seq_b[-f:] + seq_b[:-f])
 
 
-def best_similarity(a: str, b: str, start_distance: int) -> float:
-    """Best of rolled, unrolled (both directions from both ends) and direct similarity, as Truvari `best_seqsim`."""
-    rolled = roll_similarity(a, b) if len(a) < 500 and len(b) < 500 else 0.0  # noqa: PLR2004
+def best_similarity(seq_a: str, seq_b: str, start_distance: int) -> float:
+    """Reutrn the best of rolled, unrolled (both directions from both ends) and direct similarity (Truvari's `best_seqsim`)."""
+    rolled = roll_similarity(seq_a, seq_b) if len(seq_a) < 500 and len(seq_b) < 500 else 0.0  # noqa: PLR2004
     return max(
         rolled,
-        unroll_similarity(a, b, start_distance),
-        unroll_similarity(a, b, -start_distance),
-        unroll_similarity(b, a, start_distance),
-        unroll_similarity(b, a, -start_distance),
-        edit_similarity(a, b),
+        unroll_similarity(seq_a, seq_b, start_distance),
+        unroll_similarity(seq_a, seq_b, -start_distance),
+        unroll_similarity(seq_b, seq_a, start_distance),
+        unroll_similarity(seq_b, seq_a, -start_distance),
+        edit_similarity(seq_a, seq_b),
     )
 
 
 def size_similarity(size_a: int, size_b: int) -> tuple[float, int]:
-    """Truvari `sizesim`: min/max size ratio and the size difference (a - b)."""
+    """Return min/max size ratio and the size difference (size_a - size_b) (Truvari's `sizesim`)."""
     if size_a == 0 or size_b == 0:
         if size_a == size_b:
             return 1.0, 0
@@ -104,6 +101,7 @@ def size_similarity(size_a: int, size_b: int) -> tuple[float, int]:
 
 
 def reciprocal_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
+    """Return the reciprocal overlap of two intervals"""
     start, end = max(a_start, b_start), min(a_end, b_end)
     if start < end:
         return (end - start) / max(a_end - a_start, b_end - b_start)
@@ -118,15 +116,15 @@ def _end(variant: AlignedVariant) -> int:
     return variant.pos - 1 + len(variant.ref)
 
 
-def truvari_size(variant: AlignedVariant) -> int:
-    """Truvari `var_size`: length difference for indels, 0 for SNVs."""
+def variant_size(variant: AlignedVariant) -> int:
+    """Return the size of a variant as used by Truvari (`var_size`). The length difference for indels, 0 for SNVs."""
     return 0 if variant.kind == "SNP" else abs(len(variant.alt) - len(variant.ref))
 
 
 def _boundaries(variant: AlignedVariant, *, ins_inflate: bool = False) -> tuple[int, int]:
     start, end = _start(variant), _end(variant)
     if ins_inflate and variant.kind == "INS":
-        size = truvari_size(variant)
+        size = variant_size(variant)
         start, end = start - size // 2, end + size // 2
     return start, end
 
@@ -135,25 +133,37 @@ def _sequence(variant: AlignedVariant) -> str:
     return (variant.ref if variant.kind == "DEL" else variant.alt).upper()
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Matching
-# --------------------------------------------------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class MatchResult:
-    base: AlignedVariant | None
-    comp: AlignedVariant | None
-    state: bool = False  # Truvari considers the pair a match
-    seqsim: float | None = None
-    sizesim: float | None = None
-    ovlpct: float | None = None
-    sizediff: int | None = None
-    st_dist: int | None = None  # base start minus comp start
-    ed_dist: int | None = None
-    score: float | None = None  # Truvari's TruScore, 0-100
-    failed: tuple[str, ...] = ()  # criteria not met: "type", "refdist", "pctsize", "pctovl", "pctseq"
-    refdist_needed: int | None = None  # smallest `refdist` at which the boundaries would be within range
+    """Comparison of one base variant with one comparison variant (from `match_variants`).
+
+    Attributes:
+        base: Variant being benchmarked against.
+        comp: Variant being benchmarked.
+        state: Whether the pair matches, i.e., no criterion failed.
+        seqsim: Sequence similarity of the inserted/deleted sequences (0 if `pctseq` is disabled).
+        sizesim: Size similarity, min(size)/max(size).
+        ovlpct: Reciprocal overlap, with insertions inflated by their size.
+        sizediff: Base size minus comparison size.
+        st_dist: Base start minus comparison start.
+        ed_dist: Base end minus comparison end.
+        score: Truvari's TruScore, the mean of `seqsim`, `sizesim` and `ovlpct` scaled to 0-100.
+        failed: Criteria not met, any of "type", "refdist", "pctsize", "pctovl" and "pctseq".
+        refdist_needed: Smallest `refdist` at which the boundaries would be within range.
+    """
+
+    base: AlignedVariant
+    comp: AlignedVariant
+    state: bool
+    seqsim: float
+    sizesim: float
+    ovlpct: float
+    sizediff: int
+    st_dist: int
+    ed_dist: int
+    score: float
+    failed: tuple[str, ...]
+    refdist_needed: int
 
     @property
     def required(self) -> dict[str, float]:
@@ -167,15 +177,10 @@ class MatchResult:
 
     def sort_key(self) -> tuple:
         """Truvari's ordering: matches first, then score, then closeness of start and end."""
-        return (
-            self.state,
-            self.score if self.score is not None else 0,
-            -abs(self.st_dist) if self.st_dist is not None else -float("inf"),
-            -abs(self.ed_dist) if self.ed_dist is not None else -float("inf"),
-        )
+        return (self.state, self.score, -abs(self.st_dist), -abs(self.ed_dist))
 
 
-def match_variants(base: AlignedVariant, comp: AlignedVariant, params: TruvariParams) -> MatchResult:
+def match_variants(base: AlignedVariant, comp: AlignedVariant, params: ComparisonParams) -> MatchResult:
     """Truvari `VariantRecord.var_match` without short-circuiting (all measures are always computed)."""
     failed = []
     if not params.typeignore and base.kind != comp.kind:
@@ -187,7 +192,7 @@ def match_variants(base: AlignedVariant, comp: AlignedVariant, params: TruvariPa
     if not max(b_start - params.refdist, c_start) < min(b_end + params.refdist, c_end):
         failed.append("refdist")
 
-    sizesim, sizediff = size_similarity(truvari_size(base), truvari_size(comp))
+    sizesim, sizediff = size_similarity(variant_size(base), variant_size(comp))
     if sizesim < params.pctsize:
         failed.append("pctsize")
 
@@ -226,15 +231,29 @@ def match_variants(base: AlignedVariant, comp: AlignedVariant, params: TruvariPa
 
 @dataclass(frozen=True)
 class Comparison:
-    """Result of benchmarking `comp` variants against `base` variants (one direction)."""
+    """Result of benchmarking comparison variants against base variants in one direction (from `compare_variants`).
 
-    matches: tuple[MatchResult, ...]  # true positives
-    fn: tuple[AlignedVariant, ...]  # base variants without a match
-    fp: tuple[AlignedVariant, ...]  # comparison variants without a match (and at least `sizemin`, as in Truvari)
-    ignored_base: tuple[AlignedVariant, ...]  # filtered by size
+    As in Truvari, unmatched comparison variants smaller than `sizemin` (but at least `sizefilt`) are in neither `fp` nor
+    `ignored_comp`.
+
+    Attributes:
+        matches: True positives, one-to-one pairs of base and comparison variants.
+        fn: Base variants without a match (false negatives).
+        fp: Comparison variants of at least `sizemin` without a match (false positives).
+        ignored_base: Base variants outside the size range (`sizemin` to `sizemax`), not benchmarked.
+        ignored_comp: Comparison variants outside the size range (`sizefilt` to `sizemax`), not benchmarked.
+        nearest: Each unmatched benchmarked variant -> its best-scoring (failed) pair, for explaining near misses. Absent
+            if there were no variants on the other side.
+        params: Thresholds used.
+    """
+
+    matches: tuple[MatchResult, ...]
+    fn: tuple[AlignedVariant, ...]
+    fp: tuple[AlignedVariant, ...]
+    ignored_base: tuple[AlignedVariant, ...]
     ignored_comp: tuple[AlignedVariant, ...]
-    nearest: Mapping[AlignedVariant, MatchResult]  # for each unmatched variant, its best (failed) candidate pair
-    params: TruvariParams
+    nearest: Mapping[AlignedVariant, MatchResult]
+    params: ComparisonParams
 
     @property
     def differs(self) -> bool:
@@ -243,10 +262,9 @@ class Comparison:
     @property
     def score(self) -> float:
         """Size-weighted fraction of benchmarked variants that matched, 2*sum(matched)/(sum(base)+sum(comp)); 1.0 if none."""
-        matched = sum(min(truvari_size(m.base), truvari_size(m.comp)) for m in self.matches)  # type: ignore[arg-type]
-        total = sum(truvari_size(v) for v in (*self.fn, *self.fp)) + sum(
-            truvari_size(m.base) + truvari_size(m.comp)  # type: ignore[arg-type]
-            for m in self.matches
+        matched = sum(min(variant_size(m.base), variant_size(m.comp)) for m in self.matches)
+        total = sum(variant_size(v) for v in (*self.fn, *self.fp)) + sum(
+            variant_size(m.base) + variant_size(m.comp) for m in self.matches
         )
         return 1.0 if total == 0 else 2 * matched / total
 
@@ -261,22 +279,22 @@ class Comparison:
                     if near is None
                     else f"nearest fails {','.join(near.failed) or 'nothing'}: {near.required}"
                 )
-                lines.append(f"{label} {variant.kind}{truvari_size(variant)}@{variant.pos}: {why}")
+                lines.append(f"{label} {variant.kind}{variant_size(variant)}@{variant.pos}: {why}")
         return lines
 
 
 def compare_variants(
     base_variants: Sequence[AlignedVariant],
     comp_variants: Sequence[AlignedVariant],
-    params: TruvariParams = DEFAULT_PARAMS,
+    params: ComparisonParams = DEFAULT_PARAMS,
 ) -> Comparison:
-    """Benchmark `comp_variants` against `base_variants` as `truvari bench` does (`pick=single`)."""
+    """Benchmark `comp_variants` against `base_variants` (as `truvari bench` does with `pick=single`)."""
 
     def too_big(variant):
-        return params.sizemax != -1 and truvari_size(variant) > params.sizemax
+        return params.sizemax != -1 and variant_size(variant) > params.sizemax
 
-    base = [v for v in base_variants if not too_big(v) and truvari_size(v) >= params.sizemin]
-    comp = [v for v in comp_variants if not too_big(v) and truvari_size(v) >= params.sizefilt]
+    base = [v for v in base_variants if not too_big(v) and variant_size(v) >= params.sizemin]
+    comp = [v for v in comp_variants if not too_big(v) and variant_size(v) >= params.sizefilt]
     ignored_base = tuple(v for v in base_variants if v not in base)
     ignored_comp = tuple(v for v in comp_variants if v not in comp)
 
@@ -304,19 +322,25 @@ def compare_variants(
 
     fn = tuple(b for i, b in enumerate(base) if i not in used_base)
     # Truvari does not count unmatched comparison calls between sizefilt and sizemin as false positives
-    fp = tuple(c for j, c in enumerate(comp) if j not in used_comp and truvari_size(c) >= params.sizemin)
+    fp = tuple(c for j, c in enumerate(comp) if j not in used_comp and variant_size(c) >= params.sizemin)
     return Comparison(tuple(matches), fn, fp, ignored_base, ignored_comp, nearest, params)
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Haplotype level
-# --------------------------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class HaplotypeComparison:
-    forward: Comparison  # variants of `a` as base, `b` as comparison
-    reverse: Comparison | None  # the other direction (symmetric comparisons)
+    """Comparison of two harmonized haplotypes, `a` and `b` (from `compare_harmonized` or `compare_haplotypes`).
+
+    The haplotypes differ if either direction has an unmatched variant (`differs`), and their similarity is the lower of the
+    two directions' scores (`score`).
+
+    Attributes:
+        forward: `a`'s variants as the base and `b`'s as the comparison.
+        reverse: `b`'s variants as the base and `a`'s as the comparison, or None if the comparison is not symmetric.
+        harmonized: Harmonization the variants were called from, which may include other haplotypes.
+    """
+
+    forward: Comparison
+    reverse: Comparison | None
     harmonized: Harmonized
 
     @property
@@ -333,7 +357,7 @@ def compare_harmonized(
     harmonized: Harmonized,
     name_a: str,
     name_b: str,
-    params: TruvariParams = DEFAULT_PARAMS,
+    params: ComparisonParams = DEFAULT_PARAMS,
     *,
     symmetric: bool = True,
 ) -> HaplotypeComparison:
@@ -348,12 +372,12 @@ def compare_haplotypes(
     reference: str,
     hap_a: str,
     hap_b: str,
-    params: TruvariParams = DEFAULT_PARAMS,
+    params: ComparisonParams = DEFAULT_PARAMS,
     *,
     aligner: str = "poa",
     symmetric: bool = True,
 ) -> HaplotypeComparison:
-    """Harmonize `reference`, `hap_a` and `hap_b` together (as `truvari phab` does for a pair) and compare them.
+    """Return the comparison of `reference`, `hap_a` and `hap_b` harmonized together (as `truvari phab` does for a pair).
 
     With `symmetric`, `hap_a` is also benchmarked as the comparison and the result differs if either direction does; with
     `sizemin == sizefilt` the two directions only differ in how ties are picked.
@@ -362,22 +386,33 @@ def compare_haplotypes(
     return compare_harmonized(harmonized, "a", "b", params, symmetric=symmetric)
 
 
-def truvari_differ(
+def haplotypes_differ(
     reference: str,
     hap_a: str,
     hap_b: str,
-    params: TruvariParams = DEFAULT_PARAMS,
+    params: ComparisonParams = DEFAULT_PARAMS,
     *,
     aligner: str = "poa",
 ) -> bool:
-    """Would Truvari (after `phab` harmonization, as in `refine`) consider the two haplotypes different?"""
+    """Return true if the two haplotypes are different, i.e., would Truvari (after `phab` harmonization, as in `refine`) consider them so?"""
     return compare_haplotypes(reference, hap_a, hap_b, params, aligner=aligner).differs
 
 
 @dataclass(frozen=True)
 class HaplotypeMatrix:
-    differs: np.ndarray  # (H, H) bool
-    score: np.ndarray  # (H, H) float
+    """All pairwise comparisons of a set of H haplotypes (from `compare_haplotype_set`).
+
+    The matrices are symmetric and indexed in the order of `names`; a haplotype never differs from itself (score 1).
+
+    Attributes:
+        differs: (H, H) bool, whether each pair of haplotypes differs (`HaplotypeComparison.differs`).
+        score: (H, H) float, similarity of each pair (`HaplotypeComparison.score`).
+        names: Haplotype names, in matrix order.
+        comparisons: (name_a, name_b) -> full comparison, for each pair with `name_a` before `name_b` in `names`.
+    """
+
+    differs: np.ndarray
+    score: np.ndarray
     names: tuple[str, ...]
     comparisons: Mapping[tuple[str, str], HaplotypeComparison] = field(repr=False)
 
@@ -385,7 +420,7 @@ class HaplotypeMatrix:
 def compare_haplotype_set(
     reference: str,
     haplotypes: Mapping[str, str],
-    params: TruvariParams = DEFAULT_PARAMS,
+    params: ComparisonParams = DEFAULT_PARAMS,
     *,
     aligner: str = "poa",
     joint: bool = False,
@@ -412,20 +447,106 @@ def compare_haplotype_set(
     return HaplotypeMatrix(differs, score, names, comparisons)
 
 
+@dataclass(frozen=True)
+class GenotypeComparison:
+    """Comparison of every candidate genotype with a labeled genotype (from `compare_genotypes`).
+
+    A genotype matches another if its haplotypes can be paired with the other's (in any order) such that no pair differs
+    (`HaplotypeComparison.differs`). Its score is the best, over those pairings, of the lowest pair score.
+
+    Attributes:
+        differs: (G,) bool, whether each genotype, in `combinations_with_replacement(range(H), ploidy)` order, differs
+            from the label (False for the label itself).
+        score: (G,) float, similarity of each genotype to the label (1 for the label itself).
+        label_differs: Whether the label differs from the sample's own haplotypes, None if they were not provided.
+        label_score: Similarity of the label to the sample's own haplotypes, None if they were not provided.
+    """
+
+    differs: np.ndarray
+    score: np.ndarray
+    label_differs: bool | None
+    label_score: float | None
+
+
+def compare_genotypes(
+    reference: str,
+    haplotypes: Sequence[str],
+    label: Sequence[int],
+    sample_haplotypes: Sequence[str] | None = None,
+    params: ComparisonParams = DEFAULT_PARAMS,
+    *,
+    aligner: str = "poa",
+    joint: bool = True,
+) -> GenotypeComparison:
+    """Compare each genotype of the candidate `haplotypes` with the `label` genotype (indices into `haplotypes`, one per
+    ploidy index) and, if provided, the label with the sample's own haplotypes (e.g., its assembled paths).
+
+    Only the comparisons needed are made, those of each candidate with each label haplotype (and of the label with the sample),
+    and identical sequences are not compared. With `joint` (the default) all the sequences are harmonized together once,
+    which is much faster than harmonizing each pair, but a pair's variants can then depend on the other sequences.
+    """
+    ploidy = len(label)
+    sequences = {f"hap{i}": sequence for i, sequence in enumerate(haplotypes)}
+    sample_names = None
+    if sample_haplotypes is not None:
+        sample_names = [f"sample{i}" for i in range(len(sample_haplotypes))]
+        sequences.update(zip(sample_names, sample_haplotypes, strict=True))
+
+    harmonized = None  # Harmonized on first use, so if every comparison is between identical sequences, none is needed
+    pairs: dict[tuple[str, str], tuple[bool, float]] = {}
+
+    def compare_pair(a: str, b: str) -> tuple[bool, float]:
+        nonlocal harmonized
+        key = (a, b) if a <= b else (b, a)
+        if key not in pairs:
+            if sequences[a] == sequences[b]:
+                pairs[key] = (False, 1.0)
+            else:
+                if joint:
+                    if harmonized is None:
+                        harmonized = harmonize(reference, sequences, aligner=aligner, dedup=True)
+                    result = compare_harmonized(harmonized, a, b, params)
+                else:
+                    result = compare_haplotypes(reference, sequences[a], sequences[b], params, aligner=aligner)
+                pairs[key] = (result.differs, result.score)
+        return pairs[key]
+
+    def compare_genotype(genotype: Sequence[str], target: Sequence[str]) -> tuple[bool, float]:
+        differs, score = True, 0.0
+        for pairing in set(itertools.permutations(target)):
+            results = [compare_pair(a, b) for a, b in zip(genotype, pairing, strict=True)]
+            differs = differs and any(pair_differs for pair_differs, _ in results)
+            score = max(score, min(pair_score for _, pair_score in results))
+        return differs, score
+
+    label_names = [f"hap{i}" for i in label]
+    genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), ploidy))
+    results = [compare_genotype([f"hap{i}" for i in genotype], label_names) for genotype in genotypes]
+    label_differs, label_score = compare_genotype(label_names, sample_names) if sample_names is not None else (None, None)
+    return GenotypeComparison(
+        np.array([differs for differs, _ in results], dtype=bool),
+        np.array([score for _, score in results], dtype=float),
+        label_differs,
+        label_score,
+    )
+
+
 __all__ = [
     "Comparison",
+    "ComparisonParams",
+    "DEFAULT_PARAMS",
+    "GenotypeComparison",
     "HaplotypeComparison",
     "HaplotypeMatrix",
     "MatchResult",
-    "DEFAULT_PARAMS",
-    "TruvariParams",
     "best_similarity",
+    "compare_genotypes",
     "compare_haplotype_set",
     "compare_haplotypes",
     "compare_harmonized",
     "compare_variants",
     "edit_similarity",
+    "haplotypes_differ",
     "match_variants",
-    "truvari_differ",
-    "truvari_size",
+    "variant_size",
 ]

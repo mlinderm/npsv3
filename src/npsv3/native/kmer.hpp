@@ -74,9 +74,10 @@ enum class KmerZygosity { ABSENT, HETEROZYGOUS, HOMOZYGOUS, FREQUENT };
 namespace detail {
 
 /**
- * @brief A CKMCFile whose random-access mode memory-maps *.kmc_suf read-only instead of
- * reading it into a private heap buffer to minimize aggregate memory usage with multiple
- * instances.
+ * @brief A CKMCFile whose random-access mode memory-maps *.kmc_pre (the prefix LUT) and *.kmc_suf instead of reading
+ * them into private heap buffers. The mapped pages are shared via the page cache by all instances (and processes)
+ * opening the same database, minimizing aggregate memory usage with multiple instances. Only the page containing the
+ * LUT's terminal sentinel, which CKMCFile writes into the LUT, becomes a private copy.
  */
 class MMapKMCFile : public CKMCFile {
  public:
@@ -90,8 +91,12 @@ class MMapKMCFile : public CKMCFile {
   bool Close();
 
  private:
+  bool MapPrefix(const std::string& file_name);
+  void UnmapPrefix();
   void UnmapSufix();
 
+  void* prefix_mmap_base_ = nullptr;
+  size_t prefix_mmap_size_ = 0;
   void* sufix_mmap_base_ = nullptr;
   size_t sufix_mmap_size_ = 0;
 };

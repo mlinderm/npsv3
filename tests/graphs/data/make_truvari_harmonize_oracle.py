@@ -6,8 +6,9 @@ Run with Truvari's own Python (it is not a dependency of npsv3), from the repo r
     /home/mlinderman/modules/truvari/5.3.0/bin/python3 tests/graphs/data/make_truvari_harmonize_oracle.py
 
 For every case the oracle records the MSA that `truvari.phab.run_poa` / `run_wfa` produce and the variants
-`truvari.msa2vcf` calls from it, so `tests/graphs/test_harmonize.py` can check our port against Truvari without needing it.
-Truvari's haplotype keys are `<sample>_<1|2>_<region>`; each haplotype here is a "sample" with one (first) haplotype.
+`truvari.msa2vcf` calls from it, so `tests/graphs/test_sequence_harmonize.py` can check our port against Truvari without
+needing it. Truvari's haplotype keys are `<sample>_<1|2>_<region>`; each haplotype here is a "sample" with one (first)
+haplotype.
 """
 
 import json
@@ -22,10 +23,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def random_sequence(length, seed):
+    """Reproducible random ACGT sequence of `length` bases."""
     return "".join(random.Random(seed).choices("ACGT", k=length))
 
 
 def synthetic_cases():
+    """Small hand-built harmonization cases covering the variant shapes and alignment edge cases of interest.
+
+    Covers a SNV, an insertion, a deletion, an in-place MNV, indels at the start of the region, expansions and shifted
+    insertions in a tandem repeat (where placement is ambiguous), duplicate and reference-identical haplotypes, and
+    multiple variants per haplotype.
+
+    Returns:
+        Case name -> (reference sequence, haplotype name -> haplotype sequence).
+    """
     ref = random_sequence(240, seed=1)
     tract = "CTTT" * 10
     repeat_ref = random_sequence(80, seed=2) + tract + random_sequence(80, seed=3)
@@ -64,6 +75,21 @@ def synthetic_cases():
 
 
 def run_case(reference, haplotypes, aligner_name):
+    """Harmonize one case with Truvari and record its alignment and called variants.
+
+    Haplotypes are passed to Truvari as the first haplotype of a sample of the same name, and keyed by that name in the
+    output.
+
+    Args:
+        reference: Reference sequence of the region.
+        haplotypes: Haplotype name -> sequence.
+        aligner_name: `"poa"` (`phab.run_poa`) or `"wfa"` (`phab.run_wfa`).
+
+    Returns:
+        Dict with `"msa"`, the aligned sequences keyed by haplotype name (and the `ref_` reference key), with pairwise
+        alignments as [gapped reference, gapped haplotype] lists, and `"variants"`, the distinct variants as dicts with
+        `pos`, `ref`, `alt` and the sorted names of the haplotypes carrying them (`carriers`).
+    """
     region = f"ref_region:1-{len(reference)}"
     inputs = {region: reference} | {f"{name}_1_r": seq for name, seq in haplotypes.items()}
     msa = {"poa": phab.run_poa, "wfa": phab.run_wfa}[aligner_name](dict(inputs))
@@ -86,10 +112,12 @@ def run_case(reference, haplotypes, aligner_name):
 
 
 def name_key(pos, ref, alt):
+    """Key identifying a variant by position and alleles, used to de-duplicate Truvari's VCF records."""
     return f"{pos}:{ref}:{alt}"
 
 
 def main():
+    """Run every synthetic and real case (`harmonize_real_cases.json`) with both aligners and write the oracle."""
     cases = {name: {"reference": ref, "haplotypes": haps} for name, (ref, haps) in synthetic_cases().items()}
     with open(os.path.join(HERE, "harmonize_real_cases.json")) as f:
         cases.update(json.load(f))

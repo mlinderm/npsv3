@@ -224,6 +224,11 @@ class HaplotypeSamplerOverlay {
   /// scores, via a single forward pass at exactly width @p n .
   std::vector<Haplotype> FindBestPaths(size_t n) const;
 
+  /// Return up to @p n highest-scoring distinct paths (by covered inference alleles) that are identical to @p backbone
+  /// except at inference variants. Requires the inference-VCF constructor. @p backbone must be a complete
+  /// source-to-sink path.
+  std::vector<Haplotype> FindBestBackbonePaths(const Haplotype& backbone, size_t n) const;
+
   /// Return the top @p n haplotypes, sorted by descending score, sampled greedily from the graph using k-mer coverage.
   std::vector<Haplotype> SampleHaplotypes(size_t n);
 
@@ -403,8 +408,9 @@ class HaplotypeSamplerOverlay {
 
   /// Compute BestPathState backpointers for up to @p n distinct-covered_paths paths per settlement point,
   /// for the current k-mer scores, via a single forward pass at exactly width @p n. Every (node,
-  /// automaton_state) pool is trimmed to n candidates, including pending (mid k-mer-match) states.
-  BestPathState PropagateBestPathState(size_t n) const;
+  /// automaton_state) pool is trimmed to n candidates, including pending (mid k-mer-match) states. If @p node_mask
+  /// is provided, paths are restricted to the nodes in the mask (which must include the source and sink nodes).
+  BestPathState PropagateBestPathState(size_t n, const Graph::NodeIdSet* node_mask = nullptr) const;
 
   /// Extract the final top-n distinct paths (applying the path filter, if active) from a completed @p path_state.
   std::vector<Haplotype> ExtractBestPaths(const BestPathState& path_state) const;

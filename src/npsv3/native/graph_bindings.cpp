@@ -371,6 +371,7 @@ NB_MODULE(_native_graph, m) {
     .def("initialize_scores", &npsv3::HaplotypeSamplerOverlay::InitializeScores, "counts"_a)
     .def("sample_haplotypes", &npsv3::HaplotypeSamplerOverlay::SampleHaplotypes, "n"_a)
     .def("find_best_paths", &npsv3::HaplotypeSamplerOverlay::FindBestPaths, "n"_a)
+    .def("find_best_backbone_paths", &npsv3::HaplotypeSamplerOverlay::FindBestBackbonePaths, "backbone"_a, "n"_a)
     .def("sample_diplotypes", &npsv3::HaplotypeSamplerOverlay::SampleDiplotypes, "candidates"_a, "n"_a)
     .def("score", &npsv3::HaplotypeSamplerOverlay::Score, "haplotype"_a)
     .def("decode_haplotype", nb::overload_cast<const npsv3::HaplotypeSamplerOverlay::Haplotype&>(&npsv3::HaplotypeSamplerOverlay::DecodeHaplotype, nb::const_), "haplotype"_a)
@@ -566,7 +567,8 @@ NB_MODULE(_native_graph, m) {
     .def("close", &npsv3::VariantFileWriter::Close);
 
   nb::class_<npsv3::Graph>(m, "Graph")
-    .def(nb::init<const std::string&, const std::string&, const npsv3::Range&>())
+    .def(nb::init<const std::string&, const std::string&, const npsv3::Range&, bool, bool>(),
+         "reference_fasta_path"_a, "vcf_path"_a, "region"_a, "enforce_multiallelic"_a = true, "filtered_as_missing"_a = false)
     .def("save", nb::overload_cast<const std::string&>(&npsv3::Graph::Save, nb::const_), "path"_a)
     .def("save_bytes", [](const npsv3::Graph& graph) {
       return SaveAsBytearray(graph);
@@ -583,6 +585,10 @@ NB_MODULE(_native_graph, m) {
       return npsv3::Graph::Load(is);
     }, "data"_a)
     .def("node_count", &npsv3::Graph::get_node_count)
+    .def("has_edge", [](const npsv3::Graph& graph, odgi::nid_t from_node, odgi::nid_t to_node) {
+      // Forward-strand edge from_node -> to_node (all paths in the graph are forward-strand)
+      return graph.has_edge(graph.get_handle(from_node), graph.get_handle(to_node));
+    }, "from_node"_a, "to_node"_a)
     .def("has_path", &npsv3::Graph::has_path)
     .def("path_nodes", nb::overload_cast<const std::string&>(&npsv3::Graph::PathNodes, nb::const_))
     .def("samples_including", &npsv3::Graph::SamplesIncluding)

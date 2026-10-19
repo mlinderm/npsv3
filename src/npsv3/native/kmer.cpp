@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <numeric>
 #include <fstream>
 #include <map>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
@@ -417,6 +419,14 @@ void KmerClassify::ClassifySortedScan(const std::vector<std::string>& sequences,
 
 namespace detail {
 
+void MMapKMCFile::UnmapPrefix() {
+  if (prefix_mmap_base_ && prefix_mmap_base_ != MAP_FAILED) {
+    munmap(prefix_mmap_base_, prefix_mmap_size_);
+    prefix_mmap_base_ = nullptr;
+    prefix_file_buf = nullptr;  // Prevent CKMCFile::Close()/~CKMCFile() from delete[]-ing mapped memory.
+  }
+}
+
 void MMapKMCFile::UnmapSufix() {
   if (sufix_mmap_base_ && sufix_mmap_base_ != MAP_FAILED) {
     munmap(sufix_mmap_base_, sufix_mmap_size_);
@@ -426,24 +436,69 @@ void MMapKMCFile::UnmapSufix() {
 }
 
 MMapKMCFile::~MMapKMCFile() {
+  UnmapPrefix();
   UnmapSufix();
 }
 
 bool MMapKMCFile::Close() {
+  UnmapPrefix();
   UnmapSufix();
   return CKMCFile::Close();
+}
+
+bool MMapKMCFile::MapPrefix(const std::string& file_name) {
+  // Parse the header (and for KMC2, read the comparatively small signature map onto the heap) in listing mode, which
+  // unlike RA mode does not read the LUT. Then discard the listing-mode LUT buffer and map the LUT in place instead.
+  uint64 size;
+  if (!OpenASingleFile(file_name + ".kmc_pre", file_pre, size, (char*)"KMCP"))
+    return false;
+  if (!ReadParamsFrom_prefix_file_buf(size, opened_for_listing))
+    return false;
+  prefixFileBufferForListingMode.reset();
+
+  // Size the LUT (in elements, including the terminal sentinel) as ReadParamsFrom_prefix_file_buf does in RA mode. For
+  // KMC1, it sets prefix_file_buf_size in either mode. For KMC2, `size` is now the file size without the markers and
+  // the header offset.
+  if (kmc_version == 0x200) {
+    std::fseek(file_pre, -8, SEEK_END);
+    int64 header_offset = std::fgetc(file_pre);
+    uint64 lut_area_size_in_bytes = size - (signature_map_size * sizeof(uint32) + header_offset + 8);
+    prefix_file_buf_size = (lut_area_size_in_bytes + 8) / sizeof(uint64);
+  }
+
+  struct stat file_stat;
+  if (fstat(fileno(file_pre), &file_stat) != 0)
+    return false;
+  prefix_mmap_size_ = static_cast<size_t>(file_stat.st_size);
+  if (4 + prefix_file_buf_size * sizeof(uint64) > prefix_mmap_size_)
+    return false;
+
+  // Map privately (copy-on-write) since CKMCFile overwrites the LUT's last element with a sentinel; the write only
+  // copies the containing page, all other pages remain shared via the page cache. As with the suffix below, the LUT
+  // starts at byte 4 of the file. That address is only 4-byte aligned, but CKMCFile only performs scalar uint64 loads
+  // from the LUT, which are supported unaligned on the target architectures.
+  prefix_mmap_base_ = mmap(nullptr, prefix_mmap_size_, PROT_READ | PROT_WRITE, MAP_PRIVATE, fileno(file_pre), 0);
+  if (prefix_mmap_base_ == MAP_FAILED) {
+    prefix_mmap_base_ = nullptr;
+    return false;
+  }
+  prefix_file_buf = reinterpret_cast<uint64*>(static_cast<uchar*>(prefix_mmap_base_) + 4);
+
+  // Matches CKMCFile's RA mode: for KMC1, the last element would otherwise be read from the header that follows the LUT
+  const uint64 sentinel = total_kmers + 1;
+  std::memcpy(prefix_file_buf + (prefix_file_buf_size - 1), &sentinel, sizeof(sentinel));
+  mprotect(prefix_mmap_base_, prefix_mmap_size_, PROT_READ);
+
+  std::fclose(file_pre);
+  file_pre = nullptr;
+  return true;
 }
 
 bool MMapKMCFile::OpenForRA(const std::string& file_name) {
   if (file_pre || file_suf)
     return false;
 
-  // Unchanged from CKMCFile::OpenForRA to load the prefix LUT onto the heap as usual. The LUT's
-  // size is comparatively small; only the suffix array below is mapped.
-  uint64 size;
-  if (!OpenASingleFile(file_name + ".kmc_pre", file_pre, size, (char*)"KMCP"))
-    return false;
-  if (!ReadParamsFrom_prefix_file_buf(size, opened_for_RA))
+  if (!MapPrefix(file_name))
     return false;
 
   // OpenASingleFile leaves `size` as the payload size (file size minus the leading and
@@ -451,6 +506,7 @@ bool MMapKMCFile::OpenForRA(const std::string& file_name) {
   // whole file (mmap's offset argument must be page-aligned, so we can't map starting at byte
   // 4 directly) and point sufix_file_buf at byte 4 within it, matching where CKMCFile's own
   // fread would have started reading.
+  uint64 size;
   if (!OpenASingleFile(file_name + ".kmc_suf", file_suf, size, (char*)"KMCS"))
     return false;
   sufix_mmap_size_ = size + 8;

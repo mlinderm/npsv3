@@ -8,7 +8,7 @@ Run with Truvari's own Python (not a dependency of npsv3), from the repo root, a
 For every harmonization case in `truvari_harmonize_oracle.json` (poa variants), every ordered pair of haplotypes and several
 parameter sets, this writes a two-sample VCF (base sample, comparison sample), runs `truvari.Bench` the way `truvari refine`
 does (`no_ref='a'`, `pick='single'`), and records the TP/FN/FP variants and the similarity values Truvari annotates, so
-`tests/graphs/test_truvari_compare.py` can check our port against Truvari without needing it.
+`tests/graphs/test_sequence_compare.py` can check our port against Truvari without needing it.
 
 `no_roll=True` below is Truvari's CLI default (`--no-roll` is a `store_false` option), which *enables* rolling/unrolling.
 """
@@ -23,6 +23,8 @@ import truvari
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# `bench` parameter sets to record: the criteria used in this project, Truvari's defaults, stricter and looser variants
+# of these, and one with rolling/unrolling of repeats disabled
 PARAM_SETS = {
     "project": {"refdist": 20, "pctseq": 0.7, "pctsize": 0.7, "pctovl": 0.6, "sizemin": 30, "sizefilt": 30},
     "truvari_defaults": {"refdist": 500, "pctseq": 0.7, "pctsize": 0.7, "pctovl": 0.0, "sizemin": 50, "sizefilt": 30},
@@ -41,7 +43,19 @@ PARAM_SETS = {
 
 
 def write_vcf(path, contig_len, variants, base, comp):
-    """variants: list of dicts with pos/ref/alt/carriers; two samples (base, comp) with GT 1|0 where carried."""
+    """Write a bgzipped, indexed two-sample VCF of the variants carried by `base` and/or `comp`.
+
+    Each haplotype becomes a sample with genotype `1|0` where it carries the variant and `0|0` otherwise. Variants
+    carried by neither haplotype are omitted.
+
+    Args:
+        path: Output path, ending in `.gz`. The uncompressed VCF is written alongside it (without `.gz`).
+        contig_len: Length of the single `region` contig (the reference length).
+        variants: Variants as dicts with `pos`, `ref`, `alt` and `carriers` (haplotype names), as in the harmonize
+            oracle.
+        base: Haplotype name to use as the base sample.
+        comp: Haplotype name to use as the comparison sample.
+    """
     lines = [
         "##fileformat=VCFv4.2",
         f"##contig=<ID=region,length={contig_len}>",
@@ -59,6 +73,16 @@ def write_vcf(path, contig_len, variants, base, comp):
 
 
 def read_vcf(path, *, with_info=False):
+    """Read the variants in one of `truvari bench`'s output VCFs.
+
+    Args:
+        path: VCF path. A missing file is treated as having no variants.
+        with_info: Also record the similarity annotations Truvari adds to matched calls (`PctSeqSimilarity`, `TruScore`,
+            etc.) under `"info"`.
+
+    Returns:
+        Variants as dicts with `pos`, `ref`, `alt` and, with `with_info`, `info`.
+    """
     out = []
     if not os.path.exists(path):
         return out
@@ -85,6 +109,20 @@ def read_vcf(path, *, with_info=False):
 
 
 def run_bench(workdir, contig_len, variants, base, comp, params):
+    """Benchmark `comp`'s variants against `base`'s with `truvari.Bench`, configured as `truvari refine` does.
+
+    Args:
+        workdir: Empty scratch directory for the input VCF and Truvari's output.
+        contig_len: Length of the region (the reference length).
+        variants: Harmonized variants for all haplotypes, as dicts with `pos`, `ref`, `alt` and `carriers`.
+        base: Haplotype name to benchmark against.
+        comp: Haplotype name to benchmark.
+        params: `bench` parameters, one of `PARAM_SETS`. `roll` is translated to Truvari's `no_roll`.
+
+    Returns:
+        Dict with the variants of each outcome: `"tp_base"` and `"tp_comp"` (with Truvari's annotations under `info`),
+        `"fn"` and `"fp"`.
+    """
     vcf = os.path.join(workdir, "in.vcf.gz")
     write_vcf(vcf, contig_len, variants, base, comp)
     kwargs = dict(params)
@@ -101,6 +139,7 @@ def run_bench(workdir, contig_len, variants, base, comp, params):
 
 
 def main():
+    """Benchmark each ordered pair of haplotypes in every harmonize-oracle case with each `PARAM_SETS` entry."""
     with open(os.path.join(HERE, "truvari_harmonize_oracle.json")) as f:
         harmonize_oracle = json.load(f)
 

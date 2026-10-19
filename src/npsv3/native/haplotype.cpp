@@ -890,6 +890,47 @@ std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBes
   return ExtractBestPaths(PropagateBestPathState(n));
 }
 
+std::vector<HaplotypeSamplerOverlay::Haplotype> HaplotypeSamplerOverlay::FindBestBackbonePaths(const Haplotype& backbone,
+                                                                                               size_t n) const {
+  if (!apply_path_filter_) {
+    throw std::logic_error("FindBestBackbonePaths requires a sampler constructed with an inference VCF");
+  }
+  const odgi::nid_t min_id = graph_.min_node_id();
+  const odgi::nid_t max_id = graph_.max_node_id();
+  if (backbone.empty() || backbone.front() != min_id || backbone.back() != max_id) {
+    throw std::invalid_argument("Backbone must be a complete path from the graph's source to its sink");
+  }
+
+  // The inference alleles carried by the backbone, including those it implicitly carries by not selecting any other
+  // allele (i.e., the REF allele), identically to how inference alleles are assigned in ExtractBestPaths.
+  Graph::PathIdSet backbone_paths(inference_path_mask_.size());
+  Graph::NodeIdSet node_mask(max_id + 1);
+  for (auto node_id : backbone) {
+    if (node_id < min_id || node_id > max_id || !graph_.has_node(node_id)) {
+      throw std::invalid_argument(fmt::format("Backbone node {} is not in the graph", node_id));
+    }
+    node_mask.set(node_id);
+    if (inference_node_mask_.test(node_id)) {
+      backbone_paths |= (graph_.node_variant_paths_[node_id] & inference_path_mask_);
+    }
+  }
+  backbone_paths = graph_.ApplyReferenceFallback(std::move(backbone_paths), inference_path_mask_);
+
+  // Permit deviations from the backbone only via nodes that distinguish an inference allele the backbone does not
+  // carry. Any walk through these nodes thus differs from the backbone only by changing inference alleles, including
+  // inference variants nested within another inference variant's reference span (exposed when the backbone's
+  // enclosing allele is replaced by REF).
+  const Graph::PathIdSet other_paths = inference_path_mask_ - backbone_paths;
+  for (auto node_id = inference_node_mask_.find_first(); node_id != Graph::NodeIdSet::npos;
+       node_id = inference_node_mask_.find_next(node_id)) {
+    if (graph_.has_node(node_id) && graph_.node_variant_paths_[node_id].intersects(other_paths)) {
+      node_mask.set(node_id);
+    }
+  }
+
+  return ExtractBestPaths(PropagateBestPathState(n, &node_mask));
+}
+
 void HaplotypeSamplerOverlay::EnsureTransitionScoreToGo() const {
   if (transition_score_to_go_built_) return;
   transition_score_to_go_built_ = true;
@@ -971,9 +1012,10 @@ double HaplotypeSamplerOverlay::ApplyPopulationEdge(PopulationState& state, odgi
   return params_.haplotype_prior_weight != 0.0 ? params_.haplotype_prior_weight * delta : 0.0;
 }
 
-HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(size_t n) const {
+HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPathState(size_t n, const Graph::NodeIdSet* node_mask) const {
   const odgi::nid_t min_id = graph_.min_node_id();
   const odgi::nid_t max_id = graph_.max_node_id();
+  assert(!node_mask || (node_mask->test(min_id) && node_mask->test(max_id)));
   const size_t covered_paths_size = graph_.node_variant_paths_[min_id].size(); // All nodes should have the same size path sets
 
   // dp[v - min_id][s] holds up to n backpointer entries for distinct paths from min_id to v that are
@@ -1043,9 +1085,10 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
   }
 
   for (odgi::nid_t i = min_id; i <= max_id; ++i) {
-    if (!graph_.has_node(i)) continue;
+    if (!graph_.has_node(i) || (node_mask && !node_mask->test(i))) continue;
 
     auto& node_state = dp[i - min_id];
+    if (node_mask && node_state.empty()) continue;  // Masked nodes need not be reachable within the mask
     assert(!node_state.empty());  // Should have at least one path to every reachable node
 
     // Every pool at this node is width-trimmed to node_trim_cap distinct classes, ranked by rank_key (real
@@ -1068,6 +1111,7 @@ HaplotypeSamplerOverlay::BestPathState HaplotypeSamplerOverlay::PropagateBestPat
     // Propagate along every real forward graph edge
     graph_.follow_edges(graph_.get_handle(i), false /* forward */, [&](const handlegraph::handle_t& next) {
       auto next_node = graph_.get_id(next);
+      if (node_mask && !node_mask->test(next_node)) return true;  // Restrict paths to the masked nodes
       auto& next_node_state = dp[next_node - min_id];
       // contributes_paths_mask_ is a static property of next_node (independent of any predecessor's
       // covered_paths), so it's safe to test once per edge rather than once per (automaton_state, b_idx).

@@ -43,8 +43,11 @@ class Graph : public handlegraph::PathHandleGraph {
    * @param vcf_path Path to the VCF file
    * @param region Construct graph in this region
    * @param enforce_multiallelic If true, do not create edges between alternate alleles of the same variant
+   * @param filtered_as_missing If true, treat genotypes with a failing FT as missing (i.e., "./.") when constructing
+   * sample genotype paths. Variant alleles are still added to the graph even if all genotypes are filtered.
    */
-  Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic = true);
+  Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region,
+        bool enforce_multiallelic = true, bool filtered_as_missing = false);
 
   /** \name handlegraph interface */
   // @{

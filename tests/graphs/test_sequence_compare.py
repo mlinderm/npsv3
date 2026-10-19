@@ -1,28 +1,31 @@
+import itertools
 import json
 import os
 import random
 
+import numpy as np
 import pytest
 
 pytest.importorskip("edlib")
 pytest.importorskip("pyabpoa")
 
-from npsv3.graphs.harmonize import AlignedVariant
-from npsv3.graphs.truvari_compare import (
-    TruvariParams,
+from npsv3.graphs.sequence_compare import (
+    ComparisonParams,
     best_similarity,
+    compare_genotypes,
     compare_haplotype_set,
     compare_haplotypes,
     compare_variants,
     edit_similarity,
+    haplotypes_differ,
     match_variants,
     reciprocal_overlap,
     roll_similarity,
     size_similarity,
-    truvari_differ,
-    truvari_size,
     unroll_similarity,
+    variant_size,
 )
+from npsv3.graphs.sequence_harmonize import AlignedVariant
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 with open(os.path.join(DATA, "truvari_match_oracle.json")) as _f:
@@ -76,12 +79,12 @@ class TestPrimitives:
 
 
 class TestMatching:
-    PARAMS = TruvariParams(refdist=20, pctseq=0.7, pctsize=0.7, pctovl=0.6, sizemin=30, sizefilt=30)
+    PARAMS = ComparisonParams(refdist=20, pctseq=0.7, pctsize=0.7, pctovl=0.6, sizemin=30, sizefilt=30)
 
     def test_defaults_are_the_project_criteria(self):
-        defaults = TruvariParams()
+        defaults = ComparisonParams()
         assert (defaults.refdist, defaults.pctovl, defaults.sizemin, defaults.sizefilt) == (20, 0.6, 30, 30)
-        stock = TruvariParams.truvari_defaults()
+        stock = ComparisonParams.truvari_defaults()
         assert (stock.refdist, stock.pctovl, stock.sizemin, stock.sizefilt) == (500, 0.0, 50, 30)
 
     def test_identical_variants_match(self):
@@ -102,7 +105,7 @@ class TestMatching:
         sequence = _random_sequence(60, seed=6)
         base, comp = _ins(100, sequence), _dele(100, sequence)
         assert "type" in match_variants(base, comp, self.PARAMS).failed
-        assert "type" not in match_variants(base, comp, TruvariParams(typeignore=True)).failed
+        assert "type" not in match_variants(base, comp, ComparisonParams(typeignore=True)).failed
 
     def test_size_filters_follow_truvari(self):
         small, big = _ins(100, _random_sequence(25, seed=7)), _ins(100, _random_sequence(60, seed=8))
@@ -113,7 +116,7 @@ class TestMatching:
 
     def test_unmatched_comparison_between_sizefilt_and_sizemin_is_not_a_false_positive(self):
         mid = _ins(100, _random_sequence(40, seed=9))
-        params = TruvariParams(sizemin=50, sizefilt=30)
+        params = ComparisonParams(sizemin=50, sizefilt=30)
         comparison = compare_variants([], [mid], params)
         assert not comparison.fp
         assert not comparison.differs
@@ -156,7 +159,7 @@ def test_matches_truvari_bench(case, key):
         return [AlignedVariant(v["pos"], v["ref"], v["alt"]) for v in entry["variants"] if name in v["carriers"]]
 
     params = dict(PARAM_SETS[set_name])
-    result = compare_variants(variants(base_name), variants(comp_name), TruvariParams(**params))
+    result = compare_variants(variants(base_name), variants(comp_name), ComparisonParams(**params))
 
     def keys(items):
         return {(v["pos"], v["ref"], v["alt"]) for v in items}
@@ -194,34 +197,34 @@ class TestHaplotypes:
 
     def test_sv_vs_reference_differs(self, reference):
         hap = reference[:100] + _random_sequence(60, seed=22) + reference[100:]
-        assert truvari_differ(reference, reference, hap)
+        assert haplotypes_differ(reference, reference, hap)
 
     def test_small_variants_are_ignored(self, reference):
         hap = reference[:100] + "ACGTA" + reference[100:]
-        assert not truvari_differ(reference, reference, hap)
+        assert not haplotypes_differ(reference, reference, hap)
 
     def test_one_base_longer_insertion_does_not_differ(self, reference):
         insertion = _random_sequence(100, seed=23)
         sv, longer = reference[:150] + insertion + reference[150:], reference[:150] + insertion + "A" + reference[150:]
-        assert not truvari_differ(reference, sv, longer)
+        assert not haplotypes_differ(reference, sv, longer)
 
     def test_thresholds_are_configurable(self, reference):
         short, long = _random_sequence(35, seed=24), _random_sequence(60, seed=24)
         hap_a, hap_b = reference[:150] + short + reference[150:], reference[:150] + long + reference[150:]
         # 35/60 fails pctsize (0.7) and, after inflating insertions by their size, pctovl (0.6)
-        assert truvari_differ(reference, hap_a, hap_b)
-        assert truvari_differ(reference, hap_a, hap_b, TruvariParams(pctsize=0.5, pctseq=0.5))
-        assert not truvari_differ(reference, hap_a, hap_b, TruvariParams(pctsize=0.5, pctseq=0.5, pctovl=0.5))
+        assert haplotypes_differ(reference, hap_a, hap_b)
+        assert haplotypes_differ(reference, hap_a, hap_b, ComparisonParams(pctsize=0.5, pctseq=0.5))
+        assert not haplotypes_differ(reference, hap_a, hap_b, ComparisonParams(pctsize=0.5, pctseq=0.5, pctovl=0.5))
 
     def test_sizemin_is_configurable(self, reference):
         hap = reference[:100] + _random_sequence(40, seed=25) + reference[100:]
-        assert truvari_differ(reference, reference, hap, TruvariParams(sizemin=30, sizefilt=30))
-        assert not truvari_differ(reference, reference, hap, TruvariParams(sizemin=50, sizefilt=50))
+        assert haplotypes_differ(reference, reference, hap, ComparisonParams(sizemin=30, sizefilt=30))
+        assert not haplotypes_differ(reference, reference, hap, ComparisonParams(sizemin=50, sizefilt=50))
 
     def test_wfa_aligner(self, reference):
         pytest.importorskip("pywfa")
         hap = reference[:100] + _random_sequence(60, seed=26) + reference[100:]
-        assert truvari_differ(reference, reference, hap, aligner="wfa")
+        assert haplotypes_differ(reference, reference, hap, aligner="wfa")
 
     def test_haplotype_set(self, reference):
         insertion = _random_sequence(80, seed=27)
@@ -238,7 +241,63 @@ class TestHaplotypes:
             assert matrix.score[0, 1] == 0.0
 
 
-def test_truvari_size():
-    assert truvari_size(AlignedVariant(10, "A", "T")) == 0
-    assert truvari_size(_ins(10, "A" + "C" * 40)) == 40
-    assert truvari_size(_dele(10, "A" + "C" * 25)) == 25
+def test_variant_size():
+    assert variant_size(AlignedVariant(10, "A", "T")) == 0
+    assert variant_size(_ins(10, "A" + "C" * 40)) == 40
+    assert variant_size(_dele(10, "A" + "C" * 25)) == 25
+
+
+def _genotype_haplotypes() -> tuple[str, list[str]]:
+    """A reference and candidates: the reference, a 300bp deletion, a near-identical 290bp deletion and an insertion"""
+    reference = _random_sequence(2000, 7)
+    deletion = reference[:900] + reference[1200:]
+    similar = reference[:905] + reference[1195:]
+    insertion = reference[:1000] + _random_sequence(300, 8) + reference[1000:]
+    return reference, [reference, deletion, similar, insertion]
+
+
+@pytest.mark.parametrize("joint", [True, False])
+def test_compare_genotypes(joint):
+    reference, haplotypes = _genotype_haplotypes()
+    result = compare_genotypes(reference, haplotypes, [0, 1], joint=joint)
+
+    genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), 2))
+    assert len(result.differs) == len(result.score) == len(genotypes)
+    # The label and the label with a near-identical deletion are the same genotype
+    same = {genotypes[i] for i in np.flatnonzero(~result.differs)}
+    assert same == {(0, 1), (0, 2)}
+    assert result.score[genotypes.index((0, 1))] == 1.0
+    assert result.score[genotypes.index((0, 2))] > result.score[genotypes.index((0, 3))]
+    assert result.label_differs is None and result.label_score is None
+
+
+def test_compare_genotypes_is_unphased():
+    reference, haplotypes = _genotype_haplotypes()
+    result = compare_genotypes(reference, haplotypes, [1, 0])
+    genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), 2))
+    assert {genotypes[i] for i in np.flatnonzero(~result.differs)} == {(0, 1), (0, 2)}
+
+
+def test_compare_genotypes_with_sample():
+    reference, haplotypes = _genotype_haplotypes()
+    # The sample's own haplotypes are the label, but with the near-identical deletion
+    result = compare_genotypes(reference, haplotypes, [0, 1], [haplotypes[2], reference])
+    assert result.label_differs is False
+    assert 0 < result.label_score <= 1
+
+    result = compare_genotypes(reference, haplotypes, [0, 1], [reference, haplotypes[3]])
+    assert result.label_differs is True
+
+
+def test_compare_genotypes_skips_identical_sequences(monkeypatch):
+    import npsv3.graphs.sequence_compare as sequence_compare
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Identical sequences should not be harmonized")
+
+    monkeypatch.setattr(sequence_compare, "harmonize", fail)
+    reference, haplotypes = _genotype_haplotypes()
+    result = compare_genotypes(reference, haplotypes[1:2], [0, 0], [haplotypes[1], haplotypes[1]])
+    assert result.differs.tolist() == [False]
+    assert result.score.tolist() == [1.0]
+    assert result.label_differs is False and result.label_score == 1.0

@@ -19,6 +19,16 @@ import webdataset as wds
 
 import npsv3.graphs.haplotype as hp
 import npsv3.images.example as ex
+
+try:
+    import npsv3.images.haplotypes as hs
+except ImportError:  # older layout: haplotype preparation lived in npsv3.images.example
+    hs = None
+try:
+    from npsv3.graphs.sharding import decode_graph_record
+except ImportError:  # older layout: graph shard members were not individually compressed
+    def decode_graph_record(record):
+        return record
 from npsv3.util.range import Range
 from npsv3.util.variant import VariantFileReader
 from tests import HG38_REF_FASTA, cache_graph_and_filter_kmc_database
@@ -48,8 +58,11 @@ def test_capture(hydra_setup, request):  # noqa: ARG001
            "input": str(cfg.input), "kmer_size": int(cfg.pileup.evidence_kmer_size), "kmer_set": str(cfg.pileup.evidence_kmer_set),
            "ref_kmer_counts": str(cfg.graph.ref_kmer_counts_kmc_prefix), "graph_kmer_size": int(cfg.graph.kmer_size)}
 
-    # Wrap two steps of make_graph_example to observe their inputs/outputs without modifying the source
-    orig_prep = ex.prepare_genotyping_haplotypes
+    # Wrap two steps of make_graph_example to observe their inputs/outputs without modifying the source. Haplotype
+    # preparation moved from `example` into the `SampledHaplotypeStrategy` (npsv3.images.haplotypes); patch the module
+    # that actually calls it. Only the sampled strategy calls `prepare_genotyping_haplotypes`.
+    prep_mod = hs if hs is not None and hasattr(hs, "prepare_genotyping_haplotypes") else ex
+    orig_prep = prep_mod.prepare_genotyping_haplotypes
 
     def prep(graph, *args, **kwargs):
         result = orig_prep(graph, *args, **kwargs)
@@ -64,7 +77,19 @@ def test_capture(hydra_setup, request):  # noqa: ARG001
         cap["left_flank"], cap["right_flank"] = left_flank, right_flank
         return orig_build(cfg_, graph, sampler, unique_kmers, haplotypes, left_flank, right_flank)
 
-    ex.prepare_genotyping_haplotypes, ex.build_kmer_evidence_index = prep, build
+    # `TrueHaplotypeStrategy` instead calls `true_haplotype_neighbors` (same (graph, ...) -> Haplotypes contract)
+    orig_neighbors = getattr(hs, "true_haplotype_neighbors", None)
+
+    def neighbors(graph, *args, **kwargs):
+        result = orig_neighbors(graph, *args, **kwargs)
+        cap["haps"] = [graph.path_sequence(h) for h in result[0]]
+        cap["alleles"] = result[1]
+        cap["true"] = result[2]
+        return result
+
+    prep_mod.prepare_genotyping_haplotypes, ex.build_kmer_evidence_index = prep, build
+    if orig_neighbors is not None:
+        hs.true_haplotype_neighbors = neighbors
     try:
         with VariantFileReader.open(cfg.input) as vcf:
             sample_idx = vcf.samples().index(sample.name)
@@ -72,9 +97,10 @@ def test_capture(hydra_setup, request):  # noqa: ARG001
                 if Range(record["region.txt"].decode()) != region:
                     continue
                 variants = ex._filter_variants(list(vcf.fetch(region)), 50)
-                graph = hp.Graph.load_bytes(record["graph.bytes"])
-                unique_kmers = hp.UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
-                prior_bytes = record.get("haplotype_prior_overlay.bytes")
+                members = decode_graph_record(record)
+                graph = hp.Graph.load_bytes(members["graph.bytes"])
+                unique_kmers = hp.UniqueKmersOverlay(graph, members["unique_kmer_overlay.bytes"])
+                prior_bytes = members.get("haplotype_prior_overlay.bytes")
                 prior = hp.HaplotypePriorOverlay(graph, prior_bytes) if prior_bytes else None
                 sampler = hp.HaplotypeSamplerOverlay(
                     graph, unique_kmers, cfg.input, region, 50, prior=prior,
@@ -98,7 +124,9 @@ def test_capture(hydra_setup, request):  # noqa: ARG001
             else:
                 pytest.fail(f"Region {region} not found in graph shards")
     finally:
-        ex.prepare_genotyping_haplotypes, ex.build_kmer_evidence_index = orig_prep, orig_build
+        prep_mod.prepare_genotyping_haplotypes, ex.build_kmer_evidence_index = orig_prep, orig_build
+        if orig_neighbors is not None:
+            hs.true_haplotype_neighbors = orig_neighbors
 
     with open(os.environ["OUT"], "wb") as f:
         pickle.dump(cap, f)

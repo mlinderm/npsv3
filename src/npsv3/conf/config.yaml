@@ -2,6 +2,7 @@ defaults:
   - graph: kmc
   - pileup: unphased_graph
   - simulation
+  - compare
   - model: paired_packed_inception_contrastive
   - data: energon_packed_images
   - trainer: paired

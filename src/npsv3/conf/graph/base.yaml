@@ -11,6 +11,13 @@ canonicalize: false
 max_haplotypes: 8
 max_diplotypes: 36
 
+# Strategy for generating the haplotypes to genotype for each example (see npsv3.images.haplotypes):
+#   - SampledHaplotypeStrategy: Sample haplotypes from the graph using the sample's k-mer counts
+#   - TrueHaplotypeStrategy: For training with high-quality assemblies, the sample's "true" haplotypes, a haplotype with
+#     no SVs and the highest k-mer scoring haplotypes created by adding/removing SVs from the true haplotypes.
+haplotype_strategy:
+  _target_: npsv3.images.haplotypes.SampledHaplotypeStrategy
+
 # When haplotype sampler doesn't sample > 1 distinct haplotypes for a region (e.g. other haplotypes are rare alleles not
 # supported by sample's data), borrow haplotypes from the population for any still-missing variant allele instead of
 # dropping the region.
@@ -32,3 +39,8 @@ haplotype_sampler_params:
 
 # Treat missing genotypes as all reference (e.g., assuming variants weren't called in high quality assemblies)
 missing_are_ref: false
+
+# Treat genotypes with a failing FT (genotype-level filter) as missing, i.e., "./.", both in the sample genotype paths
+# embedded in the graph and in label assignment (where they are then subject to missing_are_ref). If false, filtered
+# genotypes are embedded in the graph as is, but the corresponding examples are always unlabeled.
+filtered_as_missing: false

@@ -34,6 +34,7 @@ from npsv3.graphs.haplotype import (
     sample_diplotypes,
     serialize_graph_and_unique_kmers,
 )
+from npsv3.graphs.sharding import HAPLOTYPE_PRIOR_MEMBER, decode_graph_record
 from npsv3.images.example import make_graph_example
 from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
@@ -242,6 +243,17 @@ class TestResolveGenotypeAlleles:
         genotype = _MockGenotype((0, -1))
         assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=False) is None
         assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=True) is None
+
+    def test_filtered_genotype_is_missing_when_filtered_as_missing(self):
+        """A filtered genotype is treated as fully missing, and so is then subject to missing_are_ref"""
+        genotype = _MockGenotype((0, 1), is_filtered=True)
+        kwargs = { "ploidy": 2, "filtered_as_missing": True }
+        assert resolve_genotype_alleles(genotype, missing_are_ref=False, **kwargs) is None
+        assert resolve_genotype_alleles(genotype, missing_are_ref=True, **kwargs) == (0, 0)
+
+    def test_unfiltered_genotype_unaffected_by_filtered_as_missing(self):
+        genotype = _MockGenotype((0, 1))
+        assert resolve_genotype_alleles(genotype, ploidy=2, missing_are_ref=True, filtered_as_missing=True) == (0, 1)
 
 
 class TestAddPopulationHaplotypes:
@@ -676,11 +688,11 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""  # fmt: skip
             assert region_count == 1
             records = list(wds.WebDataset(graph_shards, shardshuffle=False)) # type: ignore
             assert len(records) == 1
-            record = records[0]
+            record = decode_graph_record(records[0])
             if population_prior:
-                assert len(record["haplotype_prior_overlay.bytes"]) > 0
+                assert len(record[HAPLOTYPE_PRIOR_MEMBER]) > 0
             else:
-                assert "haplotype_prior_overlay.bytes" not in record
+                assert HAPLOTYPE_PRIOR_MEMBER not in record
 
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
@@ -1266,8 +1278,6 @@ class TestGenotypePreparationInPopulation:
         # By default, index 0 only lacks the analysis variant alleles, it is not necessarily the reference path
         ref_path = list(graph.path_nodes(region.contig))
         assert list(haplotypes[0]) != ref_path
-        print(haplotypes)
-        print(ref_path)
 
         # But with `exact_reference` it must match the reference contig path exactly, and thus the reference sequence
         exact_haplotypes, exact_alleles, _ = prepare_genotyping_haplotypes(

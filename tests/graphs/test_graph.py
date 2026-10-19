@@ -59,6 +59,26 @@ chr1	3693767	.	C	G,CCCATGCAGCCTCAGCCCCTCCTCCCGCAATCCCAGCCATGCAGCCTCAGCTCCTCCTCCC
             pytest.skip("Missing necessary inputs")
         graph = Graph(cfg.reference, cfg.input, Range(region_str))
 
+    @pytest.mark.cfg_overrides(
+        f"reference={HG38_REF_FASTA}",
+        "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23-mc-chm13/hgsvc3-hprc-2024-02-23-mc-chm13.pav.population.passing.training.hg38.vcf.gz",
+    )
+    @pytest.mark.parametrize("region_str", [
+        "chr1:936139-936408",
+        "chr8:56282440-56282690",
+        "chr12:3555685-3556051",
+    ])
+    def test_haplotypes_should_be_resolved(self, cfg, region_str):
+        if not all(f is not None and os.path.exists(f) for f in (cfg.reference, cfg.input)):
+            pytest.skip("Missing necessary inputs")
+        region = Range(region_str)
+        graph = Graph(cfg.reference, cfg.input, region)
+
+        for i in range(2):
+            path_name = f"HG00096#{i}#{region.contig}#0"
+            assert graph.has_path(path_name) and not graph.has_path(f"HG00096#{i}#{region.contig}#1")
+
+
 @pytest.mark.skipif(HG38_REF_FASTA is None, reason="HG38 reference FASTA not available")
 class TestSerializationBytes:
     def setup_vcf(self, tmp_path):

@@ -33,7 +33,7 @@ from .. import (
     "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz",
     f"reads={HG00733_HG38_BAM}",
     "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
-    "simulation.replicates=1",
+    "simulation.replicates=2",
 )
 class TestHG00733GraphExamples:
     def test_graph_to_example(self, request, cfg, hg00733_sample, tmp_path):
@@ -99,6 +99,69 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         all_png_path = tmp_path / "all.png" # result_path("all.png")
         example_to_image(local_cfg, example, all_png_path, render_channels=True, with_simulations=True)
         assert os.path.exists(all_png_path)
+
+    def test_true_haplotype_strategy(self, request, cfg, hg00733_sample, tmp_path):
+        """The "true" haplotype strategy generates the reference, true, and true +/- SV haplotypes"""
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+            pytest.skip("Missing necessary inputs")
+       
+        # cSpell:disable
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##contig=<ID=chr1,length=248956422>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00733
+chr1	1134739	.	A	ACATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGC	30	PASS	.	GT	1|0
+chr1	1134748	.	T	G	30	PASS	.	GT	1|1
+chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGA	30	PASS	.	GT	0|1"""
+        ) # fmt: skip
+        # cSpell:enable
+
+        region = Range("chr1:1134644-1134867")
+
+        marker = request.node.get_closest_marker("cfg_overrides")
+        local_cfg = hydra.compose(
+            config_name="config",
+            overrides=[
+                *(marker.args if marker else []),
+                f"input={vcf_path}",
+                "pileup=unphased_graph",
+                "simulation.replicates=0",
+                "graph.haplotype_strategy._target_=npsv3.images.haplotypes.TrueHaplotypeStrategy",
+            ],
+        )
+
+        ref_kmer_counts = KmerCounts(local_cfg.graph.ref_kmer_counts_kmc_prefix)
+        graph, unique_kmers, sampler = _create_graph_and_sampler(
+            local_cfg.reference,
+            vcf_path,
+            region,
+            k=local_cfg.graph.kmer_size,
+            ref_kmer_counts=ref_kmer_counts,
+        )
+
+        filtered_kmer_path = cache_filter_kmc_database(local_cfg, hg00733_sample, vcf_path, region, unique_kmers, tmp_path=tmp_path)
+        with VariantFileReader.open(vcf_path) as vcf_file:
+            analysis_variants = _filter_variants(list(vcf_file.fetch(region)), min_variant_size=50)
+            sample_idx = vcf_file.samples().index(hg00733_sample.name)
+
+        example = make_graph_example(
+            local_cfg,
+            graph,
+            sampler,
+            unique_kmers,
+            region,
+            sample_idx, # type: ignore
+            hg00733_sample,
+            local_cfg.reads,
+            filtered_kmer_path,
+            analysis_variants, # type: ignore
+        )
+
+        # Reference, the two true haplotypes, and both insertions (4 haplotypes, so 4*(4+1)/2 genotypes) with the true
+        # genotype being (1, 2)
+        assert example["num_genotypes"] == 10  # noqa: PLR2004
+        assert example["label"] == 5  # noqa: PLR2004
 
     @pytest.mark.parametrize(("missing_are_ref", "expected_label"), [
         (False, None),  # Default: a sample with no called genotype for any analysis variant is unlabeled
@@ -222,8 +285,10 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             report_file.write(report)
 
     @pytest.mark.usefixtures("ray_setup")
-    def test_vcf_to_energon_dataset(self, cfg, hg00733_sample, tmp_path):
-        """`vcf_to_graph_examples` emits the polylithic energon trees directly from GraphWriter."""
+    @pytest.mark.parametrize("threads", [1, 3])
+    def test_vcf_to_energon_dataset(self, cfg, hg00733_sample, tmp_path, threads):
+        """`vcf_to_graph_examples` emits the polylithic energon trees directly from GraphWriter. With more threads than
+        graph shards, the shard is split across actors (some of which receive no regions)."""
         # cSpell:disable
         vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
@@ -238,7 +303,9 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
 
         region = Range("chr1:1134644-1134867")
         graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+        assert len(graph_shards) < threads or threads == 1
 
+        cfg.threads = threads
         output_dir = str(tmp_path / "energon")
         vcf_to_graph_examples(
             cfg,
@@ -255,6 +322,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         imgs_shards = sorted(glob.glob(os.path.join(output_dir, "imgs_ds", "imgs-*.tar")))
         imgs_indexes = sorted(glob.glob(os.path.join(output_dir, "imgs_ds", "imgs-*.tar.idx")))
         assert len(imgs_shards) == len(imgs_indexes) > 0, "Every imgs_ds tar shard must have an index"
+        _assert_graph_links(output_dir, hg00733_sample.name, expected_graphs_dir=os.path.dirname(graph_shards[0]))
 
         from npsv3.models.energon import EnergonPackedImageDataModule
 
@@ -272,8 +340,8 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         assert len(remaining_batches) == 0, "This single region should be a single batch"
         assert first_batch.images.shape == torch.Size([32, len(cfg.pileup.image_channels), cfg.pileup.image_height, cfg.pileup.image_width])
         assert all(first_batch.labels[first_batch.genotype_label] == 1), "All 'true' genotypes should be labeled 1"
-        assert torch.equal(first_batch.offsets, torch.tensor([0, 10])), "This variant has 10 simulated images"
-        assert all(first_batch.labels[10:] == -100), "Everyting after valid examples should be masked out with -100"
+        assert torch.equal(first_batch.offsets, torch.tensor([0, cfg.simulation.replicates * 10])), "This variant has 10 simulated images"
+        assert all(first_batch.labels[cfg.simulation.replicates *10:] == -100), "Everyting after valid examples should be masked out with -100"
         assert len(first_batch.genotype_label) == 1 and all(first_batch.genotype_label > 0)
         assert first_batch.meta == [str(region)]
 
@@ -281,7 +349,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         dm = EnergonPackedImageDataModule(
             train_metadataset_paths=os.path.join(output_dir, "dataset.yaml"),
             cache_dir=str(tmp_path / "cache"),
-            batch_size=32,
+            batch_size=2 * cfg.simulation.replicates * 10 + 2 + 1, # 2 copies of the 10 simulated images plus query images
             num_workers=0,
         )
 
@@ -289,11 +357,113 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         first_batch = next(iter(dm.train_dataloader()))
         dm.teardown()
 
-        # This variant is 10 simulated images, so 11 images total (1 query + 10 support). We can fit 2 copies (22
-        # images) total in the batch of 32.
-        assert torch.equal(first_batch.offsets, torch.tensor([0, 10, 20]))
-        assert all(first_batch.labels[20:] == -100)
+        # This variant is 10 simulated images, with 2 replicates it is 21 images (1 query + 20 support). We can fit 2 copies
+        # total in the batch of 48.
+        assert torch.equal(first_batch.offsets, torch.tensor([0, cfg.simulation.replicates * 10, 2 * cfg.simulation.replicates * 10]))
+        assert all(first_batch.labels[2 * cfg.simulation.replicates * 10:] == -100)
         assert first_batch.meta == [str(region)]*2
+
+
+    @pytest.mark.usefixtures("ray_setup")
+    def test_vcf_to_energon_dataset_with_graphs_on_the_fly(self, cfg, hg00733_sample, tmp_path):
+        """Graphs generated during image generation are kept as the dataset's `graphs` aux tree"""
+        region = Range("chr1:1134644-1134867")
+        _graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+
+        output_dir = str(tmp_path / "energon")
+        vcf_to_graph_examples(
+            cfg, cfg.reads, hg00733_sample, cfg.input, output_dir, filtered_kmer_path=filtered_kmer_path, region=region,
+        )
+        assert not glob.glob(os.path.join(output_dir, "graphs_ds", "unique_kmers*")), "Pooled k-mers stay temporary"
+        _assert_graph_links(output_dir, hg00733_sample.name, expected_graphs_dir=os.path.join(output_dir, "graphs_ds"))
+
+
+    @pytest.mark.usefixtures("ray_setup")
+    def test_vcf_to_energon_dataset_with_comparisons(self, cfg, hg00733_sample, tmp_path):
+        """With `compare.enabled`, each labeled example's genotypes are compared with its label in the `comparisons` aux tree"""
+        pytest.importorskip("edlib")
+        pytest.importorskip("pyabpoa")
+        import gzip
+
+        import yaml
+        from megatron.energon.cache.file_store import WebdatasetFileStore
+        from megatron.energon.epathlib import EPath
+
+        from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, COMPARISONS_DIR, HAPLOTYPES_SUFFIX
+        from npsv3.images.sequence_compare import ComparisonOptions, comparison_record
+        from npsv3.images.haplotypes import decode_haplotype_record
+
+        region = Range("chr1:1134644-1134867")
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+        cfg.compare.enabled = True
+        output_dir = str(tmp_path / "energon")
+        vcf_to_graph_examples(
+            cfg, cfg.reads, hg00733_sample, cfg.input, output_dir, graph_shards=graph_shards,
+            filtered_kmer_path=filtered_kmer_path,
+        )
+
+        with open(os.path.join(output_dir, "dataset.yaml")) as file:
+            aux = yaml.safe_load(file)["splits"]["train"]["aux"]
+        assert aux[COMPARISONS_AUX] == f"./{COMPARISONS_DIR}"
+
+        imgs = WebdatasetFileStore(EPath(os.path.join(output_dir, "imgs_ds")))
+        comparisons = WebdatasetFileStore(EPath(os.path.join(output_dir, COMPARISONS_DIR)))
+        with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+            rows = [json.loads(line) for line in meta_file if line.strip()]
+        labeled = [row for row in rows if row["label"] is not None]
+        assert labeled
+        for row in labeled:
+            record = json.loads(gzip.decompress(comparisons[f"{row['key']}.{COMPARISON_SUFFIX}"][0]))
+            assert len(record["genotype_differ"]) == row["g"]
+            assert record["genotype_differ"][row["label"]] is False
+            assert record["genotype_score"][row["label"]] == 1.0
+            # The sample is in the VCF, so its own paths are in the graph and the label is compared with them
+            assert record["label_differs"] is not None
+            haplotypes = decode_haplotype_record(imgs[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0])
+            assert record == comparison_record(haplotypes, ComparisonOptions.from_config(cfg.compare))
+
+
+def _assert_graph_links(output_dir: str, sample_name: str, *, expected_graphs_dir: str):
+    """Every row links to its graph in the `graphs` aux tree and carries a haplotypes member consistent with its genotypes"""
+    import itertools
+
+    import yaml
+    from megatron.energon.cache.file_store import WebdatasetFileStore
+    from megatron.energon.epathlib import EPath
+
+    from npsv3.constants import HAPLOTYPES_SUFFIX
+    from npsv3.graphs.graph import Graph
+    from npsv3.graphs.sharding import GRAPH_MEMBER, decode_graph_record, graph_digest
+    from npsv3.images.haplotypes import decode_haplotype_record
+
+    with open(os.path.join(output_dir, "dataset.yaml")) as file:
+        aux = yaml.safe_load(file)["splits"]["train"]["aux"]
+    assert aux["graphs"] == os.path.realpath(expected_graphs_dir)
+
+    imgs = WebdatasetFileStore(EPath(os.path.join(output_dir, "imgs_ds")))
+    graphs = WebdatasetFileStore(EPath(aux["graphs"]))
+    with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+        rows = [json.loads(line) for line in meta_file if line.strip()]
+    assert rows
+    for row in rows:
+        payload, _ = graphs[f"{row['graph_key']}.{GRAPH_MEMBER}.gz"]
+        graph_bytes = decode_graph_record({f"{GRAPH_MEMBER}.gz": payload})[GRAPH_MEMBER]
+        assert graph_digest(graph_bytes) == row["graph_digest"]
+        graph = Graph.load_bytes(graph_bytes)
+
+        haplotypes = decode_haplotype_record(imgs[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0])
+        paths = haplotypes["paths"]
+        genotypes = list(itertools.combinations_with_replacement(range(len(paths)), 2))
+        assert len(genotypes) == row["g"]
+        assert haplotypes["sequences"] == [graph.path_sequence(path) for path in paths]
+        assert len(haplotypes["alleles"]) == len(paths)
+        if row["label"] is not None:
+            assert genotypes[row["label"]] == tuple(sorted(haplotypes["true"]))
+        # The sample is in the VCF, so its own phased paths are in the graph
+        assert all(path is not None for path in haplotypes["sample_paths"])
+        assert haplotypes["sample_sequences"] == [graph.path_sequence(path) for path in haplotypes["sample_paths"]]
+        assert haplotypes["reference"] == graph.path_sequence(graph.path_nodes(Range(row["region"]).contig))
+        assert sample_name == row["sample"]
 
 
 @pytest.mark.cfg_overrides(
@@ -428,7 +598,8 @@ class TestHGSVC3HPRCPAVPopulationGraphExamples:
         # "chr17:940789-941433",
         # "chr20:31640012-31640510",
         # "chr4:109850391-109850582",
-        "chr7:125624057-125624248",
+        # "chr7:125624057-125624248",
+        "chr6:140682234-140683310",
     ])
     def test_high_loss_regions(self, cfg, hg00096_sample, region_str, tmp_path):
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
@@ -464,7 +635,7 @@ class TestHGSVC3HPRCPAVPopulationGraphExamples:
         dm = EnergonPackedImageDataModule(
             train_metadataset_paths=os.path.join(output_dir, "dataset.yaml"),
             cache_dir=str(tmp_path / "cache"),
-            batch_size=32,
+            batch_size=64,
             num_workers=0,
             repeat=False,
         )

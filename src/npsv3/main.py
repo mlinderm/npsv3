@@ -194,6 +194,27 @@ def main(cfg: DictConfig) -> None:
 
         predict(cfg, return_predictions=False, callbacks=[RecordLossCallback(output)])
 
+    elif cfg.command == "copositive":
+        import torch
+
+        from npsv3.models.transforms import copositive_transform
+
+        torch.set_num_threads(cfg.threads)
+
+        # input is a per-split metadataset path
+        _make_paths_absolute(cfg, ["input", "model.checkpoint", "data.cache_dir"])
+
+        # If no output directory is specified, use the Hydra output directory (the current working directory)
+        output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        copositive_transform(cfg, cfg.input, output)
+
+    elif cfg.command == "compare":
+        from npsv3.images.sequence_compare import add_comparisons
+
+        _make_paths_absolute(cfg, ["input"])
+        add_comparisons(cfg, cfg.input)
+
     elif cfg.command == "encode":
         import torch
 

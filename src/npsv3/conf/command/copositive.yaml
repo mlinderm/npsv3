@@ -1,0 +1,13 @@
+# @package _global_
+command: copositive
+model:
+  checkpoint: ???
+# Source `dataset.yaml` (one sample's `prepare_energon_dataset` tree) with >= 2 simulated replicates, i.e. generated with
+# `simulation.replicates>=2`. Its images are reused, not copied. `output` is the new dataset's directory.
+input: ???
+data:
+  # The source has >= 2 replicates, so don't reject groups by `simulation.replicates` (the default `r_max`)
+  r_max: null
+copositive:
+  # Softmax temperature for the metric; null -> the model loss's temperature (must be set for losses without a scalar one)
+  temperature: null

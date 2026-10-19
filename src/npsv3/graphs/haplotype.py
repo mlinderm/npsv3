@@ -26,6 +26,19 @@ from npsv3._native_graph import KmerEvidenceIndex as KmerEvidenceIndex
 from npsv3._native_graph import KmerZygosity as KmerZygosity
 from npsv3._native_graph import UniqueKmersOverlay as UniqueKmersOverlay
 from npsv3.graphs.graph import Graph
+from npsv3.graphs.sharding import (
+    GRAPH_MEMBER,
+    HAPLOTYPE_PRIOR_MEMBER,
+    REGION_MEMBER,
+    SHARD_GLOB,
+    SHARD_PATTERN,
+    UNIQUE_KMERS_MEMBER,
+    decode_graph_record,
+    encode_graph_record,
+    iter_graph_records,
+    prepare_graph_tree,
+    split_graph_shards,
+)
 from npsv3.util.config import setup_resolvers
 from npsv3.util.range import Range
 from npsv3.util.sample import Sample, _kmc_db_kmer_size, filter_kmers_by_unique_kmers, kmc_build_from_fasta, kmc_filter
@@ -198,7 +211,7 @@ class _SerializeGraphAndUniqueKmers:
         region = Range(region_str)
 
         try:
-            graph = Graph(self.cfg.reference, self.vcf_path, region)
+            graph = Graph(self.cfg.reference, self.vcf_path, region, filtered_as_missing=self.cfg.graph.filtered_as_missing)
         except Exception as e:
             e.add_note(f"Error constructing graph for region {region_str}")
             raise
@@ -244,15 +257,11 @@ class _SerializeGraphAndUniqueKmers:
             _jemalloc_purge()
 
         # All fields must be pre-encoded as bytes/bytearray/memoryview since ShardWriter's automatic encoding is disabled.
-        record = {
-            "__key__": slug,
-            "region.txt": region_str.encode("utf-8"),
-            "graph.bytes": graph_bytes,
-            "unique_kmer_overlay.bytes": unique_kmer_bytes,
-        }
+        # Members are individually compressed, so the uncompressed shard supports random access as an aux tree.
+        members = {GRAPH_MEMBER: graph_bytes, UNIQUE_KMERS_MEMBER: unique_kmer_bytes}
         if haplotype_prior_bytes is not None:
-            record["haplotype_prior_overlay.bytes"] = haplotype_prior_bytes
-        self._graph_writer.write(record)
+            members[HAPLOTYPE_PRIOR_MEMBER] = haplotype_prior_bytes
+        self._graph_writer.write(encode_graph_record(region, members))
 
 
 def serialize_graph_and_unique_kmers(
@@ -266,6 +275,7 @@ def serialize_graph_and_unique_kmers(
     region: Range | None = None,
     max_size_shard=256 * 1024 * 1024,  # 256 MB
     progress_bar=False,
+    unique_kmer_dir: PathType | None = None,
 ) -> tuple[list[str], PathType | None, int]:
     """Serialize all graphs and unique_kmer overlays for regions in vcf_path
 
@@ -279,8 +289,13 @@ def serialize_graph_and_unique_kmers(
         region (Range | None, optional): Specific region to process. Defaults to None.
         max_size_shard (int, optional): _description_. Defaults to 200MB.
         progress_bar (bool, optional): _description_. Defaults to False.
+        unique_kmer_dir (PathType | None, optional): Directory for the pooled unique k-mer database. Defaults to
+            output_dir.
     Returns:
         tuple[list[str], str]: List of shard paths and path to (filtered) k-mer database
+
+    The shards in `output_dir` are prepared as an energon dataset (see `npsv3.graphs.sharding`), so `output_dir` can be
+    attached to image datasets as their `graphs` aux tree.
     """
 
     with contextlib.ExitStack() as stack:
@@ -289,7 +304,7 @@ def serialize_graph_and_unique_kmers(
 
         # Create thread-specific graph shards and k-mer fasta files to avoid contention on a single file handle
         # across threads.
-        graph_shards = [os.path.join(output_dir, f"graphs-{i:05d}-%05d.tar.gz") for i in range(cfg.threads)]
+        graph_shards = [os.path.join(output_dir, SHARD_PATTERN.format(index=i)) for i in range(cfg.threads)]
         kmer_fasta_paths = [os.path.join(tmp_dir, f"combined_kmers.{i}.fa") if pool_kmers else None for i in range(cfg.threads)]
         actors = [
             _SerializeGraphAndUniqueKmers.remote(
@@ -303,7 +318,7 @@ def serialize_graph_and_unique_kmers(
         ]
         pool = ray.util.ActorPool(actors)
 
-        logging.info("Generating all graphs and unique k-mers to graphs-%%05d-%%05d.tar.gz")
+        logging.info("Generating all graphs and unique k-mers to %s", os.path.join(output_dir, SHARD_GLOB))
         region_count = 0
         for variants_region, _ in tqdm(
             overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size),
@@ -331,7 +346,7 @@ def serialize_graph_and_unique_kmers(
         if region_count > 0 and pool_kmers:
             assert all(kmer_fasta_paths), "All kmer_fasta_paths must be defined when filter_kmers is True"
             # Combine all k-mers into a single KMC database for subsequent filtering
-            unique_kmer_path = os.path.join(output_dir, "unique_kmers")
+            unique_kmer_path = os.path.join(unique_kmer_dir or output_dir, "unique_kmers")
             kmc_build_from_fasta(
                 kmer_fasta_paths, # type: ignore
                 cfg.graph.kmer_size,
@@ -343,7 +358,10 @@ def serialize_graph_and_unique_kmers(
         else:
             unique_kmer_path = None
 
-    return glob.glob(os.path.join(output_dir, "graphs-*.tar.gz")), unique_kmer_path, region_count
+    # Index the shards (removing any empty ones, e.g. from actors that received no regions) for use as an aux tree
+    if region_count > 0:
+        prepare_graph_tree(output_dir, num_workers=cfg.threads)
+    return sorted(glob.glob(os.path.join(output_dir, SHARD_GLOB))), unique_kmer_path, region_count
 
 
 
@@ -644,23 +662,30 @@ def _find_matching_diplotype(diplotypes: Sequence[Diplotype], matching_haplotype
                 return diplotype_idx
     return -1
 
-def resolve_genotype_alleles(genotype, *, ploidy: int, missing_are_ref: bool) -> tuple[int, ...] | None:
+def resolve_genotype_alleles(
+    genotype, *, ploidy: int, missing_are_ref: bool, filtered_as_missing: bool = False
+) -> tuple[int, ...] | None:
     """Return the sample's alleles for `genotype`, or None if it should be treated as unresolved.
 
-    Failing or partially missing genotypes are always unresolved. Fully missing genotypes are returned
-    as homozygous REF if `missing_are_ref` is True, otherwise unresolved.
+    Partially missing genotypes are always unresolved. Fully missing genotypes are returned as homozygous REF if
+    `missing_are_ref` is True, otherwise unresolved. Failing (filtered) genotypes are treated as fully missing if
+    `filtered_as_missing` is True, otherwise unresolved.
 
     Args:
         genotype (Genotype): The genotype to resolve
         ploidy (int): The ploidy of the sample
         missing_are_ref (bool): Whether to treat fully missing genotypes as homozygous REF
+        filtered_as_missing (bool): Whether to treat filtered genotypes as fully missing
 
     Returns:
         tuple[int, ...] | None: Genotype allele indices
-    """   
+    """
     if genotype.is_filtered:
-        return None
-    alleles = genotype.alleles
+        if not filtered_as_missing:
+            return None
+        alleles = (-1,) * len(genotype.alleles)
+    else:
+        alleles = genotype.alleles
     missing_count = sum(allele < 0 for allele in alleles)
     if missing_count == 0:
         return alleles
@@ -679,27 +704,31 @@ def _diplotypes_in_topk_shard(
     kmer_coverage: float,
     min_variant_size: int,
     ploidy: int = 2,
+    split: int = 0,
+    num_splits: int = 1,
 ) -> list[dict]:
-    """Sample diplotypes and compute genotype ranks for every region in a single WebDataset shard."""
+    """Sample diplotypes and compute genotype ranks for every region in the `split`-th of `num_splits` strided subsets of
+    a single WebDataset shard."""
     sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
     result_rows = []
     with VariantFileReader.open(vcf_path) as vcf_file:
         sample_idx = vcf_file.samples().index(sample_name)
         counts = KmerClassify(filtered_kmer_path, kmer_coverage)
 
-        for record in wds.WebDataset([shard_path], shardshuffle=False): # type: ignore
-            region_string = record["region.txt"].decode()
+        for record in iter_graph_records(shard_path, split, num_splits):
+            region_string = record[REGION_MEMBER].decode()
             region = Range(region_string)
             analysis_variants = _filter_variants(list(vcf_file.fetch(region)), min_variant_size)
 
-            graph = Graph.load_bytes(record["graph.bytes"])
-            unique_kmers = UniqueKmersOverlay(graph, record["unique_kmer_overlay.bytes"])
+            members = decode_graph_record(record)
+            graph = Graph.load_bytes(members[GRAPH_MEMBER])
+            unique_kmers = UniqueKmersOverlay(graph, members[UNIQUE_KMERS_MEMBER])
 
             # The population-prior overlay is only present in shards built with population_prior=True. If None, it
             # will be ignored by the HaplotypeSamplerOverlay, which will fall back to a uniform prior.
             prior_overlay = (
                 HaplotypePriorOverlay(graph, prior_bytes)
-                if (prior_bytes := record.get("haplotype_prior_overlay.bytes"))
+                if (prior_bytes := members.get(HAPLOTYPE_PRIOR_MEMBER))
                 else None
             )
 
@@ -725,7 +754,12 @@ def _diplotypes_in_topk_shard(
             all_matching_haplotypes = []
             for variant in analysis_variants:
                 genotype = variant.genotype(sample_idx)
-                alleles = resolve_genotype_alleles(genotype, ploidy=ploidy, missing_are_ref=cfg.graph.missing_are_ref)
+                alleles = resolve_genotype_alleles(
+                    genotype,
+                    ploidy=ploidy,
+                    missing_are_ref=cfg.graph.missing_are_ref,
+                    filtered_as_missing=cfg.graph.filtered_as_missing,
+                )
                 if alleles is None:
                     continue  # Skip filtered or unresolved (missing) genotypes
 
@@ -859,7 +893,8 @@ def diplotypes_in_topk(
 
         assert _kmc_db_kmer_size(filtered_kmer_path) == cfg.graph.kmer_size, "Filtered k-mer database has unexpected k"
 
-        # Phase 2: Process each shard as a Ray task in parallel to sample diplotypes and compute genotype ranks
+        # Phase 2: Process (strided splits of) each shard as a Ray task in parallel to sample diplotypes and compute genotype
+        # ranks. Shards are split when there are fewer shards than threads so parallelism isn't limited by the shard count.
         pending = [
             _diplotypes_in_topk_shard.remote( # type: ignore
                 cfg,
@@ -869,8 +904,10 @@ def diplotypes_in_topk(
                 str(filtered_kmer_path),
                 kmer_coverage=sample.kmer_coverage,
                 min_variant_size=min_variant_size,
+                split=split,
+                num_splits=num_splits,
             )
-            for shard_path in graph_shards
+            for shard_path, split, num_splits in split_graph_shards(graph_shards, cfg.threads)
         ]
 
         with tqdm(

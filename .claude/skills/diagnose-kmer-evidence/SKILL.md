@@ -7,6 +7,13 @@ description: Explain why a region has a high loss or a blank/missing k-mer evide
 
 Pipeline facts this relies on (verify against `src/npsv3/images/example.py` and `graphs/haplotype.py` if they seem stale):
 
+- Haplotypes come from `cfg.graph.haplotype_strategy` (`npsv3/images/haplotypes.py`; default `SampledHaplotypeStrategy`, which
+  calls `prepare_genotyping_haplotypes`). `capture.py` patches that function where the strategy module imports it (falling back
+  to `npsv3.images.example` for the older layout). `TrueHaplotypeStrategy` instead calls `true_haplotype_neighbors`, which
+  `capture.py` also wraps; pass `graph.haplotype_strategy._target_=npsv3.images.haplotypes.TrueHaplotypeStrategy` in
+  `CFG_OVERRIDES` to capture what such a model was trained/evaluated on.
+- The loss is InfoNCE (`models/paired.py`, temperature 0.07): `-log softmax(metric/T)[label]`. With 36 genotypes a flat
+  similarity profile gives log(36)=3.58, so a *correct* prediction can still have a top-percentile loss.
 - Genotype index `i` is the `i`th pair of `itertools.combinations_with_replacement(range(n_haplotypes), 2)`. Haplotype 0 is
   always reference; the rest come from the sampler, plus the sample's "true" haplotypes. Haplotypes, not alleles: 4 haplotypes
   = 10 genotypes. Labels come from the VCF GT for the sample; `missing_are_ref=True` makes `.` into REF.
@@ -17,7 +24,9 @@ Pipeline facts this relies on (verify against `src/npsv3/images/example.py` and 
   only match if the sample really carries that exact sequence.
 - Consequences to check: (1) alleles built from repeat units (VNTR/tandem repeats) have no unique k-mers; (2) a
   haplotype's evidence is concentrated in the few junction k-mers; (3) variants outside the region only affect the
-  (reference) flank and are shared by all haplotypes, so cannot create evidence.
+  (reference) flank and are shared by all *simulated* haplotypes, so cannot create evidence in simulations, **but** the real
+  reads carry the sample's own flank variants, so a repeat-unit variant the sample carries in its flank copies looks haplotype-specific in the index (where the flanks are hg38) yet appears in the real reads
+  (see the chr6 example below).
 
 ## Steps
 
@@ -42,10 +51,11 @@ Pipeline facts this relies on (verify against `src/npsv3/images/example.py` and 
    ```sh
    python3 $S/analyze.py $SCRATCH/cap.pkl --losses <losses.pkl.gz> [--pred IDX] [--flank-del POS:REFLEN]
    ```
-   Output sections: repeat period and how many 31-mers recur in hg38 (canonical count >= 2; see the reference-DB caveat below),
+   Output sections: the loss decomposition (label softmax p, how many negatives score within 0.8x of the label, top negatives), repeat period and how many 31-mers recur in hg38 (canonical count >= 2; see the reference-DB caveat below),
    haplotype to variant mapping with what the label and
    predicted indices mean, retained k-mers per haplotype, the k-mers each haplotype adds over the reference haplotype and how
-   many appear in real reads, the k-mers separating label from prediction, whether the sample's own called variants near the
+   many appear in real reads, the k-mers separating label from prediction, retained k-mers absent from the label genotype but present in
+   the reads (with whether the sample's own flanks, rebuilt from its VCF calls around its assembled paths, explain them), whether the sample's own called variants near the
    region (density, SNV alt-allele read fraction) are present in the reads, and a read depth/MAPQ profile. `--flank-del` checks
    whether a downstream variant in the flank changes the index.
 3b. **Distinguishability (A1/A2)** (optional; use when the question is "are these haplotypes too similar to separate?" or "which
@@ -65,7 +75,44 @@ Pipeline facts this relies on (verify against `src/npsv3/images/example.py` and 
    HG00096; override for other samples. Example chr4:109850391-109850582: real best fit hg38/hap0 (1743), label hap1/hap1 worst
    (8584), floor ~230; the assembled-background twin comparison (8213 vs 2671) shows the reads lack the exact SV, not that the
    background was wrong.
-4. **Interpret**, in this order. Two very different outcomes have appeared so far:
+3c. **Dataset-wide co-positive triage** (optional; use when the question is "how much of the high loss is look-alike genotypes
+   vs. label problems?", or to choose regions for steps 2-3b). `copositive.py` runs a trained model over a split, takes the same
+   Hydra overrides as `command=loss`, and records per group: sim-vs-sim confusion, `conf`, `sim_loss`, the log(1+kR) floor and
+   `p_real`. It then classifies high-loss groups as a_lookalike / a_semantic / b_flag / c_model (definitions in its docstring
+   and in "Bootstrapping co-positives" in `REFERENCE_HAPLOTYPE_NOTES.md`):
+   ```sh
+   python3 $S/copositive.py record --output $SCRATCH/cop.pkl.gz -- model=<model> model.checkpoint=<ckpt> \
+       data.train_metadataset_paths=[...] data.limit_predict_batches=200
+   python3 $S/copositive.py classify $SCRATCH/cop.pkl.gz --regions-out $SCRATCH/todo.tsv
+   # optional semantic (Truvari vs. assembled paths) term, from step-2 captures of the exported regions:
+   python3 $S/copositive.py semantic $SCRATCH/caps/*.pkl --output $SCRATCH/sem.pkl.gz
+   python3 $S/copositive.py classify $SCRATCH/cop.pkl.gz --semantic $SCRATCH/sem.pkl.gz
+   ```
+   Needs data generated with `simulation.replicates >= 2`. With one replicate, `conf` is only a noise-free lower bound and
+   `sim_loss` is NaN; the script warns. `loss` is the model's own (bf16 under AMP); `real_infonce` is an fp32 recomputation.
+   With a deterministic haplotype strategy (`TrueHaplotypeStrategy`), get R=2 instead by pairing two image sets of the same
+   regions (e.g. `+repeat=0` and `+repeat=1`) with `copositive_pairs.py` (GPU; reads the architecture from the training run's
+   `.hydra/config.yaml`). `copositive_analysis.ipynb` runs the whole triage end to end (record via SLURM, classify, floor
+   table, haplotype-class and pixel-space look-alike checks, masking upper bound, b_flag confidence split, sampled
+   semantic captures); set its parameter cell and re-run. Results for model `+train=0011` are in
+   `REFERENCE_HAPLOTYPE_NOTES.md` ("Co-positive triage results").
+4. **Interpret**, in this order. First check the loss decomposition: if the prediction is correct and many negatives sit
+   within ~T of the label, the question is "why can't the model separate these genotypes?", not "why is it wrong?".
+   - **Correct prediction, near-flat similarity profile (VNTR length ladder)**. The candidate haplotypes are the same tandem
+     repeat with different numbers of whole units removed, so many diplotypes differ by 1-4 units (check the pairwise
+     edit distances between haplotypes against the repeat period). Short reads can't span the tract, its interior has
+     ~0 depth or MAPQ 0, and `local_unique` drops nearly every k-mer, so the label haplotypes may retain none at all. The
+     only retained k-mers are at the tract's ends. If the tract crosses the region boundary, the sample's own flank
+     variants (SNVs/indels recurring at the repeat period in the VCF) can put a unit variant's k-mers, which in the index are carried only by some haplotypes' inserted units, into the
+     real reads, while every simulated image uses hg38 flanks. The real k-mer channel then shows evidence that no
+     simulated genotype's image shows. Example chr6:140682234-140683310 (35bp VNTR, DELs of 3/12/13/17 units, label
+     (1,2) = assembled paths; loss 3.41 vs flat 3.58, 22/35 negatives >0.8x; labels 1/2 retain 0 k-mers; all 19
+     retained k-mers, which come from the TATAT-variant units (hg38 TACAT) that haps 0/3/5/6/7 carry at their left edge and the sample carries 200-350bp upstream in the left flank (C>T SNVs every 35bp), were in 298 read hits, mostly MAPQ 0-20 in
+     the left flank; the sample's own flanks plus its assembled paths contain 19/19 and 18/19 of them, and 0 with
+     hg38 flanks). A1/A2: hap1/hap1 vs hap1/hap2 650 against a floor of about 400; real reads best fit 23x the floor and
+     no candidate fits. Zero interior depth still separates the label from ref-like/short-deletion genotypes, but not
+     among the contraction ladder.
+   Otherwise, two very different outcomes have appeared so far:
    - **Evidence exists in the index but not in reads** ("label over prediction" k-mers > 0, seen in real reads = 0).
      Then ask *why the reads lack the allele's sequence*:
      - **Repeat/segdup region** (self-similarity at a short period, most of the region's 31-mers recurring in hg38 (e.g. 91% chr17, 86% chr4 vs 0% chr20), MAPQ-0 or soft-clipped

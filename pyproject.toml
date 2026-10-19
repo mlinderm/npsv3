@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Truvari-style haplotype harmonization (src/npsv3/graphs/harmonize.py): multiple sequence alignment and edit distance
+# Truvari-style haplotype harmonization (src/npsv3/graphs/sequence_harmonize.py): multiple sequence alignment and edit distance
 harmonize = [
   "edlib",
   "pyabpoa",

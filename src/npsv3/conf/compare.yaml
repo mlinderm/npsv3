@@ -1,0 +1,24 @@
+# @package compare
+# Compare each labeled example's candidate genotypes with its label, and the label with the sample's own (assembled)
+# haplotypes, by Truvari-style sequence matching, written as the dataset's `comparisons` aux tree. Needs the `harmonize`
+# extra. `enabled` adds the tree during image generation while the "compare" command adds it to an existing dataset.
+enabled: false
+# Harmonize all of an example's sequences together once (fast), rather than each compared pair separately (as Truvari would)
+joint: true
+# Multiple sequence aligner for harmonization, "poa" (Truvari's default) or "wfa"
+aligner: poa
+# Skip examples with any sequence longer than this (null for no limit): alignment memory grows roughly quadratically with
+# length, ~1.5GB per worker at 10kb and 6GB+ at 16kb
+max_length: 10000
+# `npsv3.graphs.sequence_compare.ComparisonParams`, recorded with the tree. Variants smaller than `sizemin`/`sizefilt` are
+# ignored, so genotypes differing only by smaller variants are the same.
+params:
+  refdist: 20
+  pctseq: 0.7
+  pctsize: 0.7
+  pctovl: 0.6
+  sizemin: 30
+  sizefilt: 30
+  sizemax: 50000
+  typeignore: false
+  roll: true

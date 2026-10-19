@@ -7,12 +7,12 @@ import pytest
 pytest.importorskip("pyabpoa")
 pytest.importorskip("pywfa")
 
-from npsv3.graphs.harmonize import (
+from npsv3.graphs.sequence_harmonize import (
     AlignedVariant,
     alignment_to_variants,
     harmonize,
     msa_to_variants,
-    variant_counts,
+    variant_carriers,
 )
 
 ORACLE_PATH = os.path.join(os.path.dirname(__file__), "data", "truvari_harmonize_oracle.json")
@@ -77,7 +77,6 @@ class TestHarmonizeBasics:
         reference = "".join(random.Random(1).choices("ACGT", k=100))
         result = harmonize(reference, {"a": reference})
         assert result.variants == {"a": ()}
-        assert result.msa == {}
 
     def test_dedup_gives_identical_variants(self):
         reference = "".join(random.Random(2).choices("ACGT", k=100))
@@ -90,10 +89,10 @@ class TestHarmonizeBasics:
         with pytest.raises(KeyError):
             harmonize("ACGT", {"a": "ACGA"}, aligner="nope")
 
-    def test_variant_counts(self):
+    def test_variant_carriers(self):
         reference = "".join(random.Random(3).choices("ACGT", k=100))
         hap = reference[:50] + "AAAA" + reference[50:]
-        carriers = variant_counts(harmonize(reference, {"a": hap, "b": hap}))
+        carriers = variant_carriers(harmonize(reference, {"a": hap, "b": hap}))
         assert sorted(next(iter(carriers.values()))) == ["a", "b"]
 
 

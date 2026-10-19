@@ -438,6 +438,15 @@ def _cached_alignment_file(read_path: PathType, reference: str | None) -> pysam.
     return alignment_file
 
 
+def evict_alignment_file(read_path: PathType) -> None:
+    """Close and drop any cached handles for `read_path`, e.g., before deleting that (temporary) file.
+
+    An open handle would otherwise keep the deleted file's disk space allocated until LRU eviction.
+    """
+    for key in [k for k in _alignment_file_cache if k[0] == str(read_path)]:
+        _alignment_file_cache.pop(key).close()
+
+
 def close_alignment_file_cache() -> None:
     """Close and drop every handle cached by fetch_reads(). Call when a worker is done processing regions."""
     while _alignment_file_cache:

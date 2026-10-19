@@ -82,9 +82,10 @@ class GroupMeta(Sample):
 
 @cooker(need_cache=True)
 @stateless
-def cook_group(sample: dict, imgs: FileStore, cache) -> GroupMeta:
+def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> GroupMeta:
     """Return `GroupMeta` with lazy pixel handles from a crude JSON sample
 
+    Energon passes every aux tree as a keyword argument, so other aux trees (e.g. `graphs`) are accepted and ignored.
     Note `basic_sample_keys` is mandatory for restorability.
     """
     meta = sample["json"]
@@ -282,16 +283,17 @@ class PackedGroupBatch(PackedBatch):
     __restore_key__: tuple = ()
 
 
-def _prepare_imgs_tree(imgs_dir: str, *, num_workers: int) -> None:
-    """Index `imgs_ds`'s tar shards as a prepared CRUDE energon dataset.
+def prepare_aux_tree(directory: str | os.PathLike, *, glob: str = "**/*.tar", num_workers: int = 2) -> None:
+    """Index `directory`'s tar shards (matching `glob`) as a prepared CRUDE energon dataset, e.g. `imgs_ds` or a graph
+    shard directory, so it can be referenced as an aux tree.
 
-    `imgs_ds` always gets one `train` split covering every shard: it is only ever read by key via `FileStore` as an aux
-    store, never filtered by split, however some split is still needed for energon requires to treat `imgs_ds` as a
-    prepared, directory-referenceable dataset.
+    The tree always gets one `train` split covering every shard: it is only ever read by key via `FileStore` as an aux
+    store, never filtered by split, however some split is still needed for energon to treat it as a prepared,
+    directory-referenceable dataset.
     """
-    tree = EPath(imgs_dir)
+    tree = EPath(directory)
     all_tars = []
-    for tar_path in sorted(Path(imgs_dir).glob("**/*.tar")):
+    for tar_path in sorted(Path(directory).glob(glob)):
         # Energon asserts every shard has at least one sample. An actor that wrote no examples (e.g., more actors
         # than graph shards, or every region skipped) still leaves an empty tar behind, so drop those here.
         with tarfile.open(tar_path) as tar:
@@ -301,9 +303,9 @@ def _prepare_imgs_tree(imgs_dir: str, *, num_workers: int) -> None:
             tar_path.unlink()
             tar_path.with_name(tar_path.name + ".idx").unlink(missing_ok=True)
         else:
-            all_tars.append(str(tar_path.relative_to(Path(imgs_dir))))
+            all_tars.append(str(tar_path.relative_to(Path(directory))))
     if not all_tars:
-        msg = f"No imgs_ds/imgs-*.tar shards found under {imgs_dir!r}"
+        msg = f"No {glob} shards found under {str(directory)!r}"
         raise ValueError(msg)
 
     # Swallow the Energon's unconditional prints
@@ -317,7 +319,7 @@ def _prepare_imgs_tree(imgs_dir: str, *, num_workers: int) -> None:
             workers=num_workers,
         )
     dataset_yaml = {"__module__": "megatron.energon", "__class__": CrudeWebdataset.__name__}
-    with (Path(imgs_dir) / MAIN_FOLDER_NAME / "dataset.yaml").open("w") as dataset_yaml_file:
+    with (Path(directory) / MAIN_FOLDER_NAME / "dataset.yaml").open("w") as dataset_yaml_file:
         yaml.dump(dataset_yaml, dataset_yaml_file, sort_keys=False)
 
 
@@ -340,7 +342,7 @@ def _merge_meta_shards(meta_dir: str) -> str:
     return str(merged_path)
 
 
-def prepare_energon_dataset(output_dir: str, *, num_workers: int = 2) -> str:
+def prepare_energon_dataset(output_dir: str, *, num_workers: int = 2, aux: dict[str, str] | None = None) -> str:
     """Prepare the polylithic energon trees saved under `output_dir` as a single train split
 
     1. `imgs_ds` (the aux pixel tree) is indexed as a single-split prepared dataset, unshuffled, so it can be referenced
@@ -354,24 +356,45 @@ def prepare_energon_dataset(output_dir: str, *, num_workers: int = 2) -> str:
     Args:
         output_dir: The directory `EnergonExampleWriter` wrote `meta_ds`/`imgs_ds` under.
         num_workers: Parallelism for indexing `imgs_ds`'s tar shards.
+        aux: Additional, already prepared aux trees to reference by name, e.g. `{"graphs": <graph shard directory>}`.
+            Paths are made absolute, since these trees are typically shared by many datasets.
 
     Returns:
         The path to the `dataset.yaml` written.
     """
     imgs_dir = os.path.join(output_dir, "imgs_ds")
-    _prepare_imgs_tree(imgs_dir, num_workers=num_workers)
+    prepare_aux_tree(imgs_dir, num_workers=num_workers)
 
     meta_path = _merge_meta_shards(os.path.join(output_dir, "meta_ds"))
 
     dataset = {
         "__module__": "megatron.energon",
         "__class__": "MetadatasetV2",
-        "splits": {"train": {"path": f"./meta_ds/{Path(meta_path).name}", "aux": {"imgs": "./imgs_ds"}}},
+        "splits": {
+            "train": {
+                "path": f"./meta_ds/{Path(meta_path).name}",
+                "aux": {"imgs": "./imgs_ds", **{name: os.path.abspath(path) for name, path in (aux or {}).items()}},
+            }
+        },
     }
     dataset_yaml_path = os.path.join(output_dir, "dataset.yaml")
     with open(dataset_yaml_path, "w") as dataset_yaml_file:
         yaml.safe_dump(dataset, dataset_yaml_file, sort_keys=False)
     return dataset_yaml_path
+
+
+def set_aux_tree(dataset_yaml_path: str | os.PathLike, name: str, path: str) -> None:
+    """Reference the aux tree at `path` (relative to `dataset_yaml_path`'s directory, or absolute) as `name` in every split of
+    `dataset_yaml_path`, rewriting it in place (atomically, so concurrent readers see the old or the new file)."""
+    dataset_yaml_path = Path(dataset_yaml_path)
+    with dataset_yaml_path.open() as dataset_yaml_file:
+        dataset = yaml.safe_load(dataset_yaml_file)
+    for split in dataset["splits"].values():
+        split.setdefault("aux", {})[name] = path
+    tmp_path = dataset_yaml_path.with_name(f".{dataset_yaml_path.name}.tmp")
+    with tmp_path.open("w") as tmp_file:
+        yaml.safe_dump(dataset, tmp_file, sort_keys=False)
+    tmp_path.replace(dataset_yaml_path)
 
 
 def _read_split(dataset_yaml_path: str | Path, split_part: str | None = None) -> tuple[Path, dict]:
@@ -500,7 +523,7 @@ def estimate_epoch_batches(
                     total_cost += _group_cost(r, g, w, w_bucket)
 
     packs = total_cost / (budget * occupancy) / world_size
-    logging.info(f"Estimated {packs:.1f} packs given {total_cost} images, a batch size of {budget}, a world size of {world_size}, and an estiomated occupancy of {occupancy}")
+    logging.info(f"Estimated {packs:.1f} packs given {total_cost} images, a batch size of {budget}, a world size of {world_size}, and an estimated occupancy of {occupancy}")
     return max(1, math.ceil(packs))
 
 

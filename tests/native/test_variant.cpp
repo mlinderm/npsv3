@@ -178,6 +178,48 @@ TEST_F(VariantFileIOTest, ReferenceRegionInsertion) {
   ASSERT_EQ(var->AlleleLengthChange(1), 54);
 }
 
+TEST_F(VariantFileIOTest, NextSortedVariantOrdersByTrimmedRegion) {
+  // Records are sorted by POS, but not by padding-trimmed reference region
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##contig=<ID=chr1,length=1000>
+##contig=<ID=chr2,length=1000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	101	.	ACGT	A	.	.	.
+chr1	101	.	A	AT	.	.	.
+chr1	102	.	C	G	.	.	.
+chr1	102	.	C	T	.	.	.
+chr1	105	.	A	C	.	.	.
+chr2	101	.	A	C	.	.	.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  std::vector<std::pair<Range, std::string>> expected = {
+    {Range("chr1", 101, 101), "AT"},    // Zero-width insertion before the deletion with the same padding base
+    {Range("chr1", 101, 102), "G"},     // SNVs contained within the deletion, but ending before it
+    {Range("chr1", 101, 102), "T"},     // Ties retain file order
+    {Range("chr1", 101, 104), "A"},
+    {Range("chr1", 104, 105), "C"},
+    {Range("chr2", 100, 101), "C"},
+  };
+  for (int pass = 0; pass < 2; pass++) {  // Second pass checks SetRegion resets the lookahead buffer
+    reader->SetRegion(Range("chr1", 0, 1000));
+    if (pass == 1) {
+      // Partially consume the iterator before resetting
+      ASSERT_TRUE(reader->NextSortedVariant());
+      reader->SetRegion();
+    } else {
+      reader->SetRegion();
+    }
+    for (const auto& [region, alt] : expected) {
+      auto var = reader->NextSortedVariant();
+      ASSERT_TRUE(var);
+      EXPECT_EQ(var->ReferenceRegion(), region);
+      EXPECT_EQ(var->AlleleRawSequence(1), alt);
+    }
+    EXPECT_FALSE(reader->NextSortedVariant());
+  }
+}
+
 class VariantFileIOStreamTest : public VariantFileIOTest,
                                 public ::testing::WithParamInterface<std::tuple<std::string, htsExactFormat, htsCompression>> {
  protected:
@@ -369,6 +411,51 @@ chr1	3693769	.	C	G	30	.	.	GT:PS:FT	./1:.:GAP1	.:.:.	0|1:.:PASS	.:.:.
       EXPECT_EQ(sample_genotype.genotype().allele_indices(), record_expected[sample_idx].first);
       EXPECT_EQ(sample_genotype.is_filtered(), record_expected[sample_idx].second);
     }
+  }
+}
+
+TEST_F(VariantFilteringTest, GenotypesFilteredAsMissing) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
+##contig=<ID=chr1,length=248956422,md5=2648ae1bacce4ec4b6cf337dcae37816>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter.">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2	Sample3	Sample4
+chr1	3693767	.	C	G	30	GAP1	.	GT:FT	0|1:GAP1	1|1:PASS	0|1:.	./.:.
+chr1	3693768	.	C	G	30	.	.	GT	0|1	1|1	0|1	./.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  using Indices = Variant::Genotype::AlleleIndices;
+  {
+    auto variant = reader->NextVariant();
+    ASSERT_TRUE(variant);
+
+    // By default, FT is ignored
+    auto genotypes = variant->Genotypes();
+    ASSERT_EQ(genotypes.size(), 4);
+    EXPECT_EQ(genotypes[0].allele_indices(), Indices({0, 1}));
+    EXPECT_EQ(genotypes[0].phase(), Phase(Phase::kGlobal));
+
+    // Only the failing FT is reported as missing (with the same ploidy as "./.")
+    auto filtered_genotypes = variant->Genotypes(true /* filtered_as_missing */);
+    ASSERT_EQ(filtered_genotypes.size(), 4);
+    EXPECT_EQ(filtered_genotypes[0].num_alleles(), 2);
+    EXPECT_TRUE(filtered_genotypes[0].AllAlleles(Variant::Genotype::kMissingAllele));
+    EXPECT_EQ(filtered_genotypes[0].phase(), filtered_genotypes[3].phase());
+    EXPECT_EQ(filtered_genotypes[1].allele_indices(), Indices({1, 1}));
+    EXPECT_EQ(filtered_genotypes[2].allele_indices(), Indices({0, 1}));
+    EXPECT_TRUE(filtered_genotypes[3].AllAlleles(Variant::Genotype::kMissingAllele));
+  }
+  {
+    // FT defined in header, but not present in the record
+    auto variant = reader->NextVariant();
+    ASSERT_TRUE(variant);
+    auto filtered_genotypes = variant->Genotypes(true /* filtered_as_missing */);
+    EXPECT_EQ(filtered_genotypes[0].allele_indices(), Indices({0, 1}));
   }
 }
 

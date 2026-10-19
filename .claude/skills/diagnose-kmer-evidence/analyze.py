@@ -23,6 +23,7 @@ ap.add_argument("--pred", type=int, help="predicted genotype index (from the los
 ap.add_argument("--losses", help="losses.pkl.gz to look up the region's loss record")
 ap.add_argument("--flank-del", action="append", default=[], help="POS:REFLEN deletion in the right flank to apply (VCF POS, REF length)")
 ap.add_argument("--min-support", type=int, default=3, help="min reads for a k-mer to count as 'seen' in real data")
+ap.add_argument("--temperature", type=float, default=0.07, help="InfoNCE temperature used to decompose the loss (models/paired.py)")
 a = ap.parse_args()
 
 cap = pickle.load(open(a.cap, "rb"))
@@ -54,6 +55,17 @@ if a.losses:
         r = row.iloc[0]
         print(f"loss={r.loss:.3f} (rank {int((df.loss > r.loss).sum()) + 1}/{len(df)}) label={r.genotype} pred={r.prediction} correct={r.correct}")
         a.pred = a.pred if a.pred is not None else int(r.prediction)
+        # Decompose the InfoNCE loss: -log softmax(metric / T)[label]. A correct prediction with a high loss means many
+        # negatives score within ~T of the label (a near-flat similarity profile), i.e. the model cannot separate them.
+        if r.get("genotype_metric") is not None and r.genotype is not None:
+            import math
+            m = [x / a.temperature for x in r.genotype_metric]
+            w = [math.exp(x - m[int(r.genotype)]) for x in m]  # weight of each genotype relative to the label
+            near = sorted(((w[i], i) for i in range(len(w)) if i != int(r.genotype)), reverse=True)
+            print(f"  loss decomposition (T={a.temperature}): label softmax p={1 / sum(w):.3f}; flat-profile loss would be "
+                  f"log({len(w)})={math.log(len(w)):.2f}; negatives with weight >0.8x label: {sum(x > 0.8 for x, _ in near)}/{len(near)}; "
+                  f"metric range {min(r.genotype_metric):.4f}..{max(r.genotype_metric):.4f}")
+            print("  top negatives (idx, weight vs label): " + ", ".join(f"{i}:{x:.2f}" for x, i in near[:8]))
 
 # --- Repeat structure of the reference region and reference non-unique k-mer fraction
 ref_region = fa.fetch(contig, start - 1, end).upper()
@@ -213,6 +225,37 @@ if label_idx is not None and a.pred is not None:
         d = discriminating(x, y)
         print(f"  evidence for {name} {x} vs {y}: {len(d)} k-mers, {sum(k in support for k in d)} seen in real reads")
 if label_idx is not None:
+    # Retained k-mers the real reads contain but the label genotype's haplotypes (+flanks) lack: the real image shows evidence
+    # the simulated true-genotype image cannot. Their hg38 multiplicity says whether they could be mis-mapped repeat copies.
+    against = [k for k, m in ret.items() if not any(m[h] for h in gts[label_idx]) and support[k] >= a.min_support]
+    carriers = collections.Counter(h for k in against for h in range(nh) if ret[k][h])
+    print(f"  retained k-mers absent from label {gts[label_idx]} but seen (>={a.min_support} reads) in real reads: {len(against)}"
+          + (f", read hits {sum(support[k] for k in against)}, carried by haps {dict(sorted(carriers.items()))}" if against else ""))
+    # The index and simulations use hg38 flanks, but the sample's real flanks carry its own variants. When a repeat spans the
+    # region boundary, a repeat-unit variant the sample carries in its flank copies looks haplotype-specific in the index but is in the real reads. Rebuild the
+    # sample's flanks from its VCF calls (all sizes) around its assembled paths and check whether they explain `against`.
+    if against and cap.get("true_paths"):
+        vcf_ = pysam.VariantFile(cap["input"])
+
+        def sample_seq(hidx, s0, e0):  # hg38[s0:e0] (0-based) with the sample's haplotype-`hidx` alleles applied
+            out, cur = [], s0
+            for rec in vcf_.fetch(contig, s0, e0):
+                gt = rec.samples[cap["sample"]]["GT"]
+                g = gt[hidx] if len(gt) > hidx else None
+                if g in (0, None) or rec.start < cur or rec.stop > e0:
+                    continue
+                out += [fa.fetch(contig, cur, rec.start), rec.alleles[g]]
+                cur = rec.stop
+            return ("".join(out) + fa.fetch(contig, cur, e0)).upper()
+
+        for hidx, tp in enumerate(cap["true_paths"]):
+            if tp is None:
+                continue
+            own_l, own_r = sample_seq(hidx, start - 1 - len(lf), start - 1), sample_seq(hidx, end, end + len(rf))
+            n_flank_vars = sum(1 for _ in vcf_.fetch(contig, start - 1 - len(lf), start - 1)) + sum(1 for _ in vcf_.fetch(contig, end, end + len(rf)))
+            own = own_l + tp + own_r
+            print(f"    sample hap{hidx}: own flanks ({len(own_l)}/{len(own_r)}bp vs hg38 {len(lf)}/{len(rf)}; {n_flank_vars} VCF records) + assembled path "
+                  f"contain {sum(k in own for k in against)}/{len(against)} of these (vs {sum(k in lf + tp + rf for k in against)} with hg38 flanks)")
     print("  (label haplotype private k-mers are the ones the simulated true-genotype image should show; zero here means real reads lack the label allele's sequence)")
 
 # --- Does the sample's own call set look real? Density of its alt-allele variants and their support in the reads.

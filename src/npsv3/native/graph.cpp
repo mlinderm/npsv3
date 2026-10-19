@@ -261,7 +261,8 @@ class ReferenceNodes {
 
 }  // namespace
 
-Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic) : region_(region) {
+Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_path, const Range& region, bool enforce_multiallelic,
+             bool filtered_as_missing) : region_(region) {
   auto vcf_file = VariantFileReader::Open(vcf_path);
 
   // For phases 1 & 2 don't load genotypes, just the variant alleles, to reduce memory usage when storing all variants in the region.
@@ -417,8 +418,11 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
   }
 
   std::optional<Range> prev_range;  // Region of previous variant(s)
+  // Iterate in order of trimmed reference region (not POS), since both the overlap detection and haplotype
+  // construction below assume variants are ordered by the reference nodes they span, e.g., a zero-width insertion
+  // sharing the padding base of a deletion must precede that deletion.
   vcf_file->SetRegion(region_);
-  while (auto variant = vcf_file->NextVariant(BCF_UN_ALL)) {
+  while (auto variant = vcf_file->NextSortedVariant(BCF_UN_ALL)) {
     auto ref_region = variant->ReferenceRegion();
     if (ref_region.start() <= region_.start() || ref_region.end() >= region_.end()) {
       continue; // Skip variants that only partially overlap the graph region
@@ -428,7 +432,7 @@ Graph::Graph(const std::string& reference_fasta_path, const std::string& vcf_pat
       continue; // Skip variants where every ALT is '*' (including multi-allelic all-'*' records)
     }
 
-    auto genotypes = variant->Genotypes();
+    auto genotypes = variant->Genotypes(filtered_as_missing);
     assert(genotypes.size() == polytypes.size());
 
     // A VCF record can carry more than one literal '*' ALT allele (seen in some multi-cohort merges, e.g.

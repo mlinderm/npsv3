@@ -610,3 +610,77 @@ TEST(KmerClassifyAdaptiveDispatchTest, ScanIsIdempotentAcrossCalls_KMC2Scale) {
   CheckScanIsIdempotentAcrossCalls(db, seq, k);
 }
 
+
+TEST(MMapKMCFileTest, MatchesUpstreamCKMCFile_KMC1) {
+  // Production filtered databases are KMC1 (produced by kmc_tools), for which the LUT's terminal sentinel overwrites
+  // the start of the header in the mapped prefix file (see MMapKMCFile::MapPrefix). Include a poly-T k-mer so the
+  // final LUT bucket, bounded by that sentinel, is populated and queried.
+  test::TempDir dir;
+  const uint32_t k = 21;
+  std::string seq = RandomSequence(400, /*seed=*/7) + std::string(k, 'T');
+  auto db = BuildFilteredSyntheticDb(dir, seq, k, "kmc1_mmap");
+  ASSERT_FALSE(db.prefix.empty());
+  ASSERT_FALSE(db.is_kmc2) << "This test is meant to exercise a KMC1-format DB; adjust sequence length if kmc_tools' format heuristic changed";
+
+  CKMCFile upstream;
+  ASSERT_TRUE(upstream.OpenForRA(db.prefix)) << "Failed to open upstream CKMCFile";
+  npsv3::detail::MMapKMCFile mmapped;
+  ASSERT_TRUE(mmapped.OpenForRA(db.prefix)) << "Failed to open MMapKMCFile";
+  ASSERT_EQ(upstream.KmerLength(), mmapped.KmerLength());
+  ASSERT_EQ(upstream.KmerCount(), mmapped.KmerCount());
+
+  std::unordered_set<std::string> query_kmers;
+  for (size_t i = 0; i + k <= seq.size(); ++i) query_kmers.insert(seq.substr(i, k));
+  for (uint32_t seed = 1000; seed < 1020; ++seed) query_kmers.insert(RandomSequence(k, seed));
+  query_kmers.insert(std::string(k - 1, 'T') + "A");  // Absent k-mer in the final LUT bucket
+
+  size_t found = 0;
+  for (const auto& kmer_str : query_kmers) {
+    CKmerAPI kmer(k);
+    ASSERT_TRUE(kmer.from_string(kmer_str));
+    uint64_t upstream_count = 0, mmapped_count = 0;
+    const bool upstream_found = upstream.CheckKmer(kmer, upstream_count);
+    const bool mmapped_found = mmapped.CheckKmer(kmer, mmapped_count);
+    ASSERT_EQ(upstream_found, mmapped_found) << "Found mismatch for k-mer " << kmer_str;
+    if (upstream_found) {
+      ASSERT_EQ(upstream_count, mmapped_count) << "Count mismatch for k-mer " << kmer_str;
+      ++found;
+    }
+  }
+  EXPECT_GT(found, 100u);
+
+  CKmerAPI poly_t(k);
+  ASSERT_TRUE(poly_t.from_string(std::string(k, 'T')));
+  uint64_t count = 0;
+  EXPECT_TRUE(mmapped.CheckKmer(poly_t, count)) << "Poly-T k-mer in the final LUT bucket should be found";
+
+  EXPECT_TRUE(mmapped.Close());
+  upstream.Close();
+}
+
+TEST(KmerClassifyAdaptiveDispatchTest, RandomAccessReuseAcrossRegions) {
+  // Image generation reuses a single KmerClassify (and thus its random-access database) for every region an actor
+  // processes. Classifying a sequence of disjoint "regions" with one instance must match a fresh instance per region.
+  test::TempDir dir;
+  const uint32_t k = 21;
+  std::string seq = RandomSequence(2000, /*seed=*/11);
+  auto db = BuildFilteredSyntheticDb(dir, seq, k, "kmc1_reuse");
+  ASSERT_FALSE(db.prefix.empty());
+
+  npsv3::KmerClassify shared(db.prefix, /*coverage=*/1.0);
+  size_t non_absent = 0;
+  for (size_t start = 0; start + 200 <= seq.size(); start += 200) {
+    std::vector<std::string> region_query;
+    for (size_t i = start; i + k <= start + 200; ++i) region_query.push_back(seq.substr(i, k));
+    region_query.push_back(RandomSequence(k, /*seed=*/static_cast<uint32_t>(5000 + start)));
+    std::sort(region_query.begin(), region_query.end());
+    ASSERT_LT(region_query.size(), db.kmer_count) << "Each region should take the random-access path";
+
+    npsv3::KmerClassify fresh(db.prefix, /*coverage=*/1.0);
+    auto shared_results = ClassifyAll(shared, region_query);
+    EXPECT_EQ(shared_results, ClassifyAll(fresh, region_query)) << "Region starting at " << start;
+    non_absent += std::count_if(shared_results.begin(), shared_results.end(),
+        [](const auto& kv) { return kv.second != npsv3::KmerZygosity::ABSENT; });
+  }
+  EXPECT_GT(non_absent, 0u);
+}

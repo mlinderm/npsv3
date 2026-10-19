@@ -6,6 +6,7 @@
 #include <htslib/vcf.h>
 
 #include <boost/hash2/digest.hpp>
+#include <deque>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -181,6 +182,14 @@ class PackedGenotype {
     }
   }
 
+  // Fully missing genotype with the same ploidy, i.e., identical to decoding "./." (or "." if haploid)
+  PackedGenotype AsMissing() const {
+    PackedGenotype missing(*this);
+    std::fill(std::begin(missing.allele_indices_), std::begin(missing.allele_indices_) + num_alleles_, kMissingAllele);
+    missing.phase_ = num_alleles_ > 0 ? Phase(Phase::kImplicit) : Phase(Phase::kUnphased);
+    return missing;
+  }
+
   size_t num_alleles() const { return num_alleles_; }
   const AlleleIndices& allele_indices() const { return allele_indices_; }
 
@@ -293,7 +302,8 @@ class Variant {
 
   virtual std::unique_ptr<Variant> SubsetSamples(const std::vector<int>& original_idxs) const = 0;
 
-  std::vector<Genotype> Genotypes() const;
+  // Genotypes for all samples. If filtered_as_missing, genotypes with a failing FT are reported as fully missing.
+  std::vector<Genotype> Genotypes(bool filtered_as_missing = false) const;
   bool HasPassingGenotype() const;
 
   // Genotype and FT filter status for a single sample; sample_idx must be [0, num_samples)
@@ -312,7 +322,8 @@ class Variant {
 
   Variant(const HeaderPtr& hdr, RecordPtr record);
 
-  std::vector<Genotype> Genotypes(int gt_id, int ps_id) const;
+  // ft_id < 0 disables FT filtering
+  std::vector<Genotype> Genotypes(int gt_id, int ps_id, int ft_id) const;
   bool HasPassingGenotype(int gt_id, int ft_id) const;
   RecordPtr SubsetSamplesRecord(const std::vector<int>& original_idxs) const;
 };
@@ -353,6 +364,13 @@ class VariantFileReader {
 
   virtual VariantPtr NextVariant(int max_unpack = BCF_UN_ALL);
 
+  /**
+   * @brief Return the next variant in sorted order of the padding-trimmed ReferenceRegion() (by start, then end),
+   * preserving file order for ties. Do not interleave with NextVariant() or use different @p max_unpack values within one
+   * iteration.
+   */
+  VariantPtr NextSortedVariant(int max_unpack = BCF_UN_ALL);
+
   std::vector<std::string> Samples() const;
 
   const HeaderPtr& header() const { return hdr_; }
@@ -362,9 +380,17 @@ class VariantFileReader {
 
   VariantFileReader(FilePtr&& file);
 
+  // Reset NextSortedVariant() state, must be called when changing the iteration region
+  void ResetSortedVariants();
+
   FilePtr file_;
   HeaderPtr hdr_;
   off_t variant_offset_;
+
+ private:
+  std::deque<VariantPtr> sorted_variants_;    // Lookahead buffer in sorted order of trimmed reference region
+  std::optional<Range> last_record_region_;  // Record region (i.e., with padding) of most recently read variant
+  bool sorted_exhausted_ = false;
 };
 
 class VCFVariantFileReader : public VariantFileReader {

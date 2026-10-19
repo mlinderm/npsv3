@@ -1,25 +1,25 @@
 """Truvari-style haplotype harmonization (the `truvari phab` step).
 
 Given a reference sequence and haplotype sequences for the same region, align them all together (multiple sequence alignment)
-and re-call every haplotype's variants against the reference from that single alignment. Variants are thereby written in one
-consistent coordinate system with consistent gap placement, so the same event in a tandem repeat is represented identically
+and re-call every haplotype's variants against the reference from that single alignment. Variants are translated into a single
+coordinate system with consistent gap placement, e.g., the same event in a tandem repeat is represented identically
 in every haplotype. This is the representation `truvari refine` compares after harmonization, and it is the input to the
-Truvari-style matching in `truvari_compare`.
+Truvari-style matching in `sequence_compare`.
 
 Ported from Truvari 5.3.0 (`truvari/phab.py`, `truvari/msatovcf.py`; MIT license, https://github.com/ACEnglish/truvari)
-and kept behavior-compatible so results can be checked against it (`tests/graphs/test_harmonize.py`). Needs the optional
+and kept behavior-compatible so results can be checked against it (`tests/graphs/test_sequence_harmonize.py`). Needs the optional
 `harmonize` extra (`edlib`, `pyabpoa`, `pywfa`).
 
 Notes:
 * abPOA (the Truvari default) is documented as non-deterministic across machines; `wfa` is deterministic but aligns each
   haplotype to the reference independently, which can give less parsimonious variants.
-* Alignment is impractical for very long sequences; apply to sub-regions.
+* Alignment is impractical for very long sequences.
 """
 
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,14 @@ Aligner = Callable[[Mapping[str, str]], dict[str, Aligned]]
 
 @dataclass(frozen=True, order=True)
 class AlignedVariant:
-    """A variant called from a harmonized alignment, in VCF conventions (`pos` is 1-based and is the anchor base).
+    """A variant called from a harmonized alignment, in VCF conventions.
 
     After decomposition either `ref` or `alt` is a single base, i.e., the variant is a SNV, insertion or deletion.
+
+    Attributes:
+        pos: 1-based reference position of the first base of `ref` (the anchor base for an indel).
+        ref: Reference allele, including the anchor base for an indel.
+        alt: Alternate allele, including the anchor base for an indel.
     """
 
     pos: int
@@ -61,14 +66,16 @@ class AlignedVariant:
 
 @dataclass(frozen=True)
 class Harmonized:
-    msa: dict[str, Aligned]
-    variants: dict[str, tuple[AlignedVariant, ...]]  # haplotype name -> its variants against the reference
+    """Result of `harmonize`: each haplotype's variants called from a single alignment with the reference.
+
+    Attributes:
+        variants: Haplotype name -> its variants against the reference, for every input haplotype, including those not
+            aligned (identical to the reference, or duplicates with `dedup`).
+        aligner: Name of the aligner used.
+    """
+
+    variants: dict[str, tuple[AlignedVariant, ...]]
     aligner: str
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Alignment
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _expand_cigar(seq: str, ref: str, cigar) -> tuple[str, str]:
@@ -123,16 +130,9 @@ def align_wfa(sequences: Mapping[str, str]) -> dict[str, Aligned]:
 ALIGNERS: dict[str, Aligner] = {"poa": align_poa, "wfa": align_wfa}
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Alignment -> variants
-# --------------------------------------------------------------------------------------------------------------------
-
-_POS, _REF, _ALT = 0, 1, 2
-
-
-def _decompose(variant: list) -> list[AlignedVariant]:
-    """Left-trim the variant and decompose a replacement into a deletion plus an insertion (easier to compare)."""
-    pos, ref, alt = variant
+def _decompose(variant: AlignedVariant) -> list[AlignedVariant]:
+    """Return decomposed AlignedVairant(s) by left-trimming variant splitting MNV/indels into a deletion plus an insertion (easier to compare)."""
+    pos, ref, alt = variant.pos, variant.ref, variant.alt
     if ref == alt:
         return []
 
@@ -150,9 +150,9 @@ def _decompose(variant: list) -> list[AlignedVariant]:
 
 
 def alignment_to_variants(ref_aln: str, alt_aln: str, start_pos: int, anchor_base: str) -> list[AlignedVariant]:
-    """Zip the bases of a pairwise alignment (against the gapped reference) into variants."""
+    """Return variants from the bases of a pairwise alignment (against the gapped reference)"""
     variants: list[AlignedVariant] = []
-    current: list | None = None
+    current: AlignedVariant | None = None  # variant being extended (anchored, not yet decomposed)
     cur_pos = start_pos
     for ref_char, alt_char in zip(ref_aln, alt_aln, strict=True):
         is_ref = ref_char != "-"
@@ -162,19 +162,18 @@ def alignment_to_variants(ref_aln: str, alt_aln: str, start_pos: int, anchor_bas
             continue
 
         if ref_base == alt_base:
-            if current and is_ref:  # back to matching the reference
+            if current is not None and is_ref:  # back to matching the reference
                 variants.extend(_decompose(current))
                 current = None
         elif current is None:
             # -1 for the anchor base we force on
-            current = [cur_pos - 1, anchor_base + ref_base, anchor_base + alt_base]
+            current = AlignedVariant(cur_pos - 1, anchor_base + ref_base, anchor_base + alt_base)
         else:
-            current[_REF] += ref_base
-            current[_ALT] += alt_base
+            current = replace(current, ref=current.ref + ref_base, alt=current.alt + alt_base)
         if is_ref:
             cur_pos += 1
             anchor_base = ref_base
-    if current:
+    if current is not None:
         variants.extend(_decompose(current))
     return variants
 
@@ -182,7 +181,7 @@ def alignment_to_variants(ref_aln: str, alt_aln: str, start_pos: int, anchor_bas
 def msa_to_variants(
     msa: Mapping[str, Aligned], start_pos: int = 1, abs_anchor_base: str = "N"
 ) -> dict[str, tuple[AlignedVariant, ...]]:
-    """Variants of every non-reference entry of an alignment (the reference entry's key starts with `ref_`)."""
+    """Return variants for every non-reference entry of an alignment (the reference entry's key starts with `ref_`)."""
     ref_key = _reference_key(msa)  # type: ignore[arg-type]
     ref_seq = msa[ref_key]
     ref_seq = ref_seq.upper() if isinstance(ref_seq, str) else None
@@ -195,14 +194,10 @@ def msa_to_variants(
             ref_aln, alt_aln = aligned[0].upper(), aligned[1].upper()
         else:
             ref_aln, alt_aln = ref_seq, aligned.upper()
+        assert ref_aln is not None, f"Reference sequence must be a string for pairwise aligners (got {ref_aln!r})"
         anchor_base = ref_aln[0] if ref_aln[0] != "-" else abs_anchor_base
         variants[key] = tuple(alignment_to_variants(ref_aln, alt_aln, start_pos, anchor_base))
     return variants
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Harmonization
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def harmonize(
@@ -216,9 +211,17 @@ def harmonize(
 ) -> Harmonized:
     """Align `haplotypes` (name -> sequence) with `reference` and call each haplotype's variants against the reference.
 
-    `start_pos` is the 1-based position of the reference's first base (variants use VCF conventions). With `dedup`, identical
-    haplotype sequences are aligned once (Truvari's `--dedup`). Haplotypes identical to the reference have no variants and
-    are not aligned. Names must not start with `ref_`.
+    Args:
+        reference: Reference sequence for the region.
+        haplotypes: Haplotype name -> sequence for the same region. Names must not start with `ref_`.
+        aligner: Name of a built-in aligner (`"poa"` or `"wfa"`, see `ALIGNERS`) or an `Aligner` callable.
+        start_pos: 1-based position of the reference's first base, used for the variants' positions.
+        anchor_base: Anchor base for a variant at the very start of the region when the alignment opens with a gap in the
+            reference (e.g., the reference base preceding `start_pos`).
+        dedup: Align identical haplotype sequences only once (Truvari's `--dedup`).
+
+    Returns:
+        Each haplotype's variants against the reference, in VCF conventions.
     """
     assert not any(name.startswith(REF_PREFIX) for name in haplotypes), (
         f"Haplotype names cannot start with {REF_PREFIX}"
@@ -231,7 +234,7 @@ def harmonize(
     variants: dict[str, tuple[AlignedVariant, ...]] = {name: () for name, seq in haplotypes.items() if seq == reference}
     to_align = {name: seq for name, seq in haplotypes.items() if seq != reference}
     if not to_align:
-        return Harmonized({}, variants, aligner if isinstance(aligner, str) else aligner.__name__)
+        return Harmonized(variants, aligner if isinstance(aligner, str) else aligner.__name__)
 
     key_map = {name: name for name in to_align}
     if dedup:
@@ -246,11 +249,22 @@ def harmonize(
     msa = align({ref_key: reference, **to_align})
     msa_variants = msa_to_variants(msa, start_pos, anchor_base)
     variants.update({name: msa_variants[key] for name, key in key_map.items()})
-    return Harmonized(msa, variants, aligner if isinstance(aligner, str) else aligner.__name__)
+    return Harmonized(variants, aligner if isinstance(aligner, str) else aligner.__name__)
 
 
-def variant_counts(harmonized: Harmonized) -> dict[AlignedVariant, list[str]]:
-    """Variant -> haplotypes carrying it."""
+def variant_carriers(harmonized: Harmonized) -> dict[AlignedVariant, list[str]]:
+    """Group harmonized variants by the haplotypes that carry them.
+
+    Because harmonization gives every haplotype the same representation of a shared event, the same variant called in
+    different haplotypes is equal and is counted once, with all its carriers.
+
+    Args:
+        harmonized: Result of `harmonize`.
+
+    Returns:
+        Each distinct variant -> names of the haplotypes carrying it, in the order of `harmonized.variants`. Haplotypes
+        without variants do not appear.
+    """
     carriers: dict[AlignedVariant, list[str]] = defaultdict(list)
     for name, variants in harmonized.variants.items():
         for variant in variants:
@@ -267,5 +281,5 @@ __all__ = [
     "alignment_to_variants",
     "harmonize",
     "msa_to_variants",
-    "variant_counts",
+    "variant_carriers",
 ]

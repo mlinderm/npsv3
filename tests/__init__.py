@@ -146,7 +146,10 @@ def cache_graph_and_filter_kmc_database(cfg, sample: "Sample", vcf_path: str, re
     results_directory = result_path(f"{region.slug}.{hash_vcf_file(vcf_path)}.{sample.name}.k{cfg.graph.kmer_size}")
     os.makedirs(results_directory, exist_ok=True)
     filtered_kmer_path = os.path.join(results_directory, "filtered_kmers")
-    graph_shards = glob.glob(os.path.join(results_directory, "graphs-*-*.tar.gz"))
+    from npsv3.graphs.sharding import SHARD_GLOB
+
+    # Legacy `graphs-*.tar.gz` caches are regenerated in the current (energon-preparable) layout
+    graph_shards = sorted(glob.glob(os.path.join(results_directory, SHARD_GLOB)))
     if not graph_shards or not os.path.exists(f"{filtered_kmer_path}.kmc_pre"):
         if not sample.kmc_prefix:
             pytest.skip(f"KMC database for {sample.name} not found")

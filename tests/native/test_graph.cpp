@@ -396,6 +396,52 @@ chr1	904493	.	CGGCCGCCTCCTCCTCCGAACGTGGCCTCCTCCGAACGCGGCCGCCTCCTCCTCCGAACGCGGCCG
   ASSERT_TRUE(std::includes(handles3_1.begin(), handles3_1.end(), handles2_1.begin(), handles2_1.end()));
 }
 
+TEST_F(GraphConstructionTest, NoInconsistentHaplotypes1) {
+  auto region = Range("chr1", 936138, 936408);
+  {
+    test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	936234	chr1-936235-DEL-78	TGGTCCCGCCTCCTAGGGCTCCTGGACGGAAGGGGTCCCCGGTCCCGCCTCCTAGGGCTCCTGGACGGAGGGGGTCCCC	T	0	PASS	SVTYPE=DEL;SVLEN=-78	GT	0|1
+chr1	936303	chr1-936304-INS-43	G	GGGGGTCCCCGGTCGGTCCCGCCTCCTAGGGCTCCTGGACGGAA	0	PASS	SVTYPE=INS;SVLEN=43	GT	1|0)VCF");
+    Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#0", region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#1#{}#1", region.contig())));
+  }
+  
+  // The un-called vairiants seem to be inducing a haplotype break in the sample that should not be needed
+  {
+    test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	936234	chr1-936235-DEL-78	TGGTCCCGCCTCCTAGGGCTCCTGGACGGAAGGGGTCCCCGGTCCCGCCTCCTAGGGCTCCTGGACGGAGGGGGTCCCC	T	0	PASS	SVTYPE=DEL;SVLEN=-78	GT	0|1
+chr1	936234	chr1-936235-INS-82	T	TGGTCCCGCCTCCTAGGGCTCCTGGACGGAGGGGGTCCCCGGTCGGTCCCGCCTCCTAGGGCTCCTGGACGGAAGGGGTCCCC	0	PASS	SVTYPE=INS;SVLEN=82	GT	.
+chr1	936264	chr1-936265-DEL-39	AGGGGTCCCCGGTCCCGCCTCCTAGGGCTCCTGGACGGAG	A	0	PASS	SVTYPE=DEL;SVLEN=-39	GT	.
+chr1	936299	chr1-936299-SNV-CG	C	G	0	PASS	SVTYPE=SNV	GT	.
+chr1	936303	chr1-936303-SNV-GA	G	A	0	PASS	SVTYPE=SNV	GT	.
+chr1	936303	chr1-936304-INS-43	G	GGGGGTCCCCGGTCGGTCCCGCCTCCTAGGGCTCCTGGACGGAA	0	PASS	SVTYPE=INS;SVLEN=43	GT	1|0
+chr1	936311	chr1-936312-INS-4	C	CCGGT	0	PASS	SVTYPE=INS;SVLEN=4	GT	.
+chr1	936342	chr1-936342-SNV-AG	A	G	0	PASS	SVTYPE=SNV	GT	.
+chr1	936351	chr1-936351-SNV-CT	C	T	0	PASS	SVTYPE=SNV	GT	.
+chr1	936354	chr1-936355-DEL-35	TCCCGCCTCCTAGGGCTCCTGGACGGAAGGGGTCCC	T	0	PASS	SVTYPE=DEL;SVLEN=-35	GT	.
+chr1	936381	chr1-936381-SNV-AG	A	G	0	PASS	SVTYPE=SNV	GT	.
+chr1	936389	chr1-936390-INS-4	C	CCGGT	0	PASS	SVTYPE=INS;SVLEN=4	GT	.)VCF");
+    Graph graph(HG38FastaPath_, vcf.file_path_, region);
+
+    ASSERT_TRUE(graph.has_path(fmt::format("Sample#1#{}#0", region.contig())));
+    ASSERT_FALSE(graph.has_path(fmt::format("Sample#1#{}#1", region.contig())));
+  }
+}
+
 TEST_F(GraphConstructionTest, AdjacentInsertions) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##contig=<ID=chr4,length=190214555>
@@ -494,6 +540,35 @@ chr1	52278191	HIFI_sawfish:0:1743:0:0	T	TGGAAAATTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
   // The first variant only partially overlaps the region, so it should be ignored during graph construction
   ASSERT_FALSE(graph.has_path("_alt_70e6adb077463a6f66e692cdb11f2ca4540ff066_0"));
 };
+
+TEST(GraphConstructionSyntheticTest, FilteredGenotypesAsMissing) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAAAAAACAAAAAAAAA)FASTA");
+
+  // Sample1's genotype is filtered, Sample2's is passing. FILTER is not PASS to confirm that the variant is still
+  // incorporated into the graph.
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=GAP1,Description="Uncalled in the first haplotype">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=FT,Number=1,Type=String,Description="Genotype-level filter.">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	11	.	C	G	.	GAP1	.	GT:FT	0|1:GAP1	0|1:PASS
+)VCF");
+
+  auto region = Range("chr1", 0, 20);
+  for (auto filtered_as_missing : { false, true }) {
+    Graph graph(fasta.file_path_, vcf.file_path_, region, true /* enforce_multiallelic */, filtered_as_missing);
+
+    // Variant alleles are always present
+    ASSERT_EQ(graph.get_node_count(), 4);
+    ASSERT_EQ(graph.PathSequence("Sample2#0#chr1#0"), "AAAAAAAAAACAAAAAAAAA");
+    ASSERT_EQ(graph.PathSequence("Sample2#1#chr1#0"), "AAAAAAAAAAGAAAAAAAAA");
+    ASSERT_EQ(graph.PathSequence("Sample1#0#chr1#0"), "AAAAAAAAAACAAAAAAAAA");
+    ASSERT_EQ(graph.PathSequence("Sample1#1#chr1#0"), filtered_as_missing ? "AAAAAAAAAACAAAAAAAAA" : "AAAAAAAAAAGAAAAAAAAA");
+  }
+}
 
 TEST_F(GraphConstructionTest, IgnoreMissingGenotypes) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2

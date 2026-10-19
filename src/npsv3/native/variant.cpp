@@ -260,7 +260,7 @@ Variant::RecordPtr Variant::SubsetSamplesRecord(const std::vector<int>& original
   return subset_record_ptr;
 }
 
-std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id) const {
+std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id, int ft_id) const {
   if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
     throw std::runtime_error("Failed to unpack variant record for genotype extraction");
 
@@ -269,6 +269,7 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id) const {
     throw std::runtime_error("GT format field not present in variant record");
   }
   int ps_fmt_idx = FindFmtIndex(record_.get(), ps_id);
+  int ft_fmt_idx = FindFmtIndex(record_.get(), ft_id);
 
   bcf_fmt_t* gt_fmt = &record_->d.fmt[gt_fmt_idx];
   bcf_fmt_t* ps_fmt = ps_fmt_idx < record_->n_fmt ? &record_->d.fmt[ps_fmt_idx] : nullptr;
@@ -276,22 +277,30 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id) const {
     spdlog::warn("PS format field has {} number of values per sample, expecting 1; ignoring PS.", ps_fmt->n);
     ps_fmt = nullptr;
   }
+  bcf_fmt_t* ft_fmt = ft_fmt_idx < record_->n_fmt ? &record_->d.fmt[ft_fmt_idx] : nullptr;
 
   int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   std::vector<Variant::Genotype> genotypes;
   genotypes.reserve(num_samples);
   for (int i = 0; i < num_samples; i++) {
     int32_t phase_set = ps_fmt ? DecodePhaseSet(ps_fmt, i) : -1;
-    genotypes.push_back(DecodeGenotype(gt_fmt, i, phase_set));
+    auto genotype = DecodeGenotype(gt_fmt, i, phase_set);
+    if (ft_fmt) {
+      const char* ft = reinterpret_cast<const char*>(ft_fmt->p) + i * ft_fmt->n;
+      if (ClassifyFT(ft, ft_fmt->n) == FTStatus::kFail) {
+        genotype = genotype.AsMissing();
+      }
+    }
+    genotypes.push_back(genotype);
   }
   return genotypes;
 }
 
-std::vector<Variant::Genotype> Variant::Genotypes() const {
+std::vector<Variant::Genotype> Variant::Genotypes(bool filtered_as_missing) const {
   if (!hdr_->HasGT()) {
     throw std::runtime_error("GT format field not defined in variant file");
   }
-  return Genotypes(hdr_->GTId(), hdr_->PSId());
+  return Genotypes(hdr_->GTId(), hdr_->PSId(), (filtered_as_missing && hdr_->HasFT()) ? hdr_->FTId() : -1);
 }
 
 bool Variant::HasPassingGenotype(int gt_id, int ft_id) const {
@@ -551,6 +560,51 @@ std::unique_ptr<Variant> VariantFileReader::NextVariant(int max_unpack) {
   return Variant::Create(hdr_, record);
 }
 
+VariantFileReader::VariantPtr VariantFileReader::NextSortedVariant(int max_unpack) {
+  // The front (minimum) buffered variant can be released once the most recently read record is on a different contig
+  // or starts after the front's start. Since trimmed start >= POS, and the file is sorted by POS, no subsequent
+  // record can sort before it. Equal starts are not sufficient since a subsequent record could have a smaller end.
+  auto releasable = [this]() {
+    if (sorted_variants_.empty()) return false;
+    if (sorted_exhausted_) return true;
+    auto front_region = sorted_variants_.front()->ReferenceRegion();
+    return front_region.contig() != last_record_region_->contig() ||
+           front_region.start() < last_record_region_->start();
+  };
+
+  while (!sorted_exhausted_ && !releasable()) {
+    auto variant = NextVariant(max_unpack);
+    if (!variant) {
+      sorted_exhausted_ = true;
+      break;
+    }
+    last_record_region_ = variant->RecordReferenceRegion();
+
+    // Insert after any equal regions to preserve file order for ties
+    auto region = variant->ReferenceRegion();
+    auto it = std::upper_bound(
+        std::begin(sorted_variants_), std::end(sorted_variants_), region, [](const Range& r, const VariantPtr& v) {
+          auto v_region = v->ReferenceRegion();
+          if (r.contig() != v_region.contig()) return false;  // Different contigs are kept in file order
+          return std::make_pair(r.start(), r.end()) < std::make_pair(v_region.start(), v_region.end());
+        });
+    sorted_variants_.insert(it, std::move(variant));
+  }
+
+  if (sorted_variants_.empty()) {
+    return nullptr;
+  }
+  auto variant = std::move(sorted_variants_.front());
+  sorted_variants_.pop_front();
+  return variant;
+}
+
+void VariantFileReader::ResetSortedVariants() {
+  sorted_variants_.clear();
+  last_record_region_.reset();
+  sorted_exhausted_ = false;
+}
+
 std::vector<std::string> VariantFileReader::Samples() const {
   std::vector<std::string> samples;
   for (int i = 0; i < bcf_hdr_nsamples(hdr_->bcf_hdr()); i++) {
@@ -569,6 +623,7 @@ VCFVariantFileReader::VCFVariantFileReader(FilePtr&& file) : VariantFileReader(s
 }
 
 void VCFVariantFileReader::SetRegion() {
+  ResetSortedVariants();
   if (idx_) {
     iter_.reset(tbx_itr_queryi(idx_.get(), HTS_IDX_START, 0, 0));
     if (!iter_) {
@@ -578,6 +633,7 @@ void VCFVariantFileReader::SetRegion() {
 }
 
 void VCFVariantFileReader::SetRegion(const Range& region) {
+  ResetSortedVariants();
   if (!idx_) {
     throw std::runtime_error("Cannot set region on VCF/BCF file without index");
   }
