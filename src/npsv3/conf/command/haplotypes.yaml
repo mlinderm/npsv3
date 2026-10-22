@@ -1,0 +1,13 @@
+# @package _global_
+command: haplotypes
+
+# Pre-generate a sample's haplotypes (and comparisons, with `compare.enabled`) for every region, to be reused by every
+# image generation run for that sample with `haplotypes_dir`. Image generation must use the same graphs and `haplotype.*`
+# settings, along with `graph.kmer_size`, `graph.population_excluded_samples` and `graph.filtered_as_missing` (`input` and
+# `stats_path` are required, `reads` is not).
+
+# Pre-computed graphs and k-mer sets (if available). Graphs generated on-the-fly are kept in the output's `graphs_ds`
+# and should be used for subsequent image generation.
+graph_shards: null
+unique_kmer_path: null
+filtered_kmer_path: null

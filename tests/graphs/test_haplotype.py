@@ -598,8 +598,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""
         return Graph(HG38_REF_FASTA, vcf_path, region)  # type: ignore
 
     @pytest.mark.cfg_overrides(
-        "graph.haplotype_sampler_params.haplotype_prior_weight=5.0",
-        "graph.haplotype_sampler_params.panel_fallback_penalty=2.0",
+        "haplotype.sampler_params.haplotype_prior_weight=5.0",
+        "haplotype.sampler_params.panel_fallback_penalty=2.0",
     )
     def test_accepts_population_prior_kwargs_and_changes_ranking(self, cfg, tmp_path):
         graph = self._build_graph(tmp_path)
@@ -620,7 +620,7 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""
             return sampler.find_best_paths(4)
 
         disabled = top_haplotypes()
-        enabled = top_haplotypes(prior=prior_overlay, params=hydra.utils.instantiate(cfg.graph.haplotype_sampler_params))
+        enabled = top_haplotypes(prior=prior_overlay, params=hydra.utils.instantiate(cfg.haplotype.sampler_params))
 
         assert disabled != enabled, "A nonzero population prior should change the ranked haplotype set"
         assert mixed_haplotype in disabled, "Sanity check: the rare/crossed haplotype is reachable at all"
@@ -628,8 +628,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""
         assert all(nodes in enabled for nodes in (pure_ref, pure_alt)), "The panel-favored combinations should survive"
 
     @pytest.mark.cfg_overrides(
-        "graph.haplotype_sampler_params.haplotype_prior_weight=5.0",
-        "graph.haplotype_sampler_params.panel_fallback_penalty=2.0",
+        "haplotype.sampler_params.haplotype_prior_weight=5.0",
+        "haplotype.sampler_params.panel_fallback_penalty=2.0",
     )
     def test_overlay_outlives_python_reference(self, cfg, tmp_path):
         """Regression test for the nb::keep_alive binding design: the sampler must keep the overlay objects
@@ -641,7 +641,7 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""
         prior_overlay = HaplotypePriorOverlay(graph)
 
         sampler = HaplotypeSamplerOverlay(
-            graph, unique_kmers, prior=prior_overlay, params=hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
+            graph, unique_kmers, prior=prior_overlay, params=hydra.utils.instantiate(cfg.haplotype.sampler_params)
         )
         del prior_overlay
         gc.collect()
@@ -697,8 +697,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""  # fmt: skip
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
         "graph.population_prior=false",
-        "graph.max_haplotypes=4",
-        "graph.max_diplotypes=6",
+        "haplotype.max_haplotypes=4",
+        "haplotype.max_diplotypes=6",
     )
     def test_diplotypes_in_topk_shard_handles_shard_without_population_prior_keys(self, cfg, tmp_path):
         vcf_path = create_vcf(tmp_path, self.VCF_BYTES)
@@ -731,8 +731,8 @@ chr1	1000001	.	G	C,T	100	PASS	.	GT	0|0	0|0	0|0	1|1	1|1	1|1	1|0"""  # fmt: skip
     @pytest.mark.cfg_overrides(
         f"reference={HG38_REF_FASTA}",
         "graph.population_prior=false",
-        "graph.max_haplotypes=4",
-        "graph.max_diplotypes=6",
+        "haplotype.max_haplotypes=4",
+        "haplotype.max_diplotypes=6",
     )
     def test_diplotypes_in_topk_shard_skips_filtered_genotype(self, cfg, tmp_path):
         # Sample1's genotype is explicitly filtered (FT != PASS/.) at the first variant only
@@ -1070,7 +1070,7 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
         "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
         "graph.population_prior=true",
         'graph.population_excluded_samples=["HG00733","HG00514","NA19240","NA24385"]',
-        "graph.haplotype_sampler_params.haplotype_prior_weight=5.0",
+        "haplotype.sampler_params.haplotype_prior_weight=5.0",
     )
     def test_population_prior_from_upstream_snv(self, cfg, hg00733_sample, tmp_path):
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
@@ -1100,7 +1100,7 @@ chr1	789481	.	G	GGAATGGAATGCAATGGAATGCACTCGAACGGATTGGAATGGAATGGACTCGAATAGAATGGAA
 
         haplotype_prior = HaplotypePriorOverlay(graph)
 
-        params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
+        params = hydra.utils.instantiate(cfg.haplotype.sampler_params)
         assert params.haplotype_prior_weight == 5.0, "The haplotype prior weight should be set from the config"
         prior_haplotype_sampler = HaplotypeSamplerOverlay(
             graph,
@@ -1149,7 +1149,7 @@ class TestTopkHaplotypeSamplingInPopulation:
         "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
         "graph.population_prior=true",
         'graph.population_excluded_samples=["HG00733","HG00514","NA19240","NA24385"]',
-        "graph.haplotype_sampler_params.haplotype_prior_weight=5.0",
+        "haplotype.sampler_params.haplotype_prior_weight=5.0",
     )
     @pytest.mark.parametrize(("region_str", "weight", "penalty"), [
         ("chr1:161443672-161443863", 5.0, 0),
@@ -1162,8 +1162,8 @@ class TestTopkHaplotypeSamplingInPopulation:
             pytest.skip("Missing necessary inputs")
 
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist([
-            f"graph.haplotype_sampler_params.haplotype_prior_weight={weight}",
-            f"graph.haplotype_sampler_params.panel_fallback_penalty={penalty}",
+            f"haplotype.sampler_params.haplotype_prior_weight={weight}",
+            f"haplotype.sampler_params.panel_fallback_penalty={penalty}",
         ]))
 
         region = Range(region_str)
@@ -1184,7 +1184,7 @@ class TestTopkHaplotypeSamplingInPopulation:
         assert len(haplotypes) > 0, "There should be haplotypes sampled in this region"
 
         haplotype_prior = HaplotypePriorOverlay(graph, cfg.graph.population_excluded_samples)
-        params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
+        params = hydra.utils.instantiate(cfg.haplotype.sampler_params)
         prior_haplotype_sampler = HaplotypeSamplerOverlay(
             graph,
             unique_kmers,
@@ -1206,8 +1206,8 @@ class TestTopkHaplotypeSamplingInPopulation:
         "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
         "graph.population_prior=true",
         'graph.population_excluded_samples=["HG00733","HG00514","NA19240","NA24385"]',
-        "graph.haplotype_sampler_params.haplotype_prior_weight=5.0",
-        "graph.missing_are_ref=true"
+        "haplotype.sampler_params.haplotype_prior_weight=5.0",
+        "haplotype.missing_are_ref=true"
     )
     def test_missing_genotypes(self, cfg, hg00733_sample):
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
@@ -1230,7 +1230,7 @@ class TestGenotypePreparationInPopulation:
         "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
         "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
         "graph.population_prior=True",
-        "graph.missing_are_ref=True",
+        "haplotype.missing_are_ref=True",
     )
     def test_variants_included_in_reference(self, cfg, hg00096_sample, region_str, tmp_path):
         """Test that variants in the reference are included in the graph and sampled haplotypes"""
@@ -1257,10 +1257,10 @@ class TestGenotypePreparationInPopulation:
             region,
             min_size=50,
             prior=haplotype_prior,
-            params=hydra.utils.instantiate(cfg.graph.haplotype_sampler_params),
+            params=hydra.utils.instantiate(cfg.haplotype.sampler_params),
         )
         sampler.initialize_scores(KmerClassify(filtered_kmer_path, hg00096_sample.kmer_coverage))
-        haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
+        haplotypes = sampler.sample_haplotypes(n=cfg.haplotype.max_haplotypes)
         assert len(haplotypes) > 0, "There should be haplotypes sampled in this region"
 
         analysis_variants: list[Variant] = []

@@ -5,3 +5,7 @@ command: images
 graph_shards: null
 unique_kmer_path: null
 filtered_kmer_path: null
+
+# Pre-computed haplotypes (and comparisons) for the sample, i.e., the output of the "haplotypes" command (if available).
+# Haplotypes are generated on-the-fly for any region without them (e.g., with a different graph).
+haplotypes_dir: null

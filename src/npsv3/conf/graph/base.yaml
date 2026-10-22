@@ -1,46 +1,26 @@
-graph_flank: 1000
+# Settings for constructing the graphs and their overlays. Unless noted, these are "baked" into the graph shards and so
+# have no effect when using pre-generated graphs. See the `haplotype` settings for haplotype generation from those
+# graphs.
 
+# K-mer length for all graph operations.
 kmer_size: 31
 
-# Unique k-mer related parameters
+# Unique k-mer related parameters, i.e., the number of edges a k-mer can span, whether to exclude k-mers present in every
+# path through the graph and whether to use canonical k-mers (for the overlay and pooled unique k-mer database).
 max_edges: 5
 exclude_universal: true
 canonicalize: false
 
-# Sampling related parameters (partly, adapted from Sirén et al. 2024). The total diplotypes should be h(h+1)/2
-max_haplotypes: 8
-max_diplotypes: 36
-
-# Strategy for generating the haplotypes to genotype for each example (see npsv3.images.haplotypes):
-#   - SampledHaplotypeStrategy: Sample haplotypes from the graph using the sample's k-mer counts
-#   - TrueHaplotypeStrategy: For training with high-quality assemblies, the sample's "true" haplotypes, a haplotype with
-#     no SVs and the highest k-mer scoring haplotypes created by adding/removing SVs from the true haplotypes.
-haplotype_strategy:
-  _target_: npsv3.images.haplotypes.SampledHaplotypeStrategy
-
-# When haplotype sampler doesn't sample > 1 distinct haplotypes for a region (e.g. other haplotypes are rare alleles not
-# supported by sample's data), borrow haplotypes from the population for any still-missing variant allele instead of
-# dropping the region.
-population_haplotype_topup: true
-
+# Build a population haplotype prior from the VCF's sample genotypes and store it in the graph shards. When using the
+# graphs, the haplotype sampler uses the prior if present in the shards (otherwise a uniform prior), regardless of this
+# setting.
 population_prior: false
-population_excluded_samples: []
-haplotype_sampler_params:
-  _target_: npsv3.graphs.haplotype.HaplotypeSamplerOverlay.Params
-  homozygous_score: 1.0
-  absent_score: -0.8
-  heterozygous_score: 0.0
-  homozygous_discount: 0.9
-  het_adjustment: 0.05
-  haplotype_prior_weight: 0.5
-  panel_fallback_penalty: -2
-  transition_prior_alpha: 0.01
-  population_state_pool_cap: 8
 
-# Treat missing genotypes as all reference (e.g., assuming variants weren't called in high quality assemblies)
-missing_are_ref: false
+# Samples excluded from the population haplotype prior (when building the graphs) and from population haplotype "top-up"
+# during haplotype generation.
+population_excluded_samples: []
 
 # Treat genotypes with a failing FT (genotype-level filter) as missing, i.e., "./.", both in the sample genotype paths
-# embedded in the graph and in label assignment (where they are then subject to missing_are_ref). If false, filtered
-# genotypes are embedded in the graph as is, but the corresponding examples are always unlabeled.
+# embedded in the graph (when building the graphs) and in label assignment. If false, filtered genotypes
+# are embedded in the graph as is, but the corresponding examples are always unlabeled.
 filtered_as_missing: false

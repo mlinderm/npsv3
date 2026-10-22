@@ -70,8 +70,8 @@ def main() -> int:
     parser.add_argument("--reference", default=None, help="Reference FASTA (default: autodetected test reference)")
     parser.add_argument("--iterations", type=int, default=None, help="Timed iterations (default: 100 for small, 2 for large)")
     parser.add_argument("--warmup", type=int, default=2, help="Untimed warmup iterations")
-    parser.add_argument("--max-haplotypes", type=int, default=None, help="Default: cfg.kmer.max_haplotypes")
-    parser.add_argument("--max-diplotypes", type=int, default=None, help="Default: cfg.kmer.max_diplotypes")
+    parser.add_argument("--max-haplotypes", type=int, default=None, help="Default: cfg.haplotype.max_haplotypes")
+    parser.add_argument("--max-diplotypes", type=int, default=None, help="Default: cfg.haplotype.max_diplotypes")
     parser.add_argument("--json", metavar="PATH", help="Write per-iteration timings and summary stats as JSON to PATH")
     parser.add_argument("--no-check-load", action="store_true", help="Skip the load-average warning")
     args = parser.parse_args()
@@ -91,7 +91,7 @@ def main() -> int:
             config_name="config",
             overrides=[
                 f"reference={reference}",
-                f"kmer.ref_kmer_counts_kmc_prefix={os.path.join(RESOURCES_DIR,'Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}')}",
+                f"graph.ref_kmer_counts_kmc_prefix={os.path.join(RESOURCES_DIR,'Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}')}",
             ],
         )
     finally:
@@ -105,8 +105,8 @@ def main() -> int:
             print(f"  - {reason}", file=sys.stderr)
         return 1
 
-    max_haplotypes = args.max_haplotypes or cfg.kmer.max_haplotypes
-    max_diplotypes = args.max_diplotypes or cfg.kmer.max_diplotypes
+    max_haplotypes = args.max_haplotypes or cfg.haplotype.max_haplotypes
+    max_diplotypes = args.max_diplotypes or cfg.haplotype.max_diplotypes
     iterations = args.iterations or (100 if args.region == "small" else 2)
 
     with tempfile.TemporaryDirectory() as tmp_dir:

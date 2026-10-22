@@ -15,7 +15,7 @@ cache_dir: null
 batch_size: 256            
 w_bucket: ${pileup.image_width}
 w_max: ${pileup.image_width}
-g_max: ${graph.max_diplotypes}
+g_max: ${haplotype.max_diplotypes}
 r_max: ${simulation.replicates}
 packing_buffer_size: 512
 shuffle_buffer_size: 4096
@@ -32,5 +32,11 @@ limit_test_batches: 32
 predict_split: train
 limit_predict_batches: null
 pad: true
+# Exclude training examples (the train split only) with a list of `npsv3.models.filters.ExampleFilter` configs, e.g.
+#   data.filters='[{_target_: npsv3.models.filters.LabelDiffersFilter}]'
+#   data.filters='[{_target_: npsv3.models.filters.CopositiveFilter, exclude: [suspect]}]'
+# LabelDiffersFilter needs the dataset's `comparisons` aux tree (`command=compare`); CopositiveFilter also needs a
+# `command=copositive` dataset. Both are checked before training starts. null -> no filtering.
+filters: null
 mean: [0.5]
 std: [0.5]

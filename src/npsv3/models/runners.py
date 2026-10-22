@@ -131,9 +131,9 @@ def train(cfg, output_dir=None, **kw_args):
     )
 
     # Energon train datasets repeat indefinitely so a virtual epoch length is mandatory. `data.limit_train_batches`
-    # is used if set, otherwise estimate one true pass from the dataset's metadata jsonl shards, scaled by the
-    # (best-effort) DDP world size so every rank gets the same count and none reaches the all-reduce an unequal number
-    # of times.
+    # is used if set, otherwise estimate one true pass from the dataset's metadata jsonl shards (excluding any
+    # filtered examples), scaled by the (best-effort) DDP world size so every rank gets the same count and none reaches
+    # the all-reduce an unequal number of times.
     limit_train_batches = OmegaConf.select(cfg, "data.limit_train_batches", default=None)
     if limit_train_batches is None:
         limit_train_batches = estimate_epoch_batches(
@@ -144,6 +144,7 @@ def train(cfg, output_dir=None, **kw_args):
             g_max=OmegaConf.select(cfg, "data.g_max", default=None),
             r_max=OmegaConf.select(cfg, "data.r_max", default=None),
             world_size=_resolve_world_size(cfg),
+            filters=getattr(dm, "train_filters", ()),
         )
 
     trainer = hydra.utils.instantiate(

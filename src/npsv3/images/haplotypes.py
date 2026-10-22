@@ -1,4 +1,4 @@
-"""Configurable strategies for generating the candidate haplotypes for an example (selected via `cfg.graph.haplotype_strategy`)"""
+"""Configurable strategies for generating the candidate haplotypes for an example (selected via `cfg.haplotype.strategy`)"""
 import abc
 import bisect
 import gzip
@@ -13,6 +13,7 @@ from npsv3.graphs.haplotype import (
     add_population_haplotypes,
     haplotype_alleles,
     prepare_genotyping_haplotypes,
+    resolve_genotype_alleles,
 )
 from npsv3.types import PathType
 from npsv3.util.range import Range
@@ -99,6 +100,57 @@ def haplotype_record(
     }
 
 
+def generate_haplotypes(
+    cfg,
+    graph: Graph,
+    sampler: HaplotypeSamplerOverlay,
+    region: Range,
+    sample: Sample,
+    sample_idx: int,
+    filtered_kmers: FilteredKmers,
+    analysis_variants: Sequence[Variant],
+    *,
+    strategy: "HaplotypeStrategy",
+    ploidy: int = 2,
+    exact_reference: bool = False,
+) -> dict:
+    """Generate an example's candidate haplotypes with `strategy` and return them as a `haplotype_record`.
+
+    The record's `true` entries are None if any analysis variant's genotype for the sample is missing or filtered (see
+    below), in which case the example is unlabeled. This is the only haplotype generation used by image generation,
+    whether run inline or ahead of time (`command=haplotypes`), so the two can't disagree.
+
+    Raises:
+        InsufficientHaplotypesError: If fewer than 2 haplotypes are generated
+    """
+    haplotypes, alleles, true_haplotype_idxs = strategy(
+        graph, sampler, region, sample, filtered_kmers, analysis_variants, ploidy=ploidy, exact_reference=exact_reference,
+    )
+    if len(haplotypes) < 2:  # noqa: PLR2004
+        msg = f"Fewer than 2 haplotypes for region {region} in {sample.name} (have {len(haplotypes)})"
+        raise InsufficientHaplotypesError(msg)
+    assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
+
+    # Graph construction embeds a sample's "true" haplotype path as reference nodes wherever a variant's genotype
+    # for that sample was missing, making a missing genotype indistinguishable from an explicit homozygous-REF call.
+    # Update the true_haplotype_idxs to None for any filtered or missing genotypes, unless cfg.haplotype.missing_are_ref
+    # is specified to translate fully missing genotypes to homozygous REF (relevant for merged high-quality assemblies
+    # where missing variants are assumed to be identical to the reference rather than "not genotyped"). Filtered
+    # genotypes are treated as fully missing if cfg.graph.filtered_as_missing (matching graph construction).
+    if analysis_variants and None not in true_haplotype_idxs and any(
+        resolve_genotype_alleles(
+            variant.genotype(sample_idx),
+            ploidy=ploidy,
+            missing_are_ref=cfg.haplotype.missing_are_ref,
+            filtered_as_missing=cfg.graph.filtered_as_missing,
+        ) is None
+        for variant in analysis_variants
+    ):
+        true_haplotype_idxs = [None] * ploidy
+
+    return haplotype_record(graph, region, sample.name, haplotypes, alleles, true_haplotype_idxs, ploidy=ploidy)
+
+
 def decode_haplotype_record(payload: bytes | bytearray | str | dict) -> dict:
     """Decode a `{key}.{HAPLOTYPES_SUFFIX}` member, whether raw (gzipped JSON) or already decompressed or decoded by the
     reader (energon's default decoder gunzips `.gz` members and may parse `.json`)"""
@@ -153,7 +205,7 @@ class SampledHaplotypeStrategy(HaplotypeStrategy):
         # unique to the graph and present in the sample)
         counts = as_kmer_classify(filtered_kmers, sample)
         sampler.initialize_scores(counts)
-        haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
+        haplotypes = sampler.sample_haplotypes(n=cfg.haplotype.max_haplotypes)
         assert len(haplotypes) > 0, f"No haplotypes sampled for region {region} in {sample.name}"
 
         # Prepare haplotypes for genotyping by ensuring the reference haplotype, and any "true" haplotypes, if present
@@ -162,7 +214,7 @@ class SampledHaplotypeStrategy(HaplotypeStrategy):
             graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy,
             exact_reference=exact_reference,
         )
-        if len(haplotypes) < 2 and cfg.graph.population_haplotype_topup:  # noqa: PLR2004
+        if len(haplotypes) < 2 and cfg.haplotype.population_haplotype_topup:  # noqa: PLR2004
             # Only attempt "top-up" from the population if the sampler did not produce any haplotype diversity (and if
             # explicitly requested).
             excluded_samples = { sample.name, *cfg.graph.population_excluded_samples }
@@ -174,7 +226,7 @@ class SampledHaplotypeStrategy(HaplotypeStrategy):
                 analysis_variants,
                 region.contig,
                 excluded_samples,
-                cfg.graph.max_haplotypes,
+                cfg.haplotype.max_haplotypes,
                 ploidy=ploidy,
             )
         return haplotypes, alleles, true_haplotype_idxs
@@ -186,7 +238,7 @@ class TrueHaplotypeStrategy(HaplotypeStrategy):
     The haplotypes always include the sample's true haplotypes (and thus the true genotype) and a haplotype with no
     analysis-variant (SV) ALT alleles (the "reference", at index 0). The remaining haplotypes are the highest
     k-mer-scoring combinations of analysis-variant alleles applied to the true haplotypes (i.e., the true haplotypes with
-    any SVs added, removed or swapped), up to `cfg.graph.max_haplotypes`. Thus all haplotypes differ from the true
+    any SVs added, removed or swapped), up to `cfg.haplotype.max_haplotypes`. Thus all haplotypes differ from the true
     haplotypes only by the SVs of interest.
 
     Regions where any of the sample's true haplotypes are not fully resolved raise InsufficientHaplotypesError.
@@ -214,7 +266,7 @@ class TrueHaplotypeStrategy(HaplotypeStrategy):
             analysis_variants,
             region.contig,
             sample.name,
-            max_haplotypes=self.cfg.graph.max_haplotypes,
+            max_haplotypes=self.cfg.haplotype.max_haplotypes,
             ploidy=ploidy,
             exact_reference=exact_reference,
         )

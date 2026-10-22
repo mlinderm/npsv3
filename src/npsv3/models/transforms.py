@@ -266,6 +266,8 @@ def copositive_transform(cfg, source: str, output_dir: str) -> str | None:
     OmegaConf.update(cfg, "data.val_metadataset_paths", None)
     OmegaConf.update(cfg, "data.test_metadataset_paths", None)
     OmegaConf.update(cfg, "data.predict_split", "train")
+    # Every example is annotated, so training filters (which check the source for the data they need) don't apply
+    OmegaConf.update(cfg, "data.filters", None, force_add=True)
 
     params = OmegaConf.to_container(cfg.copositive, resolve=True)
     callback = CopositiveTransformCallback(source, output_dir, **params)

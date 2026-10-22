@@ -709,7 +709,7 @@ def _diplotypes_in_topk_shard(
 ) -> list[dict]:
     """Sample diplotypes and compute genotype ranks for every region in the `split`-th of `num_splits` strided subsets of
     a single WebDataset shard."""
-    sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
+    sampler_params = hydra.utils.instantiate(cfg.haplotype.sampler_params)
     result_rows = []
     with VariantFileReader.open(vcf_path) as vcf_file:
         sample_idx = vcf_file.samples().index(sample_name)
@@ -743,8 +743,8 @@ def _diplotypes_in_topk_shard(
                 params=sampler_params,
             )
             sampler.initialize_scores(counts)
-            haplotypes = sampler.sample_haplotypes(n=cfg.graph.max_haplotypes)
-            diplotypes = sampler.sample_diplotypes(haplotypes, n=cfg.graph.max_diplotypes)
+            haplotypes = sampler.sample_haplotypes(n=cfg.haplotype.max_haplotypes)
+            diplotypes = sampler.sample_diplotypes(haplotypes, n=cfg.haplotype.max_diplotypes)
             assert len(haplotypes) > 0, f"No haplotypes sampled for region {region_string} in shard {shard_path}"
 
             # Translate haplotypes to sets of (variant_id, allele) pairs they are compatible with
@@ -757,7 +757,7 @@ def _diplotypes_in_topk_shard(
                 alleles = resolve_genotype_alleles(
                     genotype,
                     ploidy=ploidy,
-                    missing_are_ref=cfg.graph.missing_are_ref,
+                    missing_are_ref=cfg.haplotype.missing_are_ref,
                     filtered_as_missing=cfg.graph.filtered_as_missing,
                 )
                 if alleles is None:

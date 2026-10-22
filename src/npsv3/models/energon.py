@@ -15,7 +15,7 @@ import os
 import shutil
 import tarfile
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,7 +47,16 @@ from megatron.energon.flavors import BaseWebdatasetFactory, CrudeWebdataset
 from megatron.energon.flavors.webdataset.config import MAIN_FOLDER_NAME
 from torchvision.transforms import v2 as transforms
 
-from npsv3.constants import REAL_SUFFIX, SIMS_SUFFIX
+from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, REAL_SUFFIX, SIMS_SUFFIX
+from npsv3.images.sequence_compare import decode_comparison_record, load_comparison_records
+from npsv3.models.filters import (
+    ExampleFilter,
+    build_filters,
+    check_filter_requirements,
+    describe_filters,
+    keep_example,
+    requires_comparisons,
+)
 from npsv3.models.loaders import (
     LABEL_PADDING_VALUE,
     ImageGroup,
@@ -80,6 +89,14 @@ class GroupMeta(Sample):
     cost: int = 0
 
 
+def _sample_json(sample: dict) -> dict:
+    """The metadata row of a crude JSON sample"""
+    meta = sample["json"]
+    if isinstance(meta, (bytes, str)):
+        meta = json.loads(meta)
+    return meta
+
+
 @cooker(need_cache=True)
 @stateless
 def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> GroupMeta:
@@ -88,9 +105,7 @@ def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> Group
     Energon passes every aux tree as a keyword argument, so other aux trees (e.g. `graphs`) are accepted and ignored.
     Note `basic_sample_keys` is mandatory for restorability.
     """
-    meta = sample["json"]
-    if isinstance(meta, (bytes, str)):
-        meta = json.loads(meta)
+    meta = _sample_json(sample)
 
     # `sample["__key__"]` is the jsonl row number for the CrudeJsonlDatasetFactory meta_ds (only
     # `basic_sample_keys` needs it, for restorability) -- it is not the pixel-tar member key, which
@@ -161,8 +176,8 @@ def _fetch_array(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> np.ndarray:
 
 # The base `TaskEncoder`'s `T_encoded_sample` type parameter is `Any` here rather than a concrete type:
 # `select_samples_to_pack` uses it for a flat `GroupMeta` (pre-pack metadata), while `pack_selected_samples`/`batch`
-# use it for the materialized `PackedGroupBatch` (post-pack), and no single type can honor both -- packing genuinely
-# changes representation, which `TaskEncoder`'s generic contract does not have a slot for.
+# use it for the materialized `PackedGroupBatch` (post-pack), and no single type can honor both (packing genuinely
+# changes representation, which `TaskEncoder`'s generic contract does not have a slot for).
 class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatch]):
     """Pack one or more whole regions into fixed-budget `PackedBatch`es.
 
@@ -182,6 +197,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         r_max: int | None = None,
         pad: bool = True,
         padding_value: int = LABEL_PADDING_VALUE,
+        filters: Sequence[ExampleFilter] = (),
     ):
         """
         Args:
@@ -194,6 +210,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             padding_value: Label value for padding rows. Groups without a resolvable truth genotype are
                 rejected outright (`_group_accepted`) rather than packed with this value, since the
                 metric-learning loss has no positive to score them against.
+            filters: Exclude groups that any of these filters reject (see `npsv3.models.filters`).
         """
         super().__init__()
         self.budget = budget
@@ -203,6 +220,27 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         self.r_max = r_max
         self.pad = pad
         self.padding_value = padding_value
+        self.filters = tuple(filters)
+        self._needs_comparisons = requires_comparisons(self.filters)
+
+    @stateless
+    def cook_crude_sample(self, sample: dict, cooker: Cooker, aux: dict[str, FileStore]) -> GroupMeta:
+        """Apply the filters before cooking, i.e., before any pixel prefetches are scheduled"""
+        if self.filters:
+            row = _sample_json(sample)
+            comparison = None
+            if self._needs_comparisons:
+                store = aux.get(COMPARISONS_AUX)
+                if store is None:
+                    msg = f"Filters {describe_filters(self.filters)} need the {COMPARISONS_AUX!r} aux tree, which this dataset doesn't reference"
+                    raise ValueError(msg)
+                try:
+                    comparison = decode_comparison_record(store[f"{row['key']}.{COMPARISON_SUFFIX}"][0])
+                except KeyError:
+                    comparison = None  # E.g., an unlabeled example (rejected anyway)
+            if not keep_example(self.filters, row, comparison):
+                raise SkipSample
+        return super().cook_crude_sample(sample, cooker, aux)
 
     def _cost(self, sample: GroupMeta) -> int:
         return _group_cost(sample.r, sample.g, sample.w, self.w_bucket)
@@ -420,6 +458,20 @@ def available_splits(metadataset_path: str) -> set[str]:
         return set(yaml.safe_load(metadataset_file)["splits"].keys())
 
 
+def _split_leaves(dataset_yaml_path: str | Path, split_part: str | None = None) -> list[tuple[Path, dict[str, str]]]:
+    """Return (metadata JSONL path, aux name -> path) for each leaf of one split of an Energon `dataset_yaml_path` file
+    (see `_read_split`), with paths resolved against its directory. The split is a single leaf or a blend of them."""
+    root, split = _read_split(dataset_yaml_path, split_part)
+    nodes = list(split["blend"]) if "blend" in split else [split]
+    leaves = []
+    for node in nodes:
+        if not str(node.get("path", "")).endswith(".jsonl"):
+            msg = f"Can't resolve the metadata of {node} in {dataset_yaml_path}; expected a `prepare_energon_dataset`-style leaf"
+            raise ValueError(msg)
+        leaves.append((root / node["path"], {name: str(root / path) for name, path in node.get("aux", {}).items()}))
+    return leaves
+
+
 def _leaf_dataset_reference(dataset_yaml_path: str | Path) -> dict:
     """Read one `prepare_energon_dataset` tree's split and resolve its `path`/`aux` to absolute paths,
     so it can be embedded as a leaf inside another, synthesized metadataset (see `_build_metadataset`).
@@ -468,6 +520,7 @@ def estimate_epoch_batches(
     r_max: int | None = None,
     world_size: int = 1,
     occupancy: float = 0.9,
+    filters: Sequence[ExampleFilter] = (),
 ) -> int:
     """Estimate the number of packed batches in one pass over one or more `prepare_energon_dataset` trees.
 
@@ -503,24 +556,37 @@ def estimate_epoch_batches(
             whole split, single-process).
         occupancy: Expected fraction of each pack's budget that packing actually fills. Defaults to
             0.9, a conservative reading of `test_occupancy`'s >0.90 sanity threshold.
+        filters: Exclude the groups these filters reject, as `PackedGroupTaskEncoder` would (see
+            `npsv3.models.filters`). Comparison records, if needed, are read in bulk from each tree's
+            `comparisons` aux tree.
 
     Returns:
         A batch count of at least 1.
     """
     paths = [metadataset_paths] if isinstance(metadataset_paths, str) else list(metadataset_paths)
 
-    total_cost = 0
+    filters = tuple(filters)
+    total_cost = excluded = 0
     for metadataset_path in paths:
-        root, split = _read_split(metadataset_path, split_part)
-        with (root / split["path"]).open() as jsonl_file:
-            for line in jsonl_file:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
-                label = row.get("label")
-                if _group_accepted(r, g, w, label=label, g_max=g_max, r_max=r_max, w_max=w_max):
+        for meta_path, aux in _split_leaves(metadataset_path, split_part):
+            check_filter_requirements([(meta_path, aux)], filters)
+            comparisons = load_comparison_records(aux[COMPARISONS_AUX]) if requires_comparisons(filters) else {}
+            with meta_path.open() as jsonl_file:
+                for line in jsonl_file:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
+                    label = row.get("label")
+                    if not _group_accepted(r, g, w, label=label, g_max=g_max, r_max=r_max, w_max=w_max):
+                        continue
+                    if filters and not keep_example(filters, row, comparisons.get(row["key"])):
+                        excluded += 1
+                        continue
                     total_cost += _group_cost(r, g, w, w_bucket)
+
+    if filters:
+        logging.info("Filters %s exclude %d otherwise accepted groups", describe_filters(filters), excluded)
 
     packs = total_cost / (budget * occupancy) / world_size
     logging.info(f"Estimated {packs:.1f} packs given {total_cost} images, a batch size of {budget}, a world size of {world_size}, and an estimated occupancy of {occupancy}")
@@ -604,6 +670,10 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             pass over the train split, e.g. in tests that need the dataloader to exhaust.
         verbose (bool, optional): Let energon's own per-worker shard-slice summary print to stdout
             (see `_quiet_energon`). Defaults to False.
+        filters (Sequence[ExampleFilter | Mapping] | None, optional): Exclude training examples any of
+            these filters reject (filter objects or Hydra `_target_` configs, see `npsv3.models.filters`).
+            Only the train split is filtered. The train datasets are checked for the data the filters
+            need (e.g. a `comparisons` aux tree) up front. Defaults to None (no filtering).
     """
 
     def __init__(
@@ -635,10 +705,13 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         seed_offset: int = 0,
         repeat: bool = True,
         verbose: bool = False,
+        filters: Sequence[ExampleFilter | Mapping] | None = None,
         **_kwargs,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        # Filters are objects (once instantiated by Hydra), which don't belong in checkpointed hyperparameters
+        self.save_hyperparameters(ignore=["filters"])
+        self.train_filters = build_filters(filters)
 
         # `get_train_dataset`/`get_val_dataset` accept either a path or a dict, even though their type stubs only
         # declare `str | EPath | Path` requiring `# type: ignore`s below.
@@ -665,6 +738,15 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 "test": test_metadataset_paths,
             })
 
+        if self.train_filters:
+            if metadataset_path is not None:
+                leaves = _split_leaves(metadataset_path, "train")
+            else:
+                paths = [train_metadataset_paths] if isinstance(train_metadataset_paths, str) else train_metadataset_paths
+                leaves = [leaf for path in paths for leaf in _split_leaves(path)]
+            check_filter_requirements(leaves, self.train_filters)
+            logging.info("Filtering training examples with %s", describe_filters(self.train_filters))
+
         # Normalization moves to the GPU (`on_after_batch_transfer`) to reduce the size of the data transferred (uint8 vs float32).
         self.transforms = transforms.Compose(
             [
@@ -676,7 +758,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         self._loader = None
         self._cache_pool = None
 
-    def _task_encoder(self) -> PackedGroupTaskEncoder:
+    def _task_encoder(self, filters: Sequence[ExampleFilter] = ()) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
             budget=self.hparams["batch_size"],
             w_bucket=self.hparams["w_bucket"],
@@ -684,6 +766,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             g_max=self.hparams["g_max"],
             r_max=self.hparams["r_max"],
             pad=self.hparams["pad"],
+            filters=filters,
         )
 
     def _worker_config(self) -> WorkerConfig:
@@ -731,7 +814,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 packing_buffer_size=self.hparams["packing_buffer_size"],
                 shuffle_buffer_size=self.hparams["shuffle_buffer_size"],
                 max_samples_per_sequence=self.hparams["max_samples_per_sequence"],
-                task_encoder=self._task_encoder(),
+                task_encoder=self._task_encoder(self.train_filters),
                 repeat=self.hparams["repeat"],
             )
         self._loader = get_savable_loader(dataset, cache_pool=self._make_cache_pool())

@@ -1,4 +1,6 @@
+import collections
 import contextlib
+import dataclasses
 import gzip
 import itertools
 import json
@@ -7,7 +9,7 @@ import os
 import pathlib
 import tempfile
 import typing
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import hydra
 import numpy as np
@@ -26,7 +28,6 @@ from npsv3.graphs.haplotype import (
     UniqueKmersOverlay,
     _filter_variants,
     build_kmer_evidence_index,
-    resolve_genotype_alleles,
     serialize_graph_and_unique_kmers,
 )
 from npsv3.graphs.sharding import (
@@ -42,12 +43,20 @@ from npsv3.graphs.sharding import (
 )
 from npsv3.images.sequence_compare import ComparisonOptions, make_comparison_writer, prepare_comparison_tree
 from npsv3.images.generator import ImageGenerator
+from npsv3.images.haplotype_tree import (
+    FILTERED_KMERS,
+    HaplotypeTree,
+    HaplotypeTreeWriter,
+    haplotype_options,
+    prepare_haplotype_tree,
+    source_digest,
+)
 from npsv3.images.haplotypes import (
     FilteredKmers,
     HaplotypeStrategy,
     InsufficientHaplotypesError,
     as_kmer_classify,
-    haplotype_record,
+    generate_haplotypes,
 )
 from npsv3.pileup import close_alignment_file_cache, evict_alignment_file
 from npsv3.realigner import FragmentRealigner
@@ -110,7 +119,7 @@ def make_graph_example(
     sample_idx: int,
     sample: Sample,
     read_path: PathType,
-    filtered_kmers: FilteredKmers,
+    filtered_kmers: FilteredKmers | None,
     analysis_variants: Sequence[Variant],
     generator: ImageGenerator | None = None,
     haplotype_strategy: HaplotypeStrategy | None = None,
@@ -118,45 +127,32 @@ def make_graph_example(
     ploidy: int = 2,
     exact_reference: bool = False,
     agreement_sink=None,
+    haplotypes: dict | None = None,
     **kwargs,
 ):
+    """Generate the example for `region`. Its candidate haplotypes are the precomputed `haplotypes` record (see
+    `images.haplotype_tree`), if provided, otherwise they are generated with `haplotype_strategy` (from `filtered_kmers`)."""
     with contextlib.ExitStack() as stack:
         tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
         example: dict = { "region": str(region) }
 
         # Generate the haplotypes to genotype with the configured strategy (the reference haplotype is at index 0)
-        haplotype_strategy = haplotype_strategy or hydra.utils.instantiate(cfg.graph.haplotype_strategy, cfg=cfg, _recursive_=False)
-        haplotypes, alleles, true_haplotype_idxs = haplotype_strategy(
-            graph, sampler, region, sample, filtered_kmers, analysis_variants, ploidy=ploidy,
-            exact_reference=exact_reference,
-        )
-        if len(haplotypes) < 2:  # noqa: PLR2004
-            msg = f"Fewer than 2 haplotypes for region {region} in {sample.name} (have {len(haplotypes)})"
-            raise InsufficientHaplotypesError(msg)
+        if haplotypes is None:
+            assert filtered_kmers is not None, "Filtered k-mers are required to generate haplotypes"
+            haplotype_strategy = haplotype_strategy or hydra.utils.instantiate(cfg.haplotype.strategy, cfg=cfg, _recursive_=False)
+            haplotypes = generate_haplotypes(
+                cfg, graph, sampler, region, sample, sample_idx, filtered_kmers, analysis_variants,
+                strategy=haplotype_strategy, ploidy=ploidy, exact_reference=exact_reference,
+            )
+        paths = haplotypes["paths"]
+        true_haplotype_idxs = haplotypes["true"]
         assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
         # Allow for all possible genotypes, or TODO: apply sampling here to reduce the potential number considered
-        possible_genotypes = list(itertools.combinations_with_replacement(range(len(haplotypes)), ploidy))
+        possible_genotypes = list(itertools.combinations_with_replacement(range(len(paths)), ploidy))
         # Recorded even if no label is defined or no simulated images are generated below, since packing cost
         # and downstream consumers may want the genotype count independent of `label`/`sim.images`.
         example["num_genotypes"] = len(possible_genotypes)
-
-        # Graph construction embeds a sample's "true" haplotype path as reference nodes wherever a variant's genotype
-        # for that sample was missing, making a missing genotype indistinguishable from an explicit homozygous-REF call.
-        # Update the true_haplotype_idxs to None for any filtered or missing genotypes, unless cfg.graph.missing_are_ref
-        # is specified to translate fully missing genotypes to homozygous REF (relevant for merged high-quality assemblies
-        # where missing vairants are assumed to be identical to the reference rather than "not genotyped"). Filtered
-        # genotypes are treated as fully missing if cfg.graph.filtered_as_missing (matching graph construction).
-        if analysis_variants and None not in true_haplotype_idxs and any(
-            resolve_genotype_alleles(
-                variant.genotype(sample_idx),
-                ploidy=ploidy,
-                missing_are_ref=cfg.graph.missing_are_ref,
-                filtered_as_missing=cfg.graph.filtered_as_missing,
-            ) is None
-            for variant in analysis_variants
-        ):
-            true_haplotype_idxs = [None] * ploidy
 
         # Generate labels if the true haplotype combination is fully defined (i.e., no missing alleles)
         if None not in true_haplotype_idxs:
@@ -179,9 +175,7 @@ def make_graph_example(
             example["label.rank"] = ranked_positives
 
         # Link genotype indices back to the graph, e.g., to compare candidates with the sample's assembled paths
-        example["haplotypes"] = haplotype_record(
-            graph, region, sample.name, haplotypes, alleles, true_haplotype_idxs, ploidy=ploidy
-        )
+        example["haplotypes"] = haplotypes
 
         # The graph (and thus each haplotype's sequence) does not extend beyond `region`, but realignment and simulation need
         # sequences comfortably longer than the fragment/insert size. Pad with reference sequence out to `realigner_flank`.
@@ -197,8 +191,8 @@ def make_graph_example(
         # simulation fasta below.
         realign_fasta_path = os.path.join(tmp_dir, "realign.fasta")
         with open(realign_fasta_path, "w") as fasta:
-            for i, haplotype in enumerate(haplotypes):
-                sequence = graph.path_sequence(haplotype)
+            for i, path in enumerate(paths):
+                sequence = graph.path_sequence(path)
                 assert sequence.isupper(), f"Sequence for haplotype {i} is not upper case in region {region}"
                 fasta.write(f">seq-{i}\n")
                 fasta.write(left_flank)
@@ -208,12 +202,12 @@ def make_graph_example(
 
         realigner = None
         if cfg.pileup.allele_evidence in ("bwa", "both"):
-            addl_args = { "num_alts": len(haplotypes) - 1 }  # This is needed to prevent C++ errors
+            addl_args = { "num_alts": len(paths) - 1 }  # This is needed to prevent C++ errors
             realigner = FragmentRealigner(realign_fasta_path, sample.mean_insert_size, sample.std_insert_size, **addl_args)
 
         kmer_index = None
         if cfg.pileup.allele_evidence in ("kmer", "both"):
-            kmer_index = build_kmer_evidence_index(cfg, graph, sampler, unique_kmers, haplotypes, left_flank, right_flank)
+            kmer_index = build_kmer_evidence_index(cfg, graph, sampler, unique_kmers, paths, left_flank, right_flank)
 
         # Shared across the real image and every simulated-genotype image below: the same haplotype/ploidy-copy
         # split BAM is reused, unmodified, across every genotype combination that includes that haplotype, so
@@ -245,7 +239,7 @@ def make_graph_example(
                 agreement_sink.region_label = str(region)
                 agreement_sink.image_index = 0
                 agreement_sink.analysis_variants = analysis_variants
-                agreement_sink.num_alleles = len(haplotypes)
+                agreement_sink.num_alleles = len(paths)
                 image_tensor, raw_image = generator.generate(
                     local_read_path,
                     sample,
@@ -485,95 +479,77 @@ def make_example_writer(cfg, index: int, output_dir: str) -> EnergonExampleWrite
     return EnergonExampleWriter(index, output_dir, maxcount=maxcount, maxsize=maxsize)
 
 
-class ExampleActor:
-    def __init__(self, index: int, output_dir: str, cfg):
-        self.cfg = cfg
+@dataclasses.dataclass
+class GraphRegion:
+    """A region's graph, and the objects derived from it, read from a graph shard record"""
 
-        # If NPSV3_REALIGN_PROFILE profiling is requested, give this actor's process its own aux log file
-        # alongside its webdataset shard, rather than every actor in the pool interleaving REALIGN_PROFILE
-        # lines onto a shared stderr. Native code (realigner.cpp) picks this up via getenv on first use, so
-        # it must be set before any realignment happens in this process -- true here since __init__ always
-        # runs before from_shard/from_graph. No-op (and no file created) unless profiling is enabled.
-        if os.environ.get("NPSV3_REALIGN_PROFILE"):
-            os.environ["NPSV3_REALIGN_PROFILE_PATH"] = os.path.join(output_dir, f"images-{index:04d}.realign_profile.log")
+    graph_key: str
+    region: Range
+    sample_idx: int
+    analysis_variants: list[Variant]
+    graph: Graph
+    unique_kmers: UniqueKmersOverlay
+    sampler: HaplotypeSamplerOverlay
+    graph_digest: str
+    source_digest: str
+    """Digest of all the graph members the region's haplotypes depend on (see `images.haplotype_tree.source_digest`)"""
 
-        self._writer = make_example_writer(cfg, index, output_dir)
-        # Compare each example's genotypes with its label for the optional `comparisons` aux tree (if `compare.enabled`)
-        self._comparisons = make_comparison_writer(cfg, index, output_dir)
 
-    def close(self):
-        # `__ray_shutdown__` would eventually close the writer on actor termination, but that runs
-        # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
-        # remote method before using the webdataset files.
-        self._writer.close()
-        if self._comparisons is not None:
-            self._comparisons.close()
-        close_alignment_file_cache()
+class RegionActor:
+    """Base for actors that process every region in (strided splits of) graph shards for a sample"""
 
-@ray.remote
-class GraphWriter(ExampleActor):
     def __init__(
         self,
-        index: int,
-        output_dir: str,
         cfg,
         vcf_path: str,
-        read_path: PathType,
         sample: Sample,
-        filtered_kmer_path: str,
+        filtered_kmer_path: str | None,
         *,
         ploidy: int = 2,
         min_variant_size: int = 50,
         exact_reference: bool = False,
     ):
-        super().__init__(index, output_dir, cfg)
+        self.cfg = cfg
         self.vcf_path = vcf_path
-        self.read_path = read_path
         self.sample = sample
-        # Open the filtered k-mer database once per actor (instead of per region) so the random-access prefix LUT is
-        # loaded once and reused for every region the actor processes.
-        self.filtered_kmers = as_kmer_classify(filtered_kmer_path, sample)
         self.ploidy = ploidy
         self.min_variant_size = min_variant_size
         self.exact_reference = exact_reference
-        self.generator = hydra.utils.instantiate(cfg.pileup.generator, cfg=cfg, _recursive_=False)
-        self.haplotype_strategy = hydra.utils.instantiate(cfg.graph.haplotype_strategy, cfg=cfg, _recursive_=False)
-        self.sampler_params = hydra.utils.instantiate(cfg.graph.haplotype_sampler_params)
+        self.haplotype_strategy = hydra.utils.instantiate(cfg.haplotype.strategy, cfg=cfg, _recursive_=False)
+        self.sampler_params = hydra.utils.instantiate(cfg.haplotype.sampler_params)
+        self._filtered_kmer_path = filtered_kmer_path
+        self._filtered_kmers = None
 
-    def from_graph(
-        self,
-        region: Range,
-        graph: Graph,
-        sampler: HaplotypeSamplerOverlay,
-        unique_kmers: UniqueKmersOverlay,
-        analysis_variants: Sequence[Variant],
-        sample_idx: int,
-    ) -> dict:
-        return make_graph_example(
+    @property
+    def filtered_kmers(self):
+        """The filtered k-mer database, opened once per actor (instead of per region) so the random-access prefix LUT is
+        loaded once and reused for every region the actor processes, and only when first needed"""
+        if self._filtered_kmers is None:
+            assert self._filtered_kmer_path is not None, "Filtered k-mers are required to generate haplotypes"
+            self._filtered_kmers = as_kmer_classify(self._filtered_kmer_path, self.sample)
+        return self._filtered_kmers
+
+    def generate_haplotypes(self, item: GraphRegion) -> dict:
+        return generate_haplotypes(
             self.cfg,
-            graph,
-            sampler,
-            unique_kmers,
-            region,
-            sample_idx,
+            item.graph,
+            item.sampler,
+            item.region,
             self.sample,
-            self.read_path,
+            item.sample_idx,
             self.filtered_kmers,
-            analysis_variants,
-            generator=self.generator,
-            haplotype_strategy=self.haplotype_strategy,
+            item.analysis_variants,
+            strategy=self.haplotype_strategy,
             ploidy=self.ploidy,
             exact_reference=self.exact_reference,
         )
 
-    def from_shard(self, shard_path: PathType, split: int = 0, num_splits: int = 1) -> int:
-        """Generate examples for the `split`-th of `num_splits` strided subsets of the regions in `shard_path`"""
-        num_regions = 0
+    def iter_regions(self, shard_path: PathType, split: int = 0, num_splits: int = 1) -> Iterator[GraphRegion]:
+        """Yield the `split`-th of `num_splits` strided subsets of the regions in `shard_path`"""
         with VariantFileReader.open(self.vcf_path) as vcf_file:
             sample_idx = vcf_file.samples().index(self.sample.name)
             for record in iter_graph_records(shard_path, split, num_splits):
-                region_string = record[REGION_MEMBER].decode()
-                region = Range(region_string)
+                region = Range(record[REGION_MEMBER].decode())
                 analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
 
                 members = decode_graph_record(record)
@@ -597,30 +573,298 @@ class GraphWriter(ExampleActor):
                     prior=prior_overlay,
                     params=self.sampler_params,
                 )
+                yield GraphRegion(
+                    graph_key=record["__key__"],
+                    region=region,
+                    sample_idx=sample_idx,
+                    analysis_variants=analysis_variants,
+                    graph=graph,
+                    unique_kmers=unique_kmers,
+                    sampler=sampler,
+                    graph_digest=graph_digest(members[GRAPH_MEMBER]),
+                    source_digest=source_digest(members),
+                )
 
-                try:
-                    # Attempt to gracefully timeout long running regions.
-                    with Timeout(self.cfg.timeout):
-                        example = self.from_graph(region, graph, sampler, unique_kmers, analysis_variants, sample_idx)
-                except TimeoutError:
-                    logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
-                    continue
-                except InsufficientHaplotypesError as e:
-                    logging.warning("Skipping region %s for sample %s due to too few haplotypes sampled: %s", region, self.sample.name, e)
-                    continue
-                except Exception as e:
-                    e.add_note(
-                        f"Error generating images for region {region_string} for sample {self.sample.name} from shard {shard_path}"
+
+@ray.remote
+class GraphWriter(RegionActor):
+    """Generate each region's example (images), using its precomputed haplotypes (and comparison) from `haplotypes_dir`, if
+    available, or otherwise generating them inline"""
+
+    def __init__(
+        self,
+        index: int,
+        output_dir: str,
+        cfg,
+        vcf_path: str,
+        read_path: PathType,
+        sample: Sample,
+        filtered_kmer_path: str | None,
+        *,
+        ploidy: int = 2,
+        min_variant_size: int = 50,
+        exact_reference: bool = False,
+        haplotypes_dir: str | None = None,
+        reuse_comparisons: bool = False,
+    ):
+        super().__init__(
+            cfg, vcf_path, sample, filtered_kmer_path,
+            ploidy=ploidy, min_variant_size=min_variant_size, exact_reference=exact_reference,
+        )
+
+        # If NPSV3_REALIGN_PROFILE profiling is requested, give this actor's process its own aux log file
+        # alongside its webdataset shard, rather than every actor in the pool interleaving REALIGN_PROFILE
+        # lines onto a shared stderr. Native code (realigner.cpp) picks this up via getenv on first use, so
+        # it must be set before any realignment happens in this process -- true here since __init__ always
+        # runs before from_shard/from_graph. No-op (and no file created) unless profiling is enabled.
+        if os.environ.get("NPSV3_REALIGN_PROFILE"):
+            os.environ["NPSV3_REALIGN_PROFILE_PATH"] = os.path.join(output_dir, f"images-{index:04d}.realign_profile.log")
+
+        self._writer = make_example_writer(cfg, index, output_dir)
+        # Compare each example's genotypes with its label for the optional `comparisons` aux tree (if `compare.enabled`)
+        self._comparisons = make_comparison_writer(cfg, index, output_dir)
+
+        self.read_path = read_path
+        self.generator = hydra.utils.instantiate(cfg.pileup.generator, cfg=cfg, _recursive_=False)
+        # Precomputed haplotypes (already checked against the current settings by `vcf_to_graph_examples`)
+        self._haplotypes = HaplotypeTree(haplotypes_dir) if haplotypes_dir is not None else None
+        self._reuse_comparisons = reuse_comparisons
+        self._counts: collections.Counter[str] = collections.Counter()
+
+    def from_graph(
+        self,
+        region: Range,
+        graph: Graph,
+        sampler: HaplotypeSamplerOverlay,
+        unique_kmers: UniqueKmersOverlay,
+        analysis_variants: Sequence[Variant],
+        sample_idx: int,
+        haplotypes: dict | None = None,
+    ) -> dict:
+        return make_graph_example(
+            self.cfg,
+            graph,
+            sampler,
+            unique_kmers,
+            region,
+            sample_idx,
+            self.sample,
+            self.read_path,
+            self.filtered_kmers if haplotypes is None else None,
+            analysis_variants,
+            generator=self.generator,
+            haplotype_strategy=self.haplotype_strategy,
+            ploidy=self.ploidy,
+            exact_reference=self.exact_reference,
+            haplotypes=haplotypes,
+        )
+
+    def from_shard(self, shard_path: PathType, split: int = 0, num_splits: int = 1) -> int:
+        """Generate examples for the `split`-th of `num_splits` strided subsets of the regions in `shard_path`"""
+        num_regions = 0
+        for item in self.iter_regions(shard_path, split, num_splits):
+            region = item.region
+            key = energon_key(self.sample.name, region)
+
+            haplotypes = self._haplotypes.lookup(key, item.source_digest) if self._haplotypes is not None else None
+            if haplotypes is not None and (reason := haplotypes.get("skipped")) is not None:
+                logging.warning("Skipping region %s for sample %s as for its precomputed haplotypes: %s", region, self.sample.name, reason)
+                self._counts["skipped"] += 1
+                continue
+            precomputed = haplotypes is not None
+
+            try:
+                # Attempt to gracefully timeout long running regions.
+                with Timeout(self.cfg.timeout):
+                    example = self.from_graph(
+                        region, item.graph, item.sampler, item.unique_kmers, item.analysis_variants, item.sample_idx,
+                        haplotypes=haplotypes,
                     )
-                    raise
+            except TimeoutError:
+                logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
+                continue
+            except InsufficientHaplotypesError as e:
+                logging.warning("Skipping region %s for sample %s due to too few haplotypes sampled: %s", region, self.sample.name, e)
+                continue
+            except Exception as e:
+                e.add_note(f"Error generating images for region {region} for sample {self.sample.name} from shard {shard_path}")
+                raise
+            self._counts["precomputed" if precomputed else "generated"] += 1
 
-                example["graph_key"] = record["__key__"]
-                example["graph_digest"] = graph_digest(members[GRAPH_MEMBER])
-                self._writer.write(example, region=region, sample_name=self.sample.name)
-                if self._comparisons is not None and (haplotypes := example.get("haplotypes")) is not None:
-                    self._comparisons.write(energon_key(self.sample.name, region), haplotypes)
-                num_regions += 1
+            example["graph_key"] = item.graph_key
+            example["graph_digest"] = item.graph_digest
+            self._writer.write(example, region=region, sample_name=self.sample.name)
+            if self._comparisons is not None:
+                # Precomputed comparisons are only valid for the precomputed haplotypes they were made from
+                if precomputed and self._reuse_comparisons and (payload := self._haplotypes.comparison(key)) is not None:  # type: ignore[union-attr]
+                    self._comparisons.write_member(key, payload)
+                else:
+                    self._comparisons.write(key, example["haplotypes"])
+            num_regions += 1
         return num_regions
+
+    def counts(self) -> dict[str, int]:
+        """The number of regions whose haplotypes were "precomputed", "generated" inline or "skipped" as precomputed"""
+        return dict(self._counts)
+
+    def close(self):
+        # `__ray_shutdown__` would eventually close the writer on actor termination, but that runs
+        # asynchronously at some point in the future. To ensure files are closed, invoke and wait on this
+        # remote method before using the webdataset files.
+        self._writer.close()
+        if self._comparisons is not None:
+            self._comparisons.close()
+        close_alignment_file_cache()
+
+
+@ray.remote
+class HaplotypeWriter(RegionActor):
+    """Generate each region's haplotypes (and comparison) ahead of image generation (see `images.haplotype_tree`)"""
+
+    def __init__(
+        self,
+        index: int,
+        output_dir: str,
+        cfg,
+        vcf_path: str,
+        sample: Sample,
+        filtered_kmer_path: str,
+        *,
+        ploidy: int = 2,
+        min_variant_size: int = 50,
+        exact_reference: bool = False,
+    ):
+        super().__init__(
+            cfg, vcf_path, sample, filtered_kmer_path,
+            ploidy=ploidy, min_variant_size=min_variant_size, exact_reference=exact_reference,
+        )
+        self._writer = HaplotypeTreeWriter(index, output_dir)
+        self._comparisons = make_comparison_writer(cfg, index, output_dir)
+
+    def from_shard(self, shard_path: PathType, split: int = 0, num_splits: int = 1) -> int:
+        """Generate haplotypes for the `split`-th of `num_splits` strided subsets of the regions in `shard_path`"""
+        num_regions = 0
+        for item in self.iter_regions(shard_path, split, num_splits):
+            region = item.region
+            key = energon_key(self.sample.name, region)
+            try:
+                with Timeout(self.cfg.timeout):
+                    haplotypes = self.generate_haplotypes(item)
+            except TimeoutError:
+                # Without a record, image generation will attempt the region again
+                logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
+                continue
+            except InsufficientHaplotypesError as e:
+                logging.warning("Skipping region %s for sample %s due to too few haplotypes sampled: %s", region, self.sample.name, e)
+                self._writer.write_skipped(key, str(e), digest=item.source_digest)
+                num_regions += 1
+                continue
+            except Exception as e:
+                e.add_note(f"Error generating haplotypes for region {region} for sample {self.sample.name} from shard {shard_path}")
+                raise
+
+            self._writer.write(key, haplotypes, digest=item.source_digest)
+            if self._comparisons is not None:
+                self._comparisons.write(key, haplotypes)
+            num_regions += 1
+        return num_regions
+
+    def close(self):
+        self._writer.close()
+        if self._comparisons is not None:
+            self._comparisons.close()
+
+
+def _init_ray(cfg, stack: contextlib.ExitStack) -> str:
+    """Initialize ray (if not already) for the duration of `stack`, returning a private temporary directory"""
+    # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
+    # to avoid conflicts between clusters running on the same node. We seem to observe race condition on Ray cleanup of temporary
+    # directories, so we ignore cleanup errors here.
+    tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+    if not ray.is_initialized():
+        ray.init(
+            num_cpus=cfg.threads,
+            num_gpus=0,
+            _temp_dir=tmp_dir,
+            include_dashboard=False,
+            runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore
+        )
+        stack.callback(ray.shutdown)
+    return tmp_dir
+
+
+def _prepare_graphs_and_kmers(
+    cfg,
+    sample: Sample,
+    vcf_path: str,
+    output_dir: str,
+    tmp_dir: str,
+    *,
+    graph_shards: Sequence[PathType] | None,
+    unique_kmer_path: PathType | None,
+    filtered_kmer_path: PathType | None,
+    region: Range | None,
+    min_variant_size: int,
+    progress_bar: bool,
+    filtered_kmer_dir: str,
+    require_filtered_kmers: bool = True,
+) -> tuple[Sequence[PathType], str | None, int | None, str | None]:
+    """Create and serialize graphs (if not provided), kept in `output_dir`'s `graphs_ds`, and the sample's filtered k-mers
+    (if not provided), written to `filtered_kmer_dir`.
+
+    Returns:
+        Graph shards, filtered k-mer path (None if not available and not `require_filtered_kmers`), the number of regions
+        (if known) and the prepared graph tree containing the shards (if any)
+    """
+    if graph_shards is None:
+        graphs_output = os.path.join(output_dir, "graphs_ds")
+        os.makedirs(graphs_output, exist_ok=True)
+        graph_shards, unique_kmer_path, region_count = serialize_graph_and_unique_kmers(
+            cfg,
+            vcf_path,
+            ref_kmer_counts_path=cfg.graph.ref_kmer_counts_kmc_prefix,
+            output_dir=graphs_output,
+            unique_kmer_dir=tmp_dir,
+            min_variant_size=min_variant_size,
+            pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
+            progress_bar=progress_bar,
+            region=region,
+        )
+    else:
+        logging.info("Using %d pre-generated graph shards", len(graph_shards))
+        region_count = None
+    graphs_dir = graph_aux_directory(graph_shards) if graph_shards else None
+
+    if filtered_kmer_path is None:
+        if require_filtered_kmers or (unique_kmer_path is not None and sample.kmc_prefix is not None):
+            assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered kmer path is not provided"
+            assert sample.kmc_prefix is not None, "Sample must have a KMC database when filtered_kmer_path is not provided"
+
+            filtered_kmer_path = os.path.join(filtered_kmer_dir, FILTERED_KMERS)
+            kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
+        else:
+            logging.warning("No filtered k-mers are available, so only regions with precomputed haplotypes can be generated")
+
+    if filtered_kmer_path is not None:
+        actual_filtered_kmer_size = _kmc_db_kmer_size(filtered_kmer_path)
+        assert actual_filtered_kmer_size is not None, f"Filtered k-mer database {filtered_kmer_path} does not exist or could not be read"
+        assert actual_filtered_kmer_size == cfg.graph.kmer_size, f"Filtered k-mer database {filtered_kmer_path} has unexpected k"
+
+    return graph_shards, None if filtered_kmer_path is None else str(filtered_kmer_path), region_count, graphs_dir
+
+
+def _process_shards(actors: list, tasks: list, *, total: int | None, progress_bar: bool) -> None:
+    """Process each `(shard, split, num_splits)` task with the next available actor's `from_shard`, then close (and wait
+    for) each actor's writers so their files can be used"""
+    pool = ray.util.ActorPool(actors)
+    gen = pool.map_unordered(lambda actor, task: actor.from_shard.remote(*task), tasks) # type: ignore
+    with tqdm(disable=not progress_bar, total=total) as progress:
+        for num_regions in gen:
+            progress.update(num_regions) # type: ignore
+
+    # Explicitly close (and wait for) each actor's webdataset writer before reading the files actors produced.
+    ray.get([actor.close.remote() for actor in actors]) # type: ignore
+
 
 def vcf_to_graph_examples(
     cfg,
@@ -637,53 +881,57 @@ def vcf_to_graph_examples(
     region: Range|None=None,
     min_variant_size: int = 50,
     exact_reference: bool = False,
+    haplotypes_dir: PathType | None = None,
 ):
+    """Generate the image dataset for `sample` in `output_dir`.
+
+    Args:
+        haplotypes_dir: A `command=haplotypes` output directory (see `vcf_to_haplotypes`) for the sample, generated with
+            the current settings, whose haplotypes (and comparisons, if `compare.enabled` with the same options) are used
+            for each region they were generated for with the same graph. Haplotypes are generated inline for the rest.
+    """
     with contextlib.ExitStack() as stack:
-        # We currently just use ray for the CPU-side work, specifically simulating the SVs. We use a private temporary directory
-        # to avoid conflicts between clusters running on the same node. We seem to observe race condition on Ray cleanup of temporary
-        # directories, so we ignore cleanup errors here.
-        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
-        if not ray.is_initialized():
-            ray.init(
-                num_cpus=cfg.threads,
-                num_gpus=0,
-                _temp_dir=tmp_dir,
-                include_dashboard=False,
-                runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore
+        tmp_dir = _init_ray(cfg, stack)
+
+        tree, reuse_comparisons = None, False
+        if haplotypes_dir is not None:
+            haplotypes_dir = os.path.abspath(haplotypes_dir)
+            tree = HaplotypeTree(haplotypes_dir)
+            tree.check(
+                haplotype_options(cfg, sample, ploidy=ploidy, exact_reference=exact_reference, min_variant_size=min_variant_size)
             )
-            stack.callback(ray.shutdown)
+            logging.info("Using precomputed haplotypes from %s for sample %s", haplotypes_dir, sample.name)
+            if filtered_kmer_path is None and unique_kmer_path is None:
+                filtered_kmer_path = tree.filtered_kmer_path
+            if OmegaConf.select(cfg, "compare.enabled", default=False):
+                options = tree.comparison_options()
+                reuse_comparisons = options == ComparisonOptions.from_config(cfg.compare)
+                if reuse_comparisons:
+                    logging.info("Reusing precomputed comparisons from %s for sample %s", haplotypes_dir, sample.name)
+                else:
+                    logging.warning(
+                        "Comparing every example, since %s has %s", haplotypes_dir,
+                        "no comparisons" if options is None else "comparisons made with different options",
+                    )
 
         # Phase 1: Create and serialize graphs for subsequent analysis along with filtered k-mers. Graphs generated here
-        # are kept in the output (`graphs_ds`) as the dataset's `graphs` aux tree.
-        if graph_shards is None:
-            graphs_output = os.path.join(output_dir, "graphs_ds")
-            os.makedirs(graphs_output, exist_ok=True)
-            graph_shards, unique_kmer_path, region_count = serialize_graph_and_unique_kmers(
-                cfg,
-                vcf_path,
-                ref_kmer_counts_path=cfg.graph.ref_kmer_counts_kmc_prefix,
-                output_dir=graphs_output,
-                unique_kmer_dir=tmp_dir,
-                min_variant_size=min_variant_size,
-                pool_kmers=(filtered_kmer_path is None and unique_kmer_path is None),
-                progress_bar=progress_bar,
-                region=region,
-            )
-        else:
-            logging.info("Using %d pre-generated graph shards", len(graph_shards))
-            region_count = None
-        graphs_dir = graph_aux_directory(graph_shards) if graph_shards else None
-
-        if filtered_kmer_path is None:
-            assert unique_kmer_path is not None, "Unique k-mer path must be defined if filtered kmer path is not provided"
-            assert sample.kmc_prefix is not None, "Sample must have a KMC database when filtered_kmer_path is not provided"
-
-            filtered_kmer_path = os.path.join(tmp_dir, "filtered_kmers")
-            kmc_filter(sample.kmc_prefix, unique_kmer_path, filtered_kmer_path, threads=cfg.threads)
-
-        actual_filtered_kmer_size = _kmc_db_kmer_size(filtered_kmer_path)
-        assert actual_filtered_kmer_size is not None, f"Filtered k-mer database {filtered_kmer_path} does not exist or could not be read"
-        assert actual_filtered_kmer_size == cfg.graph.kmer_size, f"Filtered k-mer database {filtered_kmer_path} has unexpected k"
+        # are kept in the output (`graphs_ds`) as the dataset's `graphs` aux tree. With precomputed haplotypes, filtered
+        # k-mers are only needed for regions without them.
+        graph_shards, filtered_kmer_path, region_count, graphs_dir = _prepare_graphs_and_kmers(
+            cfg,
+            sample,
+            vcf_path,
+            output_dir,
+            tmp_dir,
+            graph_shards=graph_shards,
+            unique_kmer_path=unique_kmer_path,
+            filtered_kmer_path=filtered_kmer_path,
+            region=region,
+            min_variant_size=min_variant_size,
+            progress_bar=progress_bar,
+            filtered_kmer_dir=tmp_dir,
+            require_filtered_kmers=tree is None,
+        )
 
         if region_count is not None:
             logging.info("Generating images into %s for %d regions (across %d threads)", output_dir, region_count, cfg.threads)
@@ -705,24 +953,25 @@ def vcf_to_graph_examples(
                 str(vcf_path),
                 str(read_path),
                 sample,
-                str(filtered_kmer_path),
+                filtered_kmer_path,
                 ploidy=ploidy,
                 min_variant_size=min_variant_size,
                 exact_reference=exact_reference,
+                haplotypes_dir=None if haplotypes_dir is None else str(haplotypes_dir),
+                reuse_comparisons=reuse_comparisons,
             )
             for i in range(num_actors)
         ]
-        pool = ray.util.ActorPool(actors)
-
-        gen = pool.map_unordered(lambda actor, task: actor.from_shard.remote(*task), tasks) # type: ignore
-        with tqdm(disable=not progress_bar, total=region_count) as progress:
-            for num_regions in gen:
-                progress.update(num_regions) # type: ignore
-
-        # Explicitly close (and wait for) each actor's webdataset writer before deleting the actor handles
-        # and reading the files actors produced.
-        ray.get([actor.close.remote() for actor in actors]) # type: ignore
-        del pool, actors
+        _process_shards(actors, tasks, total=region_count, progress_bar=progress_bar)
+        if tree is not None:
+            counts = collections.Counter()
+            for actor_counts in ray.get([actor.counts.remote() for actor in actors]): # type: ignore
+                counts.update(actor_counts)
+            logging.info(
+                "Used precomputed haplotypes from %s for %d regions (and skipped %d), generated them for %d",
+                haplotypes_dir, counts["precomputed"], counts["skipped"], counts["generated"],
+            )
+        del actors
 
         # Programmatic preparation of the energon dataset
         from npsv3.models.energon import prepare_energon_dataset, set_aux_tree
@@ -733,3 +982,72 @@ def vcf_to_graph_examples(
             output_dir, ComparisonOptions.from_config(cfg.compare), num_workers=cfg.threads
         ):
             set_aux_tree(dataset_path, COMPARISONS_AUX, f"./{COMPARISONS_DIR}")
+
+
+def vcf_to_haplotypes(
+    cfg,
+    sample: Sample,
+    vcf_path: str,
+    output_dir: str,
+    *,
+    progress_bar: bool = False,
+    ploidy: int = 2,
+    graph_shards: Sequence[PathType] | None = None,
+    unique_kmer_path: PathType | None = None,
+    filtered_kmer_path: PathType | None = None,
+    region: Range | None = None,
+    min_variant_size: int = 50,
+    exact_reference: bool = False,
+):
+    """Generate `sample`'s haplotypes (and comparisons, if `compare.enabled`) for every region into `output_dir`, to be
+    used by subsequent image generation for that sample (`vcf_to_graph_examples`'s `haplotypes_dir`). See
+    `images.haplotype_tree` for the layout. Image generation must use the same graphs and settings."""
+    with contextlib.ExitStack() as stack:
+        tmp_dir = _init_ray(cfg, stack)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Filtered k-mers computed here are kept in the output, so image generation can generate the haplotypes for any
+        # regions it needs to without recomputing them.
+        graph_shards, filtered_kmer_path, region_count, _graphs_dir = _prepare_graphs_and_kmers(
+            cfg,
+            sample,
+            vcf_path,
+            output_dir,
+            tmp_dir,
+            graph_shards=graph_shards,
+            unique_kmer_path=unique_kmer_path,
+            filtered_kmer_path=filtered_kmer_path,
+            region=region,
+            min_variant_size=min_variant_size,
+            progress_bar=progress_bar,
+            filtered_kmer_dir=output_dir,
+        )
+        assert filtered_kmer_path is not None
+
+        logging.info("Generating haplotypes into %s across %d threads", output_dir, cfg.threads)
+        tasks = split_graph_shards(graph_shards, cfg.threads)
+        actors = [
+            HaplotypeWriter.remote(
+                i,
+                output_dir,
+                cfg,
+                str(vcf_path),
+                sample,
+                filtered_kmer_path,
+                ploidy=ploidy,
+                min_variant_size=min_variant_size,
+                exact_reference=exact_reference,
+            )
+            for i in range(min(cfg.threads, len(tasks)))
+        ]
+        _process_shards(actors, tasks, total=region_count, progress_bar=progress_bar)
+        del actors
+
+        prepare_haplotype_tree(
+            output_dir,
+            haplotype_options(cfg, sample, ploidy=ploidy, exact_reference=exact_reference, min_variant_size=min_variant_size),
+            filtered_kmer_path=filtered_kmer_path,
+            num_workers=cfg.threads,
+        )
+        if OmegaConf.select(cfg, "compare.enabled", default=False):
+            prepare_comparison_tree(output_dir, ComparisonOptions.from_config(cfg.compare), num_workers=cfg.threads)

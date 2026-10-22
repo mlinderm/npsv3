@@ -1,0 +1,39 @@
+# @package haplotype
+# Settings for generating a sample's candidate haplotypes (and diplotypes) from the graphs. These settings are
+# independent of graph construction and so can differ between uses of the same pre-generated graphs.
+
+# Strategy for generating the haplotypes to genotype for each example (see npsv3.images.haplotypes):
+#   - SampledHaplotypeStrategy: Sample haplotypes from the graph using the sample's k-mer counts
+#   - TrueHaplotypeStrategy: For training with high-quality assemblies, the sample's "true" haplotypes, a haplotype with
+#     no SVs and the highest k-mer scoring haplotypes created by adding/removing SVs from the true haplotypes.
+strategy:
+  _target_: npsv3.images.haplotypes.SampledHaplotypeStrategy
+
+# Maximum number of haplotypes per region (including the reference and any "true" haplotypes)
+max_haplotypes: 8
+
+# Maximum number of diplotypes sampled per region by the `diplotype_topk` command. Also the maximum genotypes per
+# example for packed image datasets. The total diplotypes from h haplotypes is h(h+1)/2.
+max_diplotypes: 36
+
+# When the haplotype sampler doesn't sample > 1 distinct haplotypes for a region (e.g. other haplotypes are rare alleles
+# not supported by sample's data), borrow haplotypes from the population (excluding the sample itself and
+# `graph.population_excluded_samples`) for any still-missing variant allele instead of dropping the region.
+population_haplotype_topup: true
+
+# Haplotype sampler scoring parameters (partly adapted from Sirén et al. 2024)
+sampler_params:
+  _target_: npsv3.graphs.haplotype.HaplotypeSamplerOverlay.Params
+  homozygous_score: 1.0
+  absent_score: -0.8
+  heterozygous_score: 0.0
+  homozygous_discount: 0.9
+  het_adjustment: 0.05
+  haplotype_prior_weight: 0.5
+  panel_fallback_penalty: -2
+  transition_prior_alpha: 0.01
+  population_state_pool_cap: 8
+
+# Label examples with fully missing genotypes as homozygous reference (e.g., assuming variants weren't called in
+# high-quality assemblies because they are absent) instead of leaving them unlabeled.
+missing_are_ref: false

@@ -40,7 +40,7 @@ DEFAULT_OVERRIDES = [
     f"reads={_RES}/sequence/HG00096.final.cram",
     "graph.ref_kmer_counts_kmc_prefix=" + _RES + "/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
     "graph.population_prior=True",
-    "graph.missing_are_ref=True",
+    "haplotype.missing_are_ref=True",
     "pileup=unphased_graph_kmer",
     "simulation.replicates=0",  # no simulation needed: we only need haplotypes and the k-mer index inputs
 ]
@@ -104,7 +104,7 @@ def test_capture(hydra_setup, request):  # noqa: ARG001
                 prior = hp.HaplotypePriorOverlay(graph, prior_bytes) if prior_bytes else None
                 sampler = hp.HaplotypeSamplerOverlay(
                     graph, unique_kmers, cfg.input, region, 50, prior=prior,
-                    params=hydra.utils.instantiate(cfg.graph.haplotype_sampler_params),
+                    params=hydra.utils.instantiate(cfg.haplotype.sampler_params),
                 )
                 ex.make_graph_example(
                     cfg, graph, sampler, unique_kmers, region, sample_idx, sample, cfg.reads, filtered_kmer_path, variants

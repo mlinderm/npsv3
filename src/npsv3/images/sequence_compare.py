@@ -4,7 +4,9 @@ sequence matching (`graphs.sequence_compare.compare_genotypes`), e.g., to identi
 A dataset's tree is its `COMPARISONS_DIR`, beside `imgs_ds`, with one `{key}.{COMPARISON_SUFFIX}` member (gzipped JSON) per
 labeled example, keyed like the example's pixels, and is referenced as the `COMPARISONS_AUX` aux tree in `dataset.yaml`. It is
 written during image generation (with `compare.enabled`) or added to an existing dataset by `add_comparisons`
-(`command=compare`), in both cases from the example's haplotype record (`images.haplotypes.haplotype_record`). Unlabeled
+(`command=compare`), in both cases from the example's haplotype record (`images.haplotypes.haplotype_record`). The same
+tree is also made ahead of image generation with precomputed haplotypes (see `images.haplotype_tree`), and its members are
+then copied into the dataset's tree for the examples generated from those haplotypes. Unlabeled
 examples have no member. The options used, including every comparison parameter, are recorded in
 `{COMPARISONS_DIR}/comparison.yaml`. Needs the optional `harmonize` extra.
 
@@ -32,7 +34,7 @@ import webdataset as wds
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
-from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, COMPARISONS_DIR, HAPLOTYPES_SUFFIX
+from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, COMPARISONS_DIR, HAPLOTYPES_DIR, HAPLOTYPES_SUFFIX
 from npsv3.graphs.sequence_compare import DEFAULT_PARAMS, ComparisonParams, compare_genotypes
 from npsv3.types import PathType
 
@@ -107,8 +109,12 @@ class ComparisonWriter:
         record = comparison_record(haplotypes, self.options)
         if record is None:
             return False
-        self._writer.write({"__key__": key, COMPARISON_SUFFIX: gzip.compress(json.dumps(record).encode("utf-8"), mtime=0)})
+        self.write_member(key, gzip.compress(json.dumps(record).encode("utf-8"), mtime=0))
         return True
+
+    def write_member(self, key: str, payload: bytes) -> None:
+        """Write an already-made (gzipped) comparison member, e.g., precomputed with the same haplotypes and options"""
+        self._writer.write({"__key__": key, COMPARISON_SUFFIX: payload})
 
     def close(self) -> None:
         self._writer.close()
@@ -137,21 +143,47 @@ def prepare_comparison_tree(output_dir: PathType, options: ComparisonOptions, *,
     return True
 
 
+def decode_comparison_record(payload: bytes | bytearray | str | dict) -> dict:
+    """Decode a `{key}.{COMPARISON_SUFFIX}` member, whether raw (gzipped JSON) or already decompressed or decoded by the
+    reader (energon's default decoder gunzips `.gz` members and may parse `.json`)"""
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, (bytes, bytearray)) and bytes(payload[:2]) == b"\x1f\x8b":
+        payload = gzip.decompress(payload)
+    return json.loads(payload)
+
+
+def load_comparison_records(directory: PathType) -> dict[str, dict]:
+    """Every member of the comparisons tree in `directory`, keyed by example key, read sequentially from the shards (much
+    faster than reading each key from a `FileStore` when the whole tree is needed)"""
+    records = {}
+    suffix = f".{COMPARISON_SUFFIX}"
+    for shard in sorted(Path(directory).glob(COMPARISON_SHARD_GLOB)):
+        with tarfile.open(shard) as tar:
+            for member in tar:
+                if member.isfile() and member.name.endswith(suffix):
+                    file = tar.extractfile(member)
+                    assert file is not None
+                    records[member.name.removesuffix(suffix)] = decode_comparison_record(file.read())
+    return records
+
+
 def _has_members(shard: Path) -> bool:
     with tarfile.open(shard) as tar:
         return tar.next() is not None
 
 
 def _compare_keys(
-    index: int, keys: list[str], imgs_dir: str, output_dir: str, options: ComparisonOptions
+    index: int, keys: list[str], haplotypes_dir: str, output_dir: str, options: ComparisonOptions
 ) -> tuple[int, int]:
-    """Write the comparisons for `keys` from their haplotype records in `imgs_dir`, returning (written, without a record)"""
+    """Write the comparisons for `keys` from their haplotype records in the prepared `haplotypes_dir` tree (e.g.,
+    `imgs_ds`), returning (written, without a record)"""
     from megatron.energon.cache.file_store import WebdatasetFileStore
     from megatron.energon.epathlib import EPath
 
     from npsv3.images.haplotypes import decode_haplotype_record
 
-    imgs = WebdatasetFileStore(EPath(imgs_dir))
+    imgs = WebdatasetFileStore(EPath(haplotypes_dir))
     writer = ComparisonWriter(index, output_dir, options)
     written, missing = 0, 0
     try:
@@ -167,24 +199,20 @@ def _compare_keys(
     return written, missing
 
 
-def add_comparisons(cfg, dataset_path: PathType) -> bool:
-    """Compare every labeled example in the energon image dataset `dataset_path` (a `prepare_energon_dataset` tree) with
-    `cfg.compare` options (regardless of `compare.enabled`) across `cfg.threads` workers, replacing any existing tree, and
-    reference it as the `comparisons` aux tree by rewriting `dataset_path` in place.
+def _list_keys(directory: Path, glob: str, suffix: str) -> list[str]:
+    """The keys of every `{key}.{suffix}` member of the `glob` shards in `directory`, in shard order"""
+    keys = []
+    for shard in sorted(directory.glob(glob)):
+        with tarfile.open(shard) as tar:
+            keys.extend(member.name.removesuffix(f".{suffix}") for member in tar if member.name.endswith(f".{suffix}"))
+    return keys
 
-    Returns:
-        True if the tree was written and referenced, False if there were no labeled examples.
-    """
+
+def _write_comparisons(cfg, keys: list[str], haplotypes_dir: Path, root: Path, options: ComparisonOptions) -> bool:
+    """Compare the examples with `keys` from their haplotype records in the prepared `haplotypes_dir` tree, across
+    `cfg.threads` workers, into `root`'s `COMPARISONS_DIR` tree (replacing any existing tree). Returns False if there
+    is no tree, i.e., there were no labeled examples."""
     import ray
-
-    from npsv3.models.energon import _read_split, set_aux_tree
-
-    options = ComparisonOptions.from_config(cfg.compare)
-    root, split = _read_split(dataset_path)
-    root = root.resolve()
-    imgs_dir = str(root / split["aux"]["imgs"])
-    with (root / split["path"]).open() as meta_file:
-        keys = [json.loads(line)["key"] for line in meta_file if line.strip()]
 
     directory = root / COMPARISONS_DIR
     if directory.exists():
@@ -192,8 +220,8 @@ def add_comparisons(cfg, dataset_path: PathType) -> bool:
         shutil.rmtree(directory)
 
     num_tasks = max(1, min(cfg.threads, len(keys)))
-    tasks = [(index, keys[index::num_tasks], imgs_dir, str(root), options) for index in range(num_tasks)]
-    logging.info("Comparing the genotypes of %d examples in %s across %d tasks", len(keys), dataset_path, num_tasks)
+    tasks = [(index, keys[index::num_tasks], str(haplotypes_dir), str(root), options) for index in range(num_tasks)]
+    logging.info("Comparing the genotypes of %d examples in %s across %d tasks", len(keys), root, num_tasks)
     if num_tasks == 1:
         counts = [_compare_keys(*task) for task in tasks]
     else:
@@ -210,13 +238,45 @@ def add_comparisons(cfg, dataset_path: PathType) -> bool:
 
     written, missing = (sum(column) for column in zip(*counts, strict=True))
     if keys and missing == len(keys):
-        msg = f"No example in {dataset_path} has a haplotype record ({HAPLOTYPES_SUFFIX}); was it generated before they were?"
+        msg = f"No example in {root} has a haplotype record ({HAPLOTYPES_SUFFIX}); was it generated before they were?"
         raise ValueError(msg)
     if missing:
-        logging.warning("%d examples in %s have no haplotype record and were not compared", missing, dataset_path)
+        logging.warning("%d examples in %s have no haplotype record and were not compared", missing, root)
     logging.info("Wrote comparisons for %d of %d examples (the rest unlabeled or without a record)", written, len(keys))
 
-    if not prepare_comparison_tree(root, options, num_workers=cfg.threads):
+    return prepare_comparison_tree(root, options, num_workers=cfg.threads)
+
+
+def add_comparisons(cfg, path: PathType) -> bool:
+    """Compare every labeled example with `cfg.compare` options (regardless of `compare.enabled`) across `cfg.threads`
+    workers, replacing any existing tree. `path` is either:
+
+    - The `dataset.yaml` of an energon image dataset (a `prepare_energon_dataset` tree), which is rewritten in place to
+      reference the tree as the `comparisons` aux tree
+    - A `command=haplotypes` output directory (see `images.haplotype_tree`), so its comparisons are reused by subsequent
+      image generation with these options
+
+    Returns:
+        True if the tree was written (and referenced), False if there were no labeled examples.
+    """
+    from npsv3.images.haplotype_tree import HAPLOTYPE_SHARD_GLOB
+    from npsv3.models.energon import _read_split, set_aux_tree
+
+    options = ComparisonOptions.from_config(cfg.compare)
+    if Path(path).is_dir():
+        root = Path(path).resolve()
+        haplotypes_dir = root / HAPLOTYPES_DIR
+        if not haplotypes_dir.is_dir():
+            msg = f"{path} is neither an image dataset's dataset.yaml nor a haplotypes directory (no {HAPLOTYPES_DIR})"
+            raise ValueError(msg)
+        keys = _list_keys(haplotypes_dir, HAPLOTYPE_SHARD_GLOB, HAPLOTYPES_SUFFIX)
+        return _write_comparisons(cfg, keys, haplotypes_dir, root, options)
+
+    root, split = _read_split(path)
+    root = root.resolve()
+    with (root / split["path"]).open() as meta_file:
+        keys = [json.loads(line)["key"] for line in meta_file if line.strip()]
+    if not _write_comparisons(cfg, keys, root / split["aux"]["imgs"], root, options):
         return False
-    set_aux_tree(dataset_path, COMPARISONS_AUX, f"./{COMPARISONS_DIR}")
+    set_aux_tree(path, COMPARISONS_AUX, f"./{COMPARISONS_DIR}")
     return True

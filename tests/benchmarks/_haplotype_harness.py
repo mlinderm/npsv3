@@ -62,7 +62,7 @@ def missing_inputs(cfg, sample: Sample) -> list[str]:
         reasons.append(f"reference FASTA not found: {cfg.reference}")
     if not os.path.exists(HG00733_POPULATION_VCF):
         reasons.append(f"HG00733 population VCF not found: {HG00733_POPULATION_VCF}")
-    ref_counts_prefix = str(cfg.kmer.ref_kmer_counts_kmc_prefix)
+    ref_counts_prefix = str(cfg.graph.ref_kmer_counts_kmc_prefix)
     if not os.path.exists(f"{ref_counts_prefix}.kmc_pre"):
         reasons.append(f"reference k-mer counts not found: {ref_counts_prefix}")
     if not sample.kmc_prefix:
@@ -94,12 +94,12 @@ def build_sampler(cfg, sample: Sample, region_name: str, tmp_path) -> tuple[Hapl
     the KMC filtering step it would otherwise need to be cached alongside.
     """
     region = resolve_region(region_name)
-    ref_kmer_counts = KmerCounts(str(cfg.kmer.ref_kmer_counts_kmc_prefix))
+    ref_kmer_counts = KmerCounts(str(cfg.graph.ref_kmer_counts_kmc_prefix))
     _graph, unique_kmers, sampler = _create_graph_and_sampler(
         cfg.reference,
         HG00733_POPULATION_VCF,
         region,
-        k=cfg.kmer.kmer_size,
+        k=cfg.graph.kmer_size,
         ref_kmer_counts=ref_kmer_counts,
     )
     filtered_kmer_path = cache_filter_kmc_database(cfg, sample, HG00733_POPULATION_VCF, region, unique_kmers, tmp_path=tmp_path)

@@ -27,7 +27,7 @@ CFG_OVERRIDES = (
     "simulation.replicates=1",
 )
 
-NUM_GENOTYPES = 4  # Small and fixed, well within graph.max_diplotypes, to keep packs tiny
+NUM_GENOTYPES = 4  # Small and fixed, well within haplotype.max_diplotypes, to keep packs tiny
 
 
 def _write_group(writer, sample_name, chrom, index, rng, *, height, width, channels):

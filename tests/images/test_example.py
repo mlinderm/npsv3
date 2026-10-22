@@ -12,6 +12,7 @@ from npsv3.images.example import (
     example_to_image,
     make_graph_example,
     vcf_to_graph_examples,
+    vcf_to_haplotypes,
 )
 from npsv3.models.loaders import group_to_image
 from npsv3.simulation import bwa_index_loaded
@@ -127,7 +128,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
                 f"input={vcf_path}",
                 "pileup=unphased_graph",
                 "simulation.replicates=0",
-                "graph.haplotype_strategy._target_=npsv3.images.haplotypes.TrueHaplotypeStrategy",
+                "haplotype.strategy._target_=npsv3.images.haplotypes.TrueHaplotypeStrategy",
             ],
         )
 
@@ -169,7 +170,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
     ])
     def test_missing_genotype_label(self, request, cfg, hg00733_sample, tmp_path, missing_are_ref, expected_label):
         """A sample with no called variant in the region (i.e. every analysis variant's genotype for that
-        sample is missing) should be unlabeled unless graph.missing_are_ref opts into treating missing
+        sample is missing) should be unlabeled unless haplotype.missing_are_ref opts into treating missing
         genotypes as homozygous REF."""
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
@@ -208,7 +209,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         marker = request.node.get_closest_marker("cfg_overrides")
         local_cfg = hydra.compose(
             config_name="config",
-            overrides=[*(marker.args if marker else []), "pileup=unphased_graph_both", f"graph.missing_are_ref={missing_are_ref}"],
+            overrides=[*(marker.args if marker else []), "pileup=unphased_graph_both", f"haplotype.missing_are_ref={missing_are_ref}"],
         )
         example = make_graph_example(
             local_cfg,
@@ -423,6 +424,63 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
             assert record == comparison_record(haplotypes, ComparisonOptions.from_config(cfg.compare))
 
 
+    @pytest.mark.usefixtures("ray_setup")
+    def test_vcf_to_energon_dataset_with_precomputed_haplotypes(self, cfg, hg00733_sample, tmp_path, caplog):
+        """Haplotypes (and comparisons) generated ahead of time are used by image generation"""
+        pytest.importorskip("edlib")
+        pytest.importorskip("pyabpoa")
+        import gzip
+        import logging
+
+        from megatron.energon.cache.file_store import WebdatasetFileStore
+        from megatron.energon.epathlib import EPath
+
+        from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_DIR, HAPLOTYPES_DIR, HAPLOTYPES_SUFFIX
+        from npsv3.images.haplotype_tree import HaplotypeTree
+        from npsv3.images.haplotypes import decode_haplotype_record
+
+        region = Range("chr1:1134644-1134867")
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+        cfg.compare.enabled = True
+        cfg.simulation.replicates = 0  # Simulated images don't depend on how the haplotypes were generated
+
+        haplotypes_dir = str(tmp_path / "haplotypes")
+        vcf_to_haplotypes(
+            cfg, hg00733_sample, cfg.input, haplotypes_dir, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path,
+        )
+        tree = HaplotypeTree(haplotypes_dir)
+        assert tree.filtered_kmer_path == os.path.abspath(filtered_kmer_path), "Filtered k-mers used are recorded"
+
+        # The filtered k-mers are found via the haplotypes
+        output_dir = str(tmp_path / "energon")
+        with caplog.at_level(logging.INFO):
+            vcf_to_graph_examples(
+                cfg, cfg.reads, hg00733_sample, cfg.input, output_dir, graph_shards=graph_shards, haplotypes_dir=haplotypes_dir,
+            )
+        assert "for 1 regions (and skipped 0), generated them for 0" in caplog.text
+        _assert_graph_links(output_dir, hg00733_sample.name, expected_graphs_dir=os.path.dirname(graph_shards[0]))
+
+        precomputed = WebdatasetFileStore(EPath(os.path.join(haplotypes_dir, HAPLOTYPES_DIR)))
+        imgs = WebdatasetFileStore(EPath(os.path.join(output_dir, "imgs_ds")))
+        comparisons = WebdatasetFileStore(EPath(os.path.join(output_dir, COMPARISONS_DIR)))
+        with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+            rows = [json.loads(line) for line in meta_file if line.strip()]
+        assert [row["label"] is not None for row in rows] == [True]
+        for row in rows:
+            expected = decode_haplotype_record(precomputed[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0])
+            expected.pop("source_digest")
+            assert decode_haplotype_record(imgs[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0]) == expected
+            assert gzip.decompress(comparisons[f"{row['key']}.{COMPARISON_SUFFIX}"][0]) == gzip.decompress(tree.comparison(row["key"]))  # type: ignore[arg-type]
+
+        # Haplotypes generated with different settings are an error
+        cfg.haplotype.max_haplotypes += 1
+        with pytest.raises(ValueError, match="different settings"):
+            vcf_to_graph_examples(
+                cfg, cfg.reads, hg00733_sample, cfg.input, str(tmp_path / "mismatch"), graph_shards=graph_shards,
+                haplotypes_dir=haplotypes_dir,
+            )
+
+
 def _assert_graph_links(output_dir: str, sample_name: str, *, expected_graphs_dir: str):
     """Every row links to its graph in the `graphs` aux tree and carries a haplotypes member consistent with its genotypes"""
     import itertools
@@ -472,7 +530,7 @@ def _assert_graph_links(output_dir: str, sample_name: str, *, expected_graphs_di
     "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
     "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
     "graph.population_prior=True",
-    "graph.missing_are_ref=True",
+    "haplotype.missing_are_ref=True",
     "simulation.replicates=0", # Speed up tests by not generating simulated images
 )
 class TestHGSVC3HPRCDipcallPopulationGraphExamples:
@@ -588,7 +646,7 @@ class TestHGSVC3HPRCPopulationGraphExamples:
     "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
     "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
     "graph.population_prior=True",
-    "graph.missing_are_ref=True",
+    "haplotype.missing_are_ref=True",
     "pileup=unphased_graph_kmer",
     "simulation.replicates=1",
 )

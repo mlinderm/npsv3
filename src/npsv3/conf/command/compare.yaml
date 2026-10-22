@@ -1,5 +1,6 @@
 # @package _global_
 command: compare
 # The `dataset.yaml` of an image dataset (as written by `prepare_energon_dataset`) to compare the examples of, with the
-# `compare` options. Its `comparisons` aux tree is (re)written beside it and `dataset.yaml` is updated in place.
+# `compare` options. Its `comparisons` aux tree is (re)written beside it and `dataset.yaml` is updated in place. Or, the
+# output directory of the "haplotypes" command, whose comparisons are (re)written for reuse by image generation.
 input: ???

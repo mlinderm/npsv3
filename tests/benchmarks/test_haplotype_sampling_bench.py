@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(not HG38_REF_FASTA, reason="HG38 reference FASTA
 
 @pytest.mark.cfg_overrides(
     f"reference={HG38_REF_FASTA}",
-    f"kmer.ref_kmer_counts_kmc_prefix={os.path.join(RESOURCES_DIR,'Homo_sapiens_assembly38.non_unique.k${kmer.kmer_size}')}",
+    f"graph.ref_kmer_counts_kmc_prefix={os.path.join(RESOURCES_DIR,'Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}')}",
 )
 @pytest.mark.parametrize("region_name", sorted(_harness.REGIONS))
 def test_sample_haplotypes_and_diplotypes(benchmark, cfg, hg00733_sample, region_name, tmp_path):
@@ -44,7 +44,7 @@ def test_sample_haplotypes_and_diplotypes(benchmark, cfg, hg00733_sample, region
     benchmark.pedantic(
         _harness.sample_once,
         args=(sampler, counts),
-        kwargs={"max_haplotypes": cfg.kmer.max_haplotypes, "max_diplotypes": cfg.kmer.max_diplotypes},
+        kwargs={"max_haplotypes": cfg.haplotype.max_haplotypes, "max_diplotypes": cfg.haplotype.max_diplotypes},
         rounds=rounds,
         iterations=1,
         warmup_rounds=1,

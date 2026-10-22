@@ -10,6 +10,9 @@ HAPLOTYPES_SUFFIX = "haplotypes.json.gz"
 """Pixel-shard tar member suffix, `{key}.{HAPLOTYPES_SUFFIX}`, for an example's candidate haplotypes (see
 `images.haplotypes.haplotype_record`). Optional: absent from datasets generated before it was introduced."""
 
+HAPLOTYPES_DIR = "haplotypes_ds"
+"""Precomputed `{key}.{HAPLOTYPES_SUFFIX}` members in a `command=haplotypes` output directory (see `images.haplotype_tree`)"""
+
 COMPARISON_SUFFIX = "comparison.json.gz"
 COMPARISONS_AUX = "comparisons"
 COMPARISONS_DIR = "compare_ds"
