@@ -6,7 +6,6 @@ actual pixel data is only fetched after packing has been determined.
 """
 
 import contextlib
-import gzip
 import io
 import json
 import logging
@@ -15,13 +14,13 @@ import os
 import shutil
 import tarfile
 import tempfile
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import lightning as L
-import numpy as np
 import torch
 import yaml
 from megatron.energon import (
@@ -64,8 +63,13 @@ from npsv3.models.loaders import (
     build_packed_batch,
     ntuple,
     select_packs,
-    to_tensor,
 )
+
+try:
+    # ISA-L's inflate is ~2x faster than zlib's on the pixel members (installed on x86_64/aarch64 with xopen)
+    from isal.isal_zlib import decompress as _decompress
+except ImportError:
+    from zlib import decompress as _decompress
 
 
 @edataclass
@@ -159,20 +163,30 @@ def _group_accepted(
 
 
 GZIP_MAGIC = b"\x1f\x8b"
+# `wbits` selecting the gzip container (16 + MAX_WBITS)
+GZIP_WBITS = 31
 
 
-def _fetch_array(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> np.ndarray:
-    """Return ndarray with valid shape from lazy pixel member (including fetching and any necessary decompression)"""
+def _fetch_image(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> torch.Tensor:
+    """Return a channel-first `(..., C, H, W)` uint8 *view* of a lazy pixel member stored channel-last as `shape`, i.e.
+    `(..., H, W, C)` (including fetching and any necessary decompression).
+
+    The view is not copied here, because `build_packed_batch` copies it into the pack anyway. Each extra copy of a pack's
+    worth of pixels is another freshly allocated, page-faulted buffer, which dominates a worker's time when faults are
+    expensive.
+    """
     raw = lazy.get(sample)
-    # The aux store energon hands the cooker is wrapped in a `DecodeFileStore`, whose default decoder
-    # includes webdataset's `gzfilter` -- so a `.bin.gz` member usually arrives already decompressed.
-    # That is decoder configuration, not a guarantee, so check the magic rather than assume either way.
+    # `PackedGroupTaskEncoder` disables energon's decoder, so `.bin.gz` members arrive compressed. Check the magic
+    # rather than assume, in case a member was written uncompressed.
     if raw[:2] == GZIP_MAGIC:
-        raw = gzip.decompress(raw)
+        raw = _decompress(raw, GZIP_WBITS)
 
-    # `bytearray` rather than `bytes` so the array is writable: `torch.from_numpy` warns on a read-only
-    # buffer, and `pytest.ini` turns warnings into errors.
-    return np.frombuffer(bytearray(raw), dtype=np.uint8).reshape(shape)
+    with warnings.catch_warnings():
+        # `raw` is immutable `bytes`, which is safe here since the pack only ever reads it (`pytest.ini` turns warnings
+        # into errors, and the alternative, a writable `bytearray`, is another copy)
+        warnings.filterwarnings("ignore", message="The given buffer is not writable", category=UserWarning)
+        pixels = torch.frombuffer(raw, dtype=torch.uint8)
+    return pixels.reshape(shape).movedim(-1, -3)
 
 # The base `TaskEncoder`'s `T_encoded_sample` type parameter is `Any` here rather than a concrete type:
 # `select_samples_to_pack` uses it for a flat `GroupMeta` (pre-pack metadata), while `pack_selected_samples`/`batch`
@@ -186,6 +200,11 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
     """
 
     cookers = (Cooker(cook_group),)
+    # Skip energon's default decoding (webdataset's `autodecode`). Its `gzfilter` gunzips every `.gz` member with the
+    # `gzip` module, ~2x slower than `_decompress`, and its result is copied again. Everything read through this task
+    # encoder handles raw bytes instead: the metadata rows (`_sample_json`), the pixels (`_fetch_image`), and the
+    # comparison records (`decode_comparison_record`).
+    decoder = None
 
     def __init__(
         self,
@@ -270,16 +289,16 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
     def pack_selected_samples(self, samples: list[GroupMeta]) -> "PackedGroupBatch":
         groups = []
         for sample in samples:
-            real = _fetch_array(sample.real, sample, (sample.h, sample.w, sample.c))
-            sims = _fetch_array(sample.sims, sample, (sample.r, sample.g, sample.h, sample.w, sample.c))
+            real = _fetch_image(sample.real, sample, (sample.h, sample.w, sample.c))
+            sims = _fetch_image(sample.sims, sample, (sample.r, sample.g, sample.h, sample.w, sample.c))
 
             # `preencode_sample` already rejected unlabeled groups (`_group_accepted`), so `label_rank` is
             # always defined here.
             assert sample.label_rank is not None, "Unlabeled group reached pack_selected_samples"
             groups.append(
                 ImageGroup(
-                    query=to_tensor(real),
-                    support=to_tensor(sims),
+                    query=real,
+                    support=sims,
                     label_rank=torch.tensor(sample.label_rank, dtype=torch.long),
                     genotype_label=sample.label,
                     meta=sample.region,
@@ -652,9 +671,16 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         shuffle_buffer_size (int, optional): Sample shuffle buffer. Defaults to 4096.
         max_samples_per_sequence (int | None, optional): Limit samples drawn per shard sequence. Defaults to 64.
         num_workers (int, optional): DataLoader workers per rank. Defaults to 1.
-        cache_workers (int, optional): Threads prefetching pixels into the cache pool. Defaults to 4.
-        max_cache_size_gbytes (float, optional): Cap on the cache pool. The failure mode of an uncapped
-            pool is a confusing ENOSPC deep inside a worker. Defaults to 64.
+        cache_workers (int, optional): Threads prefetching pixels into the cache pool, in *each* DataLoader
+            worker (energon gives every worker its own pool after forking). Defaults to 4.
+        max_cache_size_gbytes (float, optional): Cap on the cache pool per rank (i.e., per GPU), across all of
+            that rank's DataLoader workers. Energon's pool counts its size per process, so the cap is divided
+            evenly among the worker processes that can hold cache entries at once (`_cache_pool_gbytes`). The
+            failure mode of an uncapped pool is a confusing ENOSPC deep inside a worker. Defaults to 64.
+        watchdog_timeout_seconds (float | None, optional): Warn (with thread stack dumps) when a worker takes
+            longer than this to produce a batch. None disables the watchdog. Defaults to 60.
+        watchdog_initial_timeout_seconds (float | None, optional): Same, for each worker's *first* batch, which
+            must also fill the shuffle and packing buffers. None uses `watchdog_timeout_seconds`. Defaults to None.
         limit_val_batches (int | None, optional): Fixed validation length, so ranks agree on the step
             count. Applied per rank (`LimitDataset` truncates each rank's own shard slice to at most
             this many batches, not the split as a whole), so this only equalizes ranks in practice --
@@ -695,6 +721,8 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         num_workers: int = 1,
         cache_workers: int = 4,
         max_cache_size_gbytes: float = 64,
+        watchdog_timeout_seconds: float | None = 60,
+        watchdog_initial_timeout_seconds: float | None = None,
         limit_val_batches: int | None = 32,
         limit_test_batches: int | None = 32,
         predict_split: str = "train",
@@ -756,7 +784,8 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         )
 
         self._loader = None
-        self._cache_pool = None
+        # One pool per split (see `_make_cache_pool`)
+        self._cache_pools: dict[str, FileStoreCachePool] = {}
 
     def _task_encoder(self, filters: Sequence[ExampleFilter] = ()) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
@@ -782,20 +811,52 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             seed_offset=self.hparams["seed_offset"],
         )
 
-    def _make_cache_pool(self) -> FileStoreCachePool:
-        if self._cache_pool is None:
+    def _concurrent_loaders(self, split: str) -> int:
+        """Number of this rank's loaders whose workers can hold cache entries at the same time as `split`'s. The
+        loaders' workers are persistent, so during `fit` the train and val workers are alive together. Test and
+        predict run on their own."""
+        if split not in ("train", "val"):
+            return 1
+        if isinstance(self._metadataset, dict):
+            splits = self._metadataset["splits"]
+        else:
+            splits = available_splits(self._metadataset)
+        return 2 if "val" in splits else 1
+
+    def _cache_pool_gbytes(self, split: str) -> float:
+        """Per-process cap for `split`'s pool, so this rank's pools together stay within `max_cache_size_gbytes`.
+
+        Energon's `FileStoreCachePool` is forked into every DataLoader worker, and each copy counts its cache size
+        independently (from zero), so a pool's `max_cache_size_gbytes` effectively applies per worker process. Without
+        workers the pool is used by the main process alone.
+        """
+        processes = max(1, self.hparams["num_workers"]) * self._concurrent_loaders(split)
+        return self.hparams["max_cache_size_gbytes"] / processes
+
+    def _make_cache_pool(self, split: str) -> FileStoreCachePool:
+        if split not in self._cache_pools:
             cache_dir = self.hparams["cache_dir"] or tempfile.gettempdir()
             os.makedirs(cache_dir, exist_ok=True)
+            gbytes = self._cache_pool_gbytes(split)
             logging.info(
-                "Energon cache pool in %s (capped at %.1f GB)", cache_dir, self.hparams["max_cache_size_gbytes"]
+                "Energon %s cache pool in %s (capped at %.1f GB per process, %.1f GB per rank in total)",
+                split, cache_dir, gbytes, self.hparams["max_cache_size_gbytes"],
             )
-            self._cache_pool = FileStoreCachePool(
+            self._cache_pools[split] = FileStoreCachePool(
                 # A Path, not a str: energon joins onto it with `/`
                 parent_cache_dir=Path(cache_dir),
                 num_workers=self.hparams["cache_workers"],
-                max_cache_size_gbytes=self.hparams["max_cache_size_gbytes"],
+                max_cache_size_gbytes=gbytes,
             )
-        return self._cache_pool
+        return self._cache_pools[split]
+
+    def _make_loader(self, dataset, split: str):
+        return get_savable_loader(
+            dataset,
+            cache_pool=self._make_cache_pool(split),
+            watchdog_timeout_seconds=self.hparams["watchdog_timeout_seconds"],
+            watchdog_initial_timeout_seconds=self.hparams["watchdog_initial_timeout_seconds"],
+        )
 
     def train_dataloader(self):
         if self.hparams["repeat"] and self.hparams["num_workers"] < 1:
@@ -817,7 +878,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 task_encoder=self._task_encoder(self.train_filters),
                 repeat=self.hparams["repeat"],
             )
-        self._loader = get_savable_loader(dataset, cache_pool=self._make_cache_pool())
+        self._loader = self._make_loader(dataset, "train")
         return self._loader
 
     def val_dataloader(self):
@@ -832,7 +893,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 limit=self.hparams["limit_val_batches"],
                 task_encoder=self._task_encoder(),
             )
-        return get_savable_loader(dataset, cache_pool=self._make_cache_pool())
+        return self._make_loader(dataset, "val")
 
     def test_dataloader(self):
         with _quiet_energon(self.hparams["verbose"]):
@@ -846,7 +907,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 limit=self.hparams["limit_test_batches"],
                 task_encoder=self._task_encoder(),
             )
-        return get_savable_loader(dataset, cache_pool=self._make_cache_pool())
+        return self._make_loader(dataset, "test")
 
     def predict_dataloader(self):
         # A single, finite, unshuffled pass (unlike `train_dataloader`, which repeats indefinitely),
@@ -861,7 +922,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 limit=self.hparams["limit_predict_batches"],
                 task_encoder=self._task_encoder(),
             )
-        return _OpaqueIterable(get_savable_loader(dataset, cache_pool=self._make_cache_pool()))
+        return _OpaqueIterable(self._make_loader(dataset, "predict"))
 
     def on_after_batch_transfer(self, batch, dataloader_idx):  # noqa: ARG002
         # Normalize on the device, after the uint8 transfer
@@ -881,9 +942,9 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         self._loader.restore_state_global(state_dict["loader"])
 
     def teardown(self, stage=None):  # noqa: ARG002
-        if self._cache_pool is not None:
-            self._cache_pool.close()
-            self._cache_pool = None
+        for pool in self._cache_pools.values():
+            pool.close()
+        self._cache_pools = {}
 
 
 def _random_patch_mask(batch_size: int, num_patches: int, *, mask_fraction: float, device=None) -> torch.Tensor:

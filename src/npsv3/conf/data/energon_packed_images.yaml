@@ -21,8 +21,15 @@ packing_buffer_size: 512
 shuffle_buffer_size: 4096
 max_samples_per_sequence: 64
 num_workers: ${threads}
+# Prefetch threads in *each* DataLoader worker
 cache_workers: 4
+# Pixel cache cap per rank (i.e., per GPU), split evenly across that rank's train/val worker processes. The node-local
+# disk request (e.g. the SLURM localdisk gres) must cover this times the number of GPUs.
 max_cache_size_gbytes: 54
+# Warn, with thread stack dumps, when a worker takes longer than this to produce a batch (null disables). A worker's
+# first batch also fills the shuffle and packing buffers, and so gets the longer initial timeout (null -> the same).
+watchdog_timeout_seconds: 60
+watchdog_initial_timeout_seconds: 600
 # Virtual-epoch length in packed batches. null -> runners.train estimates one true pass from the
 # dataset's manifests scaled by the DDP world size.
 limit_train_batches: null

@@ -267,6 +267,43 @@ class TestEnergonPackedImageDataModule:
         assert normalized.images.dtype == torch.float32
         dm.teardown()
 
+    @pytest.mark.parametrize(
+        ("num_workers", "with_val", "expected"),
+        [
+            # Without workers the main process uses the pool alone
+            (0, False, {"train": 8.0, "test": 8.0}),
+            (4, False, {"train": 2.0, "test": 2.0}),
+            # The persistent train and val workers are alive together during `fit`, test runs alone
+            (4, True, {"train": 1.0, "val": 1.0, "test": 2.0}),
+        ],
+    )
+    def test_cache_pool_cap_is_per_rank(self, energon_dataset, num_workers, with_val, expected):
+        """Energon's pool counts its size per (forked) worker process, so the per-rank cap is split across them"""
+        dm = _make_dm(
+            energon_dataset,
+            num_workers=num_workers,
+            max_cache_size_gbytes=8,
+            val_metadataset_paths=energon_dataset if with_val else None,
+        )
+        for split, gbytes in expected.items():
+            assert dm._cache_pool_gbytes(split) == pytest.approx(gbytes)
+        assert dm._make_cache_pool("train").max_cache_size == int(expected["train"] * 1024**3)
+        dm.teardown()
+
+    def test_watchdog_settings_reach_loader(self, energon_dataset, monkeypatch):
+        captured = {}
+
+        def fake_get_savable_loader(dataset, **kwargs):  # noqa: ARG001
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr("npsv3.models.energon.get_savable_loader", fake_get_savable_loader)
+        dm = _make_dm(energon_dataset, watchdog_timeout_seconds=30, watchdog_initial_timeout_seconds=300)
+        dm.train_dataloader()
+        assert captured["watchdog_timeout_seconds"] == 30
+        assert captured["watchdog_initial_timeout_seconds"] == 300
+        dm.teardown()
+
     def test_positives_survive_packing(self, energon_dataset):
         """Every replicate of every labeled group lands on a rank-1 entry."""
         dm = _make_dm(energon_dataset)
