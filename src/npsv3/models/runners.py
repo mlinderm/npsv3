@@ -145,6 +145,7 @@ def train(cfg, output_dir=None, **kw_args):
             r_max=OmegaConf.select(cfg, "data.r_max", default=None),
             world_size=_resolve_world_size(cfg),
             filters=getattr(dm, "train_filters", ()),
+            genotype_subset=getattr(dm, "train_genotype_subset", None),
         )
 
     trainer = hydra.utils.instantiate(

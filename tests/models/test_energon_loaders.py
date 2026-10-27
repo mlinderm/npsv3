@@ -14,6 +14,7 @@ import yaml
 
 from npsv3.constants import CHW_LAYOUT, HWC_LAYOUT, LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX, REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.images.example import EnergonExampleWriter
+from npsv3.images.subsets import GenotypeSubset
 from npsv3.models.energon import (
     EnergonMaskedImageDataModule,
     EnergonPackedImageDataModule,
@@ -150,6 +151,24 @@ class TestTaskEncoder:
         with pytest.raises(SkipSample):
             encoder.preencode_sample(self._meta(g=36, r=2))
 
+    def test_genotype_subset(self):
+        encoder = PackedGroupTaskEncoder(budget=64, genotype_subset=GenotypeSubset(include_homozygous=False))
+        # 4 haplotypes labeled (1, 1)
+        sample = encoder.preencode_sample(self._meta(g=10, label=4, label_rank=[0, 3, 3, 3, 1, 3, 3, 3, 3, 3]))
+        assert sample.selected == [0, 1, 4, 5, 6]
+        assert sample.cost == 1 + 5
+        # Examples with only the subset's genotypes, or unlabeled, are unchanged
+        sample = encoder.preencode_sample(
+            self._meta(g=5, label=2, label_rank=[0, 3, 1, 3, 3], genotype_idxs=[0, 1, 4, 5, 6], num_haplotypes=4)
+        )
+        assert sample.selected is None
+        assert sample.cost == 1 + 5
+
+        # `g_max` applies to the subset
+        assert PackedGroupTaskEncoder(budget=64, g_max=5, genotype_subset=GenotypeSubset(False)).preencode_sample(
+            self._meta(g=10, label=4, label_rank=[0, 3, 3, 3, 1, 3, 3, 3, 3, 3])
+        ).selected == [0, 1, 4, 5, 6]
+
     def test_select_samples_to_pack_respects_budget(self):
         encoder = PackedGroupTaskEncoder(budget=64, w_bucket=IMAGE_WIDTH)
         samples = [encoder.preencode_sample(self._meta(g=g, label=0, label_rank=[1] + [0] * (g - 1))) for g in range(3, 20)]
@@ -233,6 +252,63 @@ def test_pixel_layouts_round_trip(tmp_path):
             seen.add(region)
     dm.teardown()
     assert seen == set(expected)
+
+
+def test_genotype_subset_in_loader(tmp_path):
+    """Training with a subset of the genotypes packs only those genotypes' images, with the label (and ranks) along the
+    subset. Validation has every genotype."""
+    output_dir = str(tmp_path / "energon")
+    rng = np.random.default_rng(0)
+    num_haplotypes, num_genotypes, num_replicates = 4, 10, 2
+    writer = EnergonExampleWriter(0, output_dir)
+    expected = {}
+    for index in range(20):
+        region = f"chr1:{index * 1000 + 1}-{index * 1000 + 500}"
+        label = index % num_genotypes
+        label_rank = np.zeros(num_genotypes, dtype=np.int64)
+        label_rank[label] = 1
+        real = rng.integers(0, 255, size=(IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), dtype=np.uint8)
+        sims = rng.integers(0, 255, size=(num_replicates, num_genotypes, *real.shape), dtype=np.uint8)
+        writer.write(
+            {
+                "region": region,
+                "image": real,
+                "label": label,
+                "label.rank": label_rank,
+                "sim.images": sims,
+                "num_genotypes": num_genotypes,
+                "genotype_idxs": list(range(num_genotypes)),
+                "num_haplotypes": num_haplotypes,
+            },
+            region=Range(region),
+            sample_name="S0",
+        )
+        selected = GenotypeSubset(False).select({"g": num_genotypes, "label": label})
+        expected[region] = (np.moveaxis(sims[:, selected], -1, -3), selected.index(label))
+    writer.close()
+    dataset_path = prepare_energon_dataset(output_dir)
+
+    dm = _make_dm(dataset_path, val_metadataset_paths=dataset_path, repeat=False, genotype_subset={"include_homozygous": False})
+    seen = set()
+    for batch in dm.train_dataloader():
+        for group in range(batch.num_groups):
+            region = batch.meta[group]
+            sims, label = expected[region]
+            start, end = int(batch.offsets[group]), int(batch.offsets[group + 1])
+            assert int(batch.num_genotypes[group]) == sims.shape[1]
+            assert int(batch.genotype_label[group]) == label
+            assert torch.equal(batch.images[start:end], torch.from_numpy(sims.reshape(-1, *sims.shape[2:])))
+            assert torch.equal(batch.labels[start:end], torch.tensor(([0] * label + [1] + [0] * (sims.shape[1] - label - 1)) * num_replicates))
+            seen.add(region)
+    dm.teardown()
+    assert seen == set(expected)
+
+    # The estimate reflects the subset's pack cost
+    full_cost = sum(1 + num_replicates * num_genotypes for _ in expected)
+    subset_cost = sum(1 + num_replicates * sims.shape[1] for sims, _ in expected.values())
+    assert estimate_epoch_batches(dataset_path, budget=1, occupancy=1.0) == full_cost
+    assert estimate_epoch_batches(dataset_path, budget=1, occupancy=1.0, genotype_subset=GenotypeSubset(False)) == subset_cost
+    assert dm._task_encoder().genotype_subset is None, "Validation has every genotype"
 
 
 @pytest.mark.slow

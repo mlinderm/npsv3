@@ -1,0 +1,15 @@
+# @package _global_
+command: region_stats
+
+# Count each region's labeled, hom. ref. and carrier samples across a cohort, for `hom_ref_downsample` during image
+# generation and `npsv3.models.filters.HomRefDownsampleFilter` during training. Use the same cohort (e.g., every sample)
+# for generation and training, so that both make the same decisions.
+#
+# `input` is a (glob pattern for) "haplotypes" command output directories and/or image datasets (`dataset.yaml` or its
+# directory), or a list of them, e.g.,
+#   input='/path/to/haplotypes/*'
+#   input='[/path/to/S1, /path/to/S2]'
+# Quote paths containing Hydra's special characters (e.g., the `=` and `,` in sweep directories), e.g.,
+#   "input='/path/+repeat=0,simulation.replicates=1/*/dataset.yaml'"
+#
+# `output` is the TSV file to write (defaults to region_stats.tsv in the Hydra output directory).

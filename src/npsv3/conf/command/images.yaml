@@ -13,3 +13,24 @@ haplotypes_dir: null
 # Skip regions without a label, i.e., without a resolvable true genotype for the sample, before generating any images.
 # Unlabeled examples are rejected during training, so generating them only consumes time and storage.
 skip_unlabeled: true
+
+# Reduce the training data footprint (see npsv3.images.subsets). Both are off by default and independent. The same
+# reductions can be applied when training on a dataset generated without them (`data.filters` and
+# `data.genotype_subset`), e.g., for ablations.
+
+# Skip some of the hom. ref. examples: keep each region's non-reference examples, and about
+# max(min_keep, ceil(ratio * carriers)) of its hom. ref. examples (chosen deterministically from `seed`, so every sample's
+# image generation, and training, agrees). Requires the cohort's `region_stats`, the output of `command=region_stats` on
+# all of the samples' "haplotypes" outputs (or image datasets).
+hom_ref_downsample:
+  enabled: false
+  region_stats: null
+  ratio: 2.0
+  min_keep: 5
+  seed: 0
+
+# Only simulate the genotypes that share a haplotype with the label, plus hom. ref. and, with `include_homozygous`,
+# every homozygous genotype. Each example records the genotypes it has as `genotype_idxs`.
+genotype_subset:
+  enabled: false
+  include_homozygous: true

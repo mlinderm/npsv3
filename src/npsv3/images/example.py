@@ -73,6 +73,14 @@ from npsv3.images.haplotypes import (
     as_kmer_classify,
     generate_haplotypes,
 )
+from npsv3.images.subsets import (
+    HomRefDownsample,
+    RegionCounts,
+    genotype_subset_from_config,
+    is_hom_ref,
+    read_region_stats,
+    region_key,
+)
 from npsv3.pileup import close_alignment_file_cache, evict_alignment_file
 from npsv3.realigner import FragmentRealigner
 from npsv3.simulation import simulate_variant_sequencing, split_bam_by_tag
@@ -163,11 +171,21 @@ def make_graph_example(
         true_haplotype_idxs = haplotypes["true"]
         assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
-        # Allow for all possible genotypes, or TODO: apply sampling here to reduce the potential number considered
-        possible_genotypes = list(itertools.combinations_with_replacement(range(len(paths)), ploidy))
+        # All possible genotypes, or, with `genotype_subset`, only those that share a haplotype with the label (and
+        # other "hard" negatives). Unlabeled examples always have every genotype. Genotypes are identified by their index
+        # into all the possible genotypes (`genotype_idxs`), and the label and simulated images are along that subset.
+        all_genotypes = list(itertools.combinations_with_replacement(range(len(paths)), ploidy))
+        genotype_subset = genotype_subset_from_config(OmegaConf.select(cfg, "genotype_subset"))
+        if genotype_subset is not None and None not in true_haplotype_idxs:
+            genotype_idxs = genotype_subset.genotype_idxs(len(paths), true_haplotype_idxs, ploidy=ploidy)  # type: ignore[arg-type]
+        else:
+            genotype_idxs = list(range(len(all_genotypes)))
+        possible_genotypes = [all_genotypes[idx] for idx in genotype_idxs]
         # Recorded even if no label is defined or no simulated images are generated below, since packing cost
         # and downstream consumers may want the genotype count independent of `label`/`sim.images`.
         example["num_genotypes"] = len(possible_genotypes)
+        example["genotype_idxs"] = genotype_idxs
+        example["num_haplotypes"] = len(paths)
 
         # Generate labels if the true haplotype combination is fully defined (i.e., no missing alleles)
         if None not in true_haplotype_idxs:
@@ -182,7 +200,8 @@ def make_graph_example(
             ranked_positives = np.zeros(len(possible_genotypes), dtype=np.long)
             ranked_positives[genotype_idx] = 1 # True (or "first-rank") positive
 
-            # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives
+            # The same "presence" for non-reference genotypes, i.e., non-reference concordant, are considered "third-rank" positives.
+            # Hom. ref. is always the first genotype, even in a `genotype_subset`.
             # TODO: Should only variants with the true allele be considered "third-rank" positives? And any presence be "fourth-rank"?
             if genotype_idx > 0:
                 ranked_positives[(ranked_positives == 0) & (np.arange(len(possible_genotypes)) > 0)] = 3
@@ -498,6 +517,9 @@ class EnergonExampleWriter:
                     ),
                     "region": example["region"],
                     "sample": sample_name,
+                    # Each genotype's index into all the example's possible genotypes, i.e.,
+                    # `combinations_with_replacement(range(num_haplotypes), ploidy)` (see `images.subsets`)
+                    **{field: example[field] for field in ("genotype_idxs", "num_haplotypes") if field in example},
                     # The region's members in the `graphs` aux tree, and that graph's identity (see `npsv3.graphs.sharding`)
                     **{field: example[field] for field in ("graph_key", "graph_digest") if field in example},
                 }
@@ -515,6 +537,18 @@ def make_example_writer(cfg, index: int, output_dir: str) -> EnergonExampleWrite
     maxcount = OmegaConf.select(cfg, "pileup.example_shard_maxcount", default=100_000)
     maxsize = OmegaConf.select(cfg, "pileup.example_shard_maxsize", default=3e9)
     return EnergonExampleWriter(index, output_dir, maxcount=maxcount, maxsize=maxsize)
+
+
+def make_hom_ref_downsample(cfg) -> tuple[HomRefDownsample | None, dict[str, RegionCounts]]:
+    """The `hom_ref_downsample` settings and the region statistics they use (None and empty if not enabled)"""
+    downsample_cfg = OmegaConf.select(cfg, "hom_ref_downsample")
+    if downsample_cfg is None or not downsample_cfg.get("enabled", False):
+        return None, {}
+    if (stats_path := downsample_cfg.get("region_stats")) is None:
+        msg = "`hom_ref_downsample.region_stats` is required to downsample hom. ref. examples (see `command=region_stats`)"
+        raise ValueError(msg)
+    downsample = HomRefDownsample(ratio=downsample_cfg.ratio, min_keep=downsample_cfg.min_keep, seed=downsample_cfg.seed)
+    return downsample, read_region_stats(stats_path)
 
 
 @dataclasses.dataclass
@@ -669,6 +703,8 @@ class GraphWriter(RegionActor):
         self._reuse_comparisons = reuse_comparisons
         # Unlabeled examples are rejected during training (`models.energon._group_accepted`), so needn't be generated
         self._skip_unlabeled = OmegaConf.select(cfg, "skip_unlabeled", default=False)
+        # Optionally skip some of the hom. ref. examples, using the cohort's counts for each region
+        self._hom_ref_downsample, self._region_stats = make_hom_ref_downsample(cfg)
         self._counts: collections.Counter[str] = collections.Counter()
 
     def from_graph(
@@ -716,12 +752,15 @@ class GraphWriter(RegionActor):
             try:
                 # Attempt to gracefully timeout long running regions.
                 with Timeout(self.cfg.timeout):
-                    if self._skip_unlabeled:
+                    if self._skip_unlabeled or self._hom_ref_downsample is not None:
                         # Determine the label (from the haplotypes) before generating any images
                         if haplotypes is None:
                             haplotypes = self.generate_haplotypes(item)
-                        if None in haplotypes["true"]:
+                        if self._skip_unlabeled and None in haplotypes["true"]:
                             self._counts["unlabeled"] += 1
+                            continue
+                        if not self._keep_hom_ref(key, haplotypes["true"]):
+                            self._counts["downsampled"] += 1
                             continue
                     example = self.from_graph(
                         region, item.graph, item.sampler, item.unique_kmers, item.analysis_variants, item.sample_idx,
@@ -750,9 +789,22 @@ class GraphWriter(RegionActor):
             num_regions += 1
         return num_regions
 
+    def _keep_hom_ref(self, key: str, true: Sequence[int | None]) -> bool:
+        """Whether to keep the example with true haplotype indices `true` (always, unless it is hom. ref. and dropped by
+        `hom_ref_downsample`)"""
+        if self._hom_ref_downsample is None or not is_hom_ref(true):
+            return True
+        region = region_key(key, self.sample.name)
+        if (counts := self._region_stats.get(region)) is None:
+            # E.g., the region statistics were computed from different samples or graphs
+            self._counts["downsample_missing"] += 1
+            return True
+        return self._hom_ref_downsample.keep(region, self.sample.name, counts)
+
     def counts(self) -> dict[str, int]:
         """The number of regions whose haplotypes were "precomputed", "generated" inline or "skipped" as precomputed, and
-        the number of regions skipped as "unlabeled" (with `skip_unlabeled`)"""
+        the number of regions skipped as "unlabeled" (with `skip_unlabeled`) or "downsampled" (with `hom_ref_downsample`,
+        and the number of hom. ref. regions kept because they were "downsample_missing" from its region statistics)"""
         return dict(self._counts)
 
     def close(self):
@@ -939,6 +991,14 @@ def vcf_to_graph_examples(
             for each region they were generated for with the same graph. Haplotypes are generated inline for the rest.
     """
     with contextlib.ExitStack() as stack:
+        # Check the downsampling settings (and region statistics) before starting any (lengthy) work
+        downsample, region_stats = make_hom_ref_downsample(cfg)
+        if downsample is not None:
+            logging.info("Downsampling hom. ref. examples with %s, given statistics for %d regions", downsample, len(region_stats))
+        del region_stats
+        if (genotype_subset := genotype_subset_from_config(OmegaConf.select(cfg, "genotype_subset"))) is not None:
+            logging.info("Generating simulated images for a subset of genotypes: %s", genotype_subset)
+
         tmp_dir = _init_ray(cfg, stack)
 
         tree, reuse_comparisons = None, False
@@ -1016,6 +1076,11 @@ def vcf_to_graph_examples(
             counts.update(actor_counts)
         if counts["unlabeled"]:
             logging.info("Skipped %d unlabeled regions for sample %s", counts["unlabeled"], sample.name)
+        if counts["downsampled"] or counts["downsample_missing"]:
+            logging.info(
+                "Skipped %d downsampled hom. ref. regions for sample %s (and kept %d hom. ref. regions without statistics)",
+                counts["downsampled"], sample.name, counts["downsample_missing"],
+            )
         if tree is not None:
             logging.info(
                 "Used precomputed haplotypes from %s for %d regions (and skipped %d), generated them for %d",

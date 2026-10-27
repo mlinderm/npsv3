@@ -45,5 +45,10 @@ pad: true
 # LabelDiffersFilter needs the dataset's `comparisons` aux tree (`command=compare`); CopositiveFilter also needs a
 # `command=copositive` dataset. Both are checked before training starts. null -> no filtering.
 filters: null
+# Train with only a subset of each example's genotypes (the train split only), e.g., to compare with images generated with
+# `genotype_subset` without regenerating them (see npsv3.images.subsets.GenotypeSubset):
+#   data.genotype_subset='{include_homozygous: true}'
+# null -> all genotypes.
+genotype_subset: null
 mean: [0.5]
 std: [0.5]

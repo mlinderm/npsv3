@@ -44,6 +44,13 @@ def _make_path_or_list_absolute(cfg: DictConfig, key: str):
         OmegaConf.update(cfg, key, [hydra.utils.to_absolute_path(path) for path in value])
 
 
+def _make_filter_paths_absolute(cfg: DictConfig):
+    """Make the paths in the training example filters (`data.filters`, see `npsv3.models.filters`) absolute"""
+    filters = OmegaConf.select(cfg, "data.filters")
+    for i in range(len(filters) if filters is not None else 0):
+        _make_paths_absolute(cfg, [f"data.filters.{i}.region_stats"])
+
+
 def _graph_shards(cfg: DictConfig) -> list[str] | None:
     """Pre-generated graph shards if specified (`graph_shards`), otherwise None to generate them on-the-fly (slower)"""
     if OmegaConf.is_missing(cfg, "graph_shards") or OmegaConf.select(cfg, "graph_shards") is None:
@@ -102,7 +109,10 @@ def main(cfg: DictConfig) -> None:
     elif cfg.command == "images":
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "reads", "input", "stats_path", "unique_kmer_path", "filtered_kmer_path"])
+        _make_paths_absolute(
+            cfg,
+            ["reference", "reads", "input", "stats_path", "unique_kmer_path", "filtered_kmer_path", "hom_ref_downsample.region_stats"],
+        )
         _check_shared_reference(cfg)
 
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
@@ -151,6 +161,18 @@ def main(cfg: DictConfig) -> None:
             filtered_kmer_path=OmegaConf.select(cfg, "filtered_kmer_path"),
         )
 
+    elif cfg.command == "region_stats":
+        # Count each region's labeled, hom. ref. and carrier samples across a cohort (for hom. ref. downsampling)
+        from npsv3.images.subsets import expand_sources, region_stats, write_region_stats
+
+        patterns = [cfg.input] if isinstance(cfg.input, str) else list(cfg.input)
+        sources = expand_sources([hydra.utils.to_absolute_path(pattern) for pattern in patterns])
+        output = "region_stats.tsv" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+
+        stats = region_stats(sources, max_workers=cfg.threads)
+        write_region_stats(stats, output)
+        logging.info("Wrote statistics for %d regions from %d inputs to %s", len(stats), len(sources), output)
+
     elif cfg.command == "train":
         import torch
         from npsv3.models.runners import train
@@ -171,7 +193,8 @@ def main(cfg: DictConfig) -> None:
             "data.test_metadataset_paths",
         ):
             _make_path_or_list_absolute(cfg, key)
-       
+        _make_filter_paths_absolute(cfg)
+
         checkpoint = train(cfg, output_dir=output)
 
         if not OmegaConf.select(cfg, "trainer.fast_dev_run", default=False):
@@ -217,6 +240,7 @@ def main(cfg: DictConfig) -> None:
             "data.test_metadataset_paths",
         ):
             _make_path_or_list_absolute(cfg, key)
+        _make_filter_paths_absolute(cfg)
 
         # If no output file is specified, create a fixed file in the Hydra output directory
         output = "losses.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
@@ -232,6 +256,7 @@ def main(cfg: DictConfig) -> None:
 
         # input is a per-split metadataset path
         _make_paths_absolute(cfg, ["input", "model.checkpoint", "data.cache_dir"])
+        _make_filter_paths_absolute(cfg)
 
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)

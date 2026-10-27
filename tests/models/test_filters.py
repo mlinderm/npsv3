@@ -11,8 +11,10 @@ from omegaconf import OmegaConf
 from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, COMPARISONS_DIR
 from npsv3.images.sequence_compare import ComparisonOptions, load_comparison_records, prepare_comparison_tree
 from npsv3.models.energon import _read_split, estimate_epoch_batches, set_aux_tree
+from npsv3.images.subsets import RegionCounts, region_key, write_region_stats
 from npsv3.models.filters import (
     CopositiveFilter,
+    HomRefDownsampleFilter,
     LabelDiffersFilter,
     build_filters,
     classify_copositive,
@@ -67,6 +69,41 @@ def test_copositive_filter():
     unscored = {"label": 0}
     assert CopositiveFilter().keep(unscored, DIFFERENT)
     assert not CopositiveFilter(missing="exclude").keep(unscored, DIFFERENT)
+
+
+def test_classify_copositive_genotype_subset():
+    # An example with genotypes 0 and 2 (of 3), whose top alternative (at position 1) is genotype 2
+    result = classify_copositive(0, [0.01, 0.99], [1.0, 0.1], SAME, genotype_idxs=[0, 2])
+    assert result["category"] == "suspect"
+    assert result["alt"] == 1
+    assert result["differ_alt"] is True
+    # The filter maps the example's genotypes with its `genotype_idxs`
+    row = {"label": 0, "genotype_probs": [0.01, 0.99], "genotype_weights": [1.0, 0.1], "genotype_idxs": [0, 2]}
+    assert not CopositiveFilter().keep(row, SAME)
+    assert CopositiveFilter().keep({**row, "genotype_idxs": None}, SAME)  # Genotype 1 is sequence-equivalent
+
+
+def test_hom_ref_downsample_filter(tmp_path):
+    region_stats = tmp_path / "region_stats.tsv"
+    write_region_stats({"chr1_0_100": RegionCounts(carriers=0, hom_ref=1000, labeled=1000)}, region_stats)
+
+    def row(sample, label, region="chr1_0_100", **kwargs):
+        return {"key": f"{sample}_{region}", "sample": sample, "label": label, **kwargs}
+
+    drop_all = HomRefDownsampleFilter(str(region_stats), min_keep=0)
+    assert not drop_all.keep(row("S0", 0), None)
+    assert drop_all.keep(row("S0", 1), None), "Non-reference examples are kept"
+    assert drop_all.keep(row("S0", 1, genotype_idxs=[0, 2]), None), "Non-reference examples are kept"
+    assert drop_all.keep(row("S0", None), None), "Unlabeled examples are kept (and rejected later)"
+    assert not drop_all.keep(row("S0", 0, genotype_idxs=[0, 2]), None)
+    assert drop_all.keep(row("S0", 0, region="chr1_200_300"), None), "Regions without statistics are kept..."
+    assert not HomRefDownsampleFilter(str(region_stats), min_keep=0, missing="exclude").keep(
+        row("S0", 0, region="chr1_200_300"), None
+    ), "...unless `missing` is `exclude`"
+
+    kept = sum(HomRefDownsampleFilter(str(region_stats), min_keep=50).keep(row(f"S{i}", 0), None) for i in range(1000))
+    assert 25 <= kept <= 75  # noqa: PLR2004
+    assert HomRefDownsampleFilter(str(region_stats)) == HomRefDownsampleFilter(str(region_stats), ratio=2, min_keep=5)
 
 
 def test_invalid_filters():
@@ -166,6 +203,18 @@ def test_estimate_epoch_batches_applies_filters(compared_dataset, caplog):
     assert filtered < unfiltered
     excluded = len(_expected_regions(rows, lambda _: True)) - len(_expected_regions(rows, lambda i: i % 4 != 0 and i % 5 != 0))
     assert f"exclude {excluded} otherwise accepted groups" in caplog.text
+
+
+@pytest.mark.slow
+def test_hom_ref_downsample_filter_in_loader(compared_dataset, tmp_path):
+    rows = _rows(compared_dataset)
+    region_stats = tmp_path / "region_stats.tsv"
+    write_region_stats(
+        {region_key(row["key"], row["sample"]): RegionCounts(carriers=0, hom_ref=100, labeled=100) for row in rows},
+        region_stats,
+    )
+    dm = _make_dm(compared_dataset, repeat=False, filters=[HomRefDownsampleFilter(str(region_stats), min_keep=0)])
+    assert set(_train_regions(dm)) == _expected_regions(rows, lambda i: rows[i]["label"] != 0)
 
 
 @pytest.mark.slow

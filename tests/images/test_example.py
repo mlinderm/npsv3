@@ -1,3 +1,4 @@
+import contextlib
 import glob
 import json
 import logging
@@ -366,6 +367,97 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         assert all(first_batch.labels[2 * cfg.simulation.replicates * 10:] == -100)
         assert first_batch.meta == [str(region)]*2
 
+
+    @pytest.mark.usefixtures("ray_setup")
+    def test_vcf_to_energon_dataset_with_genotype_subset(self, cfg, hg00733_sample, tmp_path):
+        """With `genotype_subset`, only the genotypes that share a haplotype with the label (and hom. ref.) are simulated,
+        and the example records which genotypes it has"""
+        from megatron.energon.cache.file_store import WebdatasetFileStore
+        from megatron.energon.epathlib import EPath
+
+        from npsv3.constants import HAPLOTYPES_SUFFIX
+        from npsv3.images.haplotypes import decode_haplotype_record
+        from npsv3.images.subsets import GenotypeSubset, genotypes
+        from npsv3.models.energon import EnergonPackedImageDataModule
+
+        region = Range("chr1:1134644-1134867")
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+
+        OmegaConf.update(cfg, "genotype_subset", {"enabled": True, "include_homozygous": False}, force_add=True)
+        output_dir = str(tmp_path / "energon")
+        vcf_to_graph_examples(
+            cfg, cfg.reads, hg00733_sample, cfg.input, output_dir, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path,
+        )
+
+        with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+            [row] = [json.loads(line) for line in meta_file if line.strip()]
+        haplotypes = decode_haplotype_record(WebdatasetFileStore(EPath(os.path.join(output_dir, "imgs_ds")))[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0])
+        n, true = len(haplotypes["paths"]), tuple(sorted(haplotypes["true"]))
+        assert row["num_haplotypes"] == n
+        assert row["genotype_idxs"] == GenotypeSubset(include_homozygous=False).genotype_idxs(n, true)
+        assert row["g"] == len(row["genotype_idxs"]) < len(genotypes(n)), "Only a subset of the genotypes are simulated"
+        assert genotypes(n)[row["genotype_idxs"][row["label"]]] == true, "The label is along the subset"
+        assert len(row["label_rank"]) == row["g"] and row["label_rank"][row["label"]] == 1
+
+        dm = EnergonPackedImageDataModule(
+            train_metadataset_paths=os.path.join(output_dir, "dataset.yaml"), cache_dir=str(tmp_path / "cache"), batch_size=64,
+            num_workers=0, repeat=False,
+        )
+        [batch] = list(dm.train_dataloader())
+        dm.teardown()
+        assert torch.equal(batch.offsets, torch.tensor([0, cfg.simulation.replicates * row["g"]]))
+        assert int(batch.genotype_label[0]) == row["label"]
+
+    @pytest.mark.usefixtures("ray_setup")
+    @pytest.mark.parametrize(("min_keep", "in_stats", "kept"), [(0, True, False), (100, True, True), (0, False, True)])
+    def test_vcf_to_energon_dataset_with_hom_ref_downsample(self, cfg, hg00733_sample, tmp_path, caplog, min_keep, in_stats, kept):
+        """With `hom_ref_downsample`, hom. ref. examples are skipped according to the region statistics: all are dropped
+        with `min_keep=0` in a region without carriers, all are kept when `min_keep` is at least the number of hom. ref.
+        samples, and examples in regions without statistics are kept"""
+        from npsv3.images.example import energon_key
+        from npsv3.images.subsets import RegionCounts, region_key, write_region_stats
+
+        # cSpell:disable
+        vcf_path = create_vcf(tmp_path, b"""##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##contig=<ID=chr1,length=248956422>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00733
+chr1	1134739	.	A	ACATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGC	30	PASS	.	GT	0|0
+chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGA	30	PASS	.	GT	0|0"""
+        ) # fmt: skip
+        # cSpell:enable
+        region = Range("chr1:1134644-1134867")
+        cfg.input = vcf_path
+        cfg.simulation.replicates = 0
+        cfg.haplotype.strategy._target_ = "npsv3.images.haplotypes.TrueHaplotypeStrategy"
+        graph_shards, filtered_kmer_path = cache_graph_and_filter_kmc_database(cfg, hg00733_sample, cfg.input, region)
+
+        stats_path = tmp_path / "region_stats.tsv"
+        stats_region = region_key(energon_key(hg00733_sample.name, region), hg00733_sample.name) if in_stats else "chr2_0_100"
+        write_region_stats({stats_region: RegionCounts(carriers=0, hom_ref=100, labeled=100)}, stats_path)
+        OmegaConf.update(
+            cfg, "hom_ref_downsample",
+            {"enabled": True, "region_stats": str(stats_path), "ratio": 2.0, "min_keep": min_keep, "seed": 0},
+            force_add=True,
+        )
+
+        output_dir = str(tmp_path / "energon")
+        with caplog.at_level(logging.INFO), contextlib.ExitStack() as stack:
+            if not kept:
+                # This is the only region, so no examples are written at all (which is an error when preparing the dataset)
+                stack.enter_context(pytest.raises(ValueError, match="No .* shards found"))
+            vcf_to_graph_examples(
+                cfg, cfg.reads, hg00733_sample, cfg.input, output_dir, graph_shards=graph_shards, filtered_kmer_path=filtered_kmer_path,
+            )
+        if kept:
+            with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+                [row] = [json.loads(line) for line in meta_file if line.strip()]
+            assert row["label"] == 0
+        if not kept:
+            assert "Skipped 1 downsampled hom. ref. regions" in caplog.text
+        if not in_stats:
+            assert "kept 1 hom. ref. regions without statistics" in caplog.text
 
     @pytest.mark.usefixtures("ray_setup")
     def test_vcf_to_energon_dataset_with_graphs_on_the_fly(self, cfg, hg00733_sample, tmp_path):

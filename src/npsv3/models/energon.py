@@ -57,6 +57,7 @@ from npsv3.constants import (
     SIMS_SUFFIX,
 )
 from npsv3.images.sequence_compare import decode_comparison_record, load_comparison_records
+from npsv3.images.subsets import GenotypeSubset, genotype_subset_from_config
 from npsv3.models.filters import (
     ExampleFilter,
     build_filters,
@@ -105,6 +106,12 @@ class GroupMeta(Sample):
     sims: Any = None
     #: Whether the pixels are stored channel-first (`CHW_LAYOUT`), rather than channel-last (`HWC_LAYOUT`)
     channels_first: bool = False
+    #: Each stored genotype's index into all the possible genotypes, and the number of candidate haplotypes (None for
+    #: examples written before they were recorded, which have every genotype; see `images.subsets`)
+    genotype_idxs: list[int] | None = None
+    num_haplotypes: int | None = None
+    #: Positions of the stored genotypes to pack, None for all of them. Filled in by `preencode_sample`.
+    selected: list[int] | None = None
     #: Image slots this group occupies in a pack. Filled in by `preencode_sample`.
     cost: int = 0
 
@@ -154,6 +161,8 @@ def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> Group
         # (`r > 0`); `g` can now be nonzero (genotypes considered) even without simulated images.
         sims=cache.get_lazy(imgs, f"{key}.{sims_suffix}") if int(meta["r"]) > 0 else None,
         channels_first=layout == CHW_LAYOUT,
+        genotype_idxs=None if meta.get("genotype_idxs") is None else [int(idx) for idx in meta["genotype_idxs"]],
+        num_haplotypes=None if meta.get("num_haplotypes") is None else int(meta["num_haplotypes"]),
     )
 
 
@@ -185,6 +194,15 @@ def _group_accepted(
     if w_max is not None and w > w_max:
         return False
     return True
+
+
+def _select_genotypes(row: Mapping, genotype_subset: GenotypeSubset | None) -> list[int] | None:
+    """Positions of the stored genotypes in `genotype_subset` for the example with metadata `row`, None for all of them
+    (no subset, an unlabeled example or an example with only those genotypes already)"""
+    if genotype_subset is None or int(row["g"]) < 1:
+        return None
+    selected = genotype_subset.select(row)
+    return None if selected is None or len(selected) == int(row["g"]) else selected
 
 
 GZIP_MAGIC = b"\x1f\x8b"
@@ -249,6 +267,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         pad: bool = True,
         padding_value: int = LABEL_PADDING_VALUE,
         filters: Sequence[ExampleFilter] = (),
+        genotype_subset: GenotypeSubset | None = None,
     ):
         """
         Args:
@@ -262,6 +281,9 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
                 rejected outright (`_group_accepted`) rather than packed with this value, since the
                 metric-learning loss has no positive to score them against.
             filters: Exclude groups that any of these filters reject (see `npsv3.models.filters`).
+            genotype_subset: Pack only these genotypes of each (labeled) group, e.g., to train with a subset of the
+                genotypes in a dataset generated with all of them (see `images.subsets`). The pack cost (and `g_max`)
+                reflect the subset, but all of the group's simulated images are still fetched.
         """
         super().__init__()
         self.budget = budget
@@ -273,6 +295,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         self.padding_value = padding_value
         self.filters = tuple(filters)
         self._needs_comparisons = requires_comparisons(self.filters)
+        self.genotype_subset = genotype_subset
 
     @stateless
     def cook_crude_sample(self, sample: dict, cooker: Cooker, aux: dict[str, FileStore]) -> GroupMeta:
@@ -293,18 +316,19 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
                 raise SkipSample
         return super().cook_crude_sample(sample, cooker, aux)
 
-    def _cost(self, sample: GroupMeta) -> int:
-        return _group_cost(sample.r, sample.g, sample.w, self.w_bucket)
-
     @stateless
     def preencode_sample(self, sample: GroupMeta) -> GroupMeta:
-        """Compute the pack cost and reject groups that cannot be packed without needing images."""
-        if not _group_accepted(
-            sample.r, sample.g, sample.w, label=sample.label, g_max=self.g_max, r_max=self.r_max, w_max=self.w_max
-        ):
+        """Select the genotypes to pack, compute the pack cost and reject groups that cannot be packed without needing
+        images."""
+        sample.selected = _select_genotypes(
+            {"g": sample.g, "label": sample.label, "genotype_idxs": sample.genotype_idxs, "num_haplotypes": sample.num_haplotypes},
+            self.genotype_subset,
+        )
+        g = sample.g if sample.selected is None else len(sample.selected)
+        if not _group_accepted(sample.r, g, sample.w, label=sample.label, g_max=self.g_max, r_max=self.r_max, w_max=self.w_max):
             raise SkipSample
 
-        sample.cost = self._cost(sample)
+        sample.cost = _group_cost(sample.r, g, sample.w, self.w_bucket)
         if sample.cost > self.budget:
             # Never give an oversized group its own bin; it would blow the fixed pack shape
             raise SkipSample
@@ -328,12 +352,20 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             # `preencode_sample` already rejected unlabeled groups (`_group_accepted`), so `label_rank` is
             # always defined here.
             assert sample.label_rank is not None, "Unlabeled group reached pack_selected_samples"
+            label_rank = torch.tensor(sample.label_rank, dtype=torch.long)
+            label = sample.label
+            if sample.selected is not None:
+                # The genotype subset always includes the label
+                selected = torch.tensor(sample.selected, dtype=torch.long)
+                sims = sims.index_select(1, selected)
+                label_rank = label_rank[selected]
+                label = sample.selected.index(label)
             groups.append(
                 ImageGroup(
                     query=real,
                     support=sims,
-                    label_rank=torch.tensor(sample.label_rank, dtype=torch.long),
-                    genotype_label=sample.label,
+                    label_rank=label_rank,
+                    genotype_label=label,
                     meta=sample.region,
                 )
             )
@@ -573,6 +605,7 @@ def estimate_epoch_batches(
     world_size: int = 1,
     occupancy: float = 0.9,
     filters: Sequence[ExampleFilter] = (),
+    genotype_subset: GenotypeSubset | None = None,
 ) -> int:
     """Estimate the number of packed batches in one pass over one or more `prepare_energon_dataset` trees.
 
@@ -611,6 +644,7 @@ def estimate_epoch_batches(
         filters: Exclude the groups these filters reject, as `PackedGroupTaskEncoder` would (see
             `npsv3.models.filters`). Comparison records, if needed, are read in bulk from each tree's
             `comparisons` aux tree.
+        genotype_subset: Pack only these genotypes of each group, as `PackedGroupTaskEncoder` would.
 
     Returns:
         A batch count of at least 1.
@@ -628,7 +662,9 @@ def estimate_epoch_batches(
                     if not line.strip():
                         continue
                     row = json.loads(line)
-                    r, g, w = int(row["r"]), int(row["g"]), int(row["w"])
+                    r, w = int(row["r"]), int(row["w"])
+                    selected = _select_genotypes(row, genotype_subset)
+                    g = int(row["g"]) if selected is None else len(selected)
                     label = row.get("label")
                     if not _group_accepted(r, g, w, label=label, g_max=g_max, r_max=r_max, w_max=w_max):
                         continue
@@ -733,6 +769,9 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             these filters reject (filter objects or Hydra `_target_` configs, see `npsv3.models.filters`).
             Only the train split is filtered. The train datasets are checked for the data the filters
             need (e.g. a `comparisons` aux tree) up front. Defaults to None (no filtering).
+        genotype_subset (GenotypeSubset | Mapping | None, optional): Train with only a subset of each example's genotypes
+            (a `GenotypeSubset` or its config, with an optional `enabled`, see `npsv3.images.subsets`). Only the train
+            split is subset, so validation and testing are with all of the genotypes. Defaults to None (all genotypes).
     """
 
     def __init__(
@@ -767,12 +806,16 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         repeat: bool = True,
         verbose: bool = False,
         filters: Sequence[ExampleFilter | Mapping] | None = None,
+        genotype_subset: GenotypeSubset | Mapping | None = None,
         **_kwargs,
     ):
         super().__init__()
         # Filters are objects (once instantiated by Hydra), which don't belong in checkpointed hyperparameters
-        self.save_hyperparameters(ignore=["filters"])
+        self.save_hyperparameters(ignore=["filters", "genotype_subset"])
         self.train_filters = build_filters(filters)
+        self.train_genotype_subset = genotype_subset_from_config(genotype_subset)
+        if self.train_genotype_subset is not None:
+            logging.info("Training with a subset of the genotypes: %s", self.train_genotype_subset)
 
         # `get_train_dataset`/`get_val_dataset` accept either a path or a dict, even though their type stubs only
         # declare `str | EPath | Path` requiring `# type: ignore`s below.
@@ -820,7 +863,9 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         # One pool per split (see `_make_cache_pool`)
         self._cache_pools: dict[str, FileStoreCachePool] = {}
 
-    def _task_encoder(self, filters: Sequence[ExampleFilter] = ()) -> PackedGroupTaskEncoder:
+    def _task_encoder(
+        self, filters: Sequence[ExampleFilter] = (), genotype_subset: GenotypeSubset | None = None
+    ) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
             budget=self.hparams["batch_size"],
             w_bucket=self.hparams["w_bucket"],
@@ -829,6 +874,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             r_max=self.hparams["r_max"],
             pad=self.hparams["pad"],
             filters=filters,
+            genotype_subset=genotype_subset,
         )
 
     def _worker_config(self) -> WorkerConfig:
@@ -908,7 +954,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 packing_buffer_size=self.hparams["packing_buffer_size"],
                 shuffle_buffer_size=self.hparams["shuffle_buffer_size"],
                 max_samples_per_sequence=self.hparams["max_samples_per_sequence"],
-                task_encoder=self._task_encoder(self.train_filters),
+                task_encoder=self._task_encoder(self.train_filters, self.train_genotype_subset),
                 repeat=self.hparams["repeat"],
             )
         self._loader = self._make_loader(dataset, "train")

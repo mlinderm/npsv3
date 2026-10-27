@@ -9,6 +9,7 @@ Filters are configured as a list of Hydra `_target_` configs in `data.filters`, 
 
     data.filters='[{_target_: npsv3.models.filters.LabelDiffersFilter}]'
     data.filters='[{_target_: npsv3.models.filters.CopositiveFilter, exclude: [suspect, suspect_soft]}]'
+    data.filters='[{_target_: npsv3.models.filters.HomRefDownsampleFilter, region_stats: region_stats.tsv}]'
 
 Each filter declares what data it needs (`requires_comparisons`, `required_fields`), which
 `check_filter_requirements` verifies against the train datasets before training, so a missing aux tree or annotation
@@ -25,6 +26,7 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 
 from npsv3.constants import COMPARISONS_AUX
+from npsv3.images.subsets import HomRefDownsample, is_hom_ref_label, read_region_stats, region_key
 
 MissingPolicy = Literal["keep", "exclude"]
 
@@ -133,6 +135,7 @@ def classify_copositive(
     genotype_weights: Sequence[float],
     comparison: Mapping | None,
     thresholds: CopositiveThresholds = CopositiveThresholds(),  # noqa: B008
+    genotype_idxs: Sequence[int] | None = None,
 ) -> dict:
     """Classify one example from its real query's top alternative genotype g', by whether g' is a look-alike of the label
     in simulation (`genotype_weights`, the co-positive `conf`), sequence-equivalent to the label (the comparison record's
@@ -147,9 +150,13 @@ def classify_copositive(
     - "suspect": Separable and the real data confidently prefers a differing g', likely an incorrect label
     - "suspect_soft": Separable and the real data weakly prefers a differing g', possibly a noisy label
 
+    `label`, `genotype_probs` and `genotype_weights` are along the example's genotypes, while the comparison record has
+    every possible genotype. `genotype_idxs` maps the former to the latter for an example with a subset of the genotypes
+    (see `images.subsets`), None if the example has every genotype.
+
     Returns:
         A dict with the `category` and the values it was derived from (`prediction`, `alt`, `conf_alt`, `p_label`,
-        `p_alt`, `differ_alt` and `score_alt`)
+        `p_alt`, `differ_alt` and `score_alt`). `prediction` and `alt` are along the example's genotypes.
     """
     p = np.asarray(genotype_probs, dtype=float)
     conf = np.asarray(genotype_weights, dtype=float)
@@ -160,8 +167,9 @@ def classify_copositive(
     # Skipped comparisons (sequences > `max_length`) have no per-genotype `genotype_differ`/`genotype_score`
     differ = None if comparison is None else comparison.get("genotype_differ")
     score = None if comparison is None else comparison.get("genotype_score")
-    differ_alt = bool(differ[best_alt]) if differ is not None else None
-    score_alt = float(score[best_alt]) if score is not None else float("nan")
+    compared_alt = best_alt if genotype_idxs is None else int(genotype_idxs[best_alt])
+    differ_alt = bool(differ[compared_alt]) if differ is not None else None
+    score_alt = float(score[compared_alt]) if score is not None else float("nan")
 
     look = conf[best_alt] >= thresholds.conf_threshold
     equiv = differ_alt is False or score_alt >= thresholds.score_equiv
@@ -247,8 +255,65 @@ class CopositiveFilter(ExampleFilter):
         probs, weights, label = row.get("genotype_probs"), row.get("genotype_weights"), row.get("label")
         if probs is None or weights is None or label is None:
             return _resolve(self.missing)
-        category = classify_copositive(int(label), probs, weights, comparison, self.thresholds)["category"]
+        category = classify_copositive(
+            int(label), probs, weights, comparison, self.thresholds, genotype_idxs=row.get("genotype_idxs")
+        )["category"]
         return category not in self.exclude
+
+
+class HomRefDownsampleFilter(ExampleFilter):
+    """Exclude some hom. ref. examples: keep every non-reference example and about
+    max(`min_keep`, ceil(`ratio` x carriers)) of each region's hom. ref. examples, exactly as `hom_ref_downsample` would
+    during image generation with the same `region_stats` and `seed` (see `images.subsets.HomRefDownsample`).
+
+    Since a larger `ratio` (or `min_keep`) keeps a superset of the examples, this can also further reduce a dataset that
+    was already downsampled with a smaller `ratio` (and the same statistics and seed).
+
+    Args:
+        region_stats: The cohort's region statistics (the output of `command=region_stats`)
+        ratio: Hom. ref. examples to keep per carrier
+        min_keep: Minimum hom. ref. examples to keep per region
+        seed: Seed for the per-example decision
+        missing: What to do with hom. ref. examples whose region isn't in `region_stats`
+    """
+
+    required_fields: ClassVar[tuple[str, ...]] = ("sample",)
+
+    region_stats: str
+    missing: MissingPolicy
+    downsample: HomRefDownsample
+
+    def __init__(
+        self,
+        region_stats: str,
+        ratio: float = HomRefDownsample.ratio,
+        min_keep: int = HomRefDownsample.min_keep,
+        seed: int = HomRefDownsample.seed,
+        missing: MissingPolicy = "keep",
+    ):
+        _resolve(missing)
+        self.region_stats = str(region_stats)
+        self.missing = missing
+        self.downsample = HomRefDownsample(ratio=float(ratio), min_keep=int(min_keep), seed=int(seed))
+        self._counts = read_region_stats(self.region_stats)
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return {
+            "region_stats": self.region_stats,
+            "ratio": self.downsample.ratio,
+            "min_keep": self.downsample.min_keep,
+            "seed": self.downsample.seed,
+            "missing": self.missing,
+        }
+
+    def keep(self, row: Mapping, comparison: Mapping | None) -> bool:  # noqa: ARG002
+        if not is_hom_ref_label(row):
+            return True
+        region = region_key(row["key"], row["sample"])
+        if (counts := self._counts.get(region)) is None:
+            return _resolve(self.missing)
+        return self.downsample.keep(region, row["sample"], counts)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
