@@ -1,10 +1,12 @@
 import glob
 import json
+import logging
 import os
 
 import hydra
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from npsv3.graphs.haplotype import KmerCounts, _create_graph_and_sampler, _filter_variants
 from npsv3.images import agreement
@@ -526,7 +528,7 @@ def _assert_graph_links(output_dir: str, sample_name: str, *, expected_graphs_di
 
 @pytest.mark.cfg_overrides(
     f"reference={HG38_REF_FASTA}",
-    "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23.dipcall.population.passing.training.hg38.vcf.gz",
+    "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/hgsvc3-hprc-2024-02-23-mc-chm13/hgsvc3-hprc-2024-02-23-mc-chm13.dipcall.population.passing.training.hg38.vcf.gz",
     "reads=/storage/mlinderman/projects/sv/npsv3-experiments/resources/sequence/HG00096.final.cram",
     "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
     "graph.population_prior=True",
@@ -608,7 +610,7 @@ class TestHGSVC3HPRCDipcallPopulationGraphExamples:
 class TestHGSVC3HPRCPopulationGraphExamples:
     @pytest.mark.usefixtures("ray_setup")
     @pytest.mark.parametrize("region_str", ["chr3:184555693-184555884"])
-    def test_no_labels(self, cfg, hg00096_sample, region_str, tmp_path):
+    def test_no_labels(self, cfg, hg00096_sample, region_str, tmp_path, caplog):
         """HG00096's genotype in this region is partially missing (one called allele, one missing) which is treated as
         unresolved, and thus unlabled genotype"""
 
@@ -638,6 +640,22 @@ class TestHGSVC3HPRCPopulationGraphExamples:
         [example] = rows
         assert example.get("label") is None
         assert example.get("label.rank") is None
+
+        # Unlabeled regions are skipped entirely with `skip_unlabeled` (the `images` command's default)
+        OmegaConf.update(cfg, "skip_unlabeled", True, force_add=True)
+        output_dir = str(tmp_path / "skipped")
+        # This is the only region, so no examples are written at all (which is an error when preparing the dataset)
+        with caplog.at_level(logging.INFO), pytest.raises(ValueError, match="No .* shards found"):
+            vcf_to_graph_examples(
+                cfg,
+                cfg.reads,
+                hg00096_sample,
+                cfg.input,
+                output_dir,
+                graph_shards=graph_shards,
+                filtered_kmer_path=filtered_kmer_path,
+            )
+        assert "Skipped 1 unlabeled regions" in caplog.text
 
 
 @pytest.mark.cfg_overrides(

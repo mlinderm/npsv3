@@ -20,7 +20,22 @@ from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
 
-from npsv3.constants import COMPARISONS_AUX, COMPARISONS_DIR, HAPLOTYPES_SUFFIX, REAL_SUFFIX, SIMS_SUFFIX
+try:
+    from compression import zstd  # Python 3.14+
+except ImportError:
+    from backports import zstd
+
+from npsv3.constants import (
+    CHW_LAYOUT,
+    COMPARISONS_AUX,
+    COMPARISONS_DIR,
+    HAPLOTYPES_SUFFIX,
+    HWC_LAYOUT,
+    LEGACY_REAL_SUFFIX,
+    LEGACY_SIMS_SUFFIX,
+    REAL_SUFFIX,
+    SIMS_SUFFIX,
+)
 from npsv3.graphs.graph import Graph
 from npsv3.graphs.haplotype import (
     HaplotypePriorOverlay,
@@ -351,10 +366,14 @@ def make_graph_example(
     return example
 
 
-PIXEL_COMPRESS_LEVEL = 1
-"""zlib level for per-member pixel compression. Pileup pixels are ~38% exact zeros, so level 1
-already reaches ~7.6x; higher levels cost generation time for very little.
+PIXEL_COMPRESS_LEVEL = 10
+"""zstd level for per-member (channel-first) pixel compression. Many channels are mostly constant within an image, so
+channel-first pixels compress to ~57% of the size of channel-last pixels with gzip level 1 (the `HWC_LAYOUT`) and
+decompress faster. Higher levels cost generation time for little further reduction.
 """
+
+LEGACY_PIXEL_COMPRESS_LEVEL = 1
+"""gzip level for per-member channel-last pixel compression (the `HWC_LAYOUT`)"""
 
 def energon_key(sample_name: str, region: Range) -> str:
     """Return globally unique, dot-free key for a region's example (incorporating sample name)"""
@@ -370,7 +389,7 @@ class EnergonExampleWriter:
     """Writes generated examples to one shard stream owned by a single actor.
 
     Polylithic energon trees: one flat JSONL metadata file per actor beside a sharded,
-    gzipped-per-member pixel tar.
+    compressed-per-member pixel tar.
 
     Splitting a region's metadata from its pixels is what lets the packing buffer decide a pack from
     metadata alone -- `g`, `r` and the geometry are all the cost function needs -- and only then fetch
@@ -386,11 +405,23 @@ class EnergonExampleWriter:
     file: since it is already one small flat record per example, `estimate_epoch_batches` can stream
     it directly with plain `json.loads`, no separate artifact needed.
 
-    The pixel tar stays plain and uncompressed with per-member gzip: gzipping the tar itself would
-    destroy the random access within a shard that the aux lookup depends on.
+    The pixel tar stays plain and uncompressed with per-member compression: compressing the tar itself would
+    destroy the random access within a shard that the aux lookup depends on. Pixels are written channel-first and
+    zstd-compressed (`CHW_LAYOUT`), so the loader can use the decompressed bytes as-is, or channel-last and
+    gzip-compressed (`HWC_LAYOUT`), as for datasets generated before `layout` was recorded.
     """
 
-    def __init__(self, index: int, output_dir: str, *, maxcount: int = 100_000, maxsize: float = 3e9):
+    def __init__(
+        self,
+        index: int,
+        output_dir: str,
+        *,
+        maxcount: int = 100_000,
+        maxsize: float = 3e9,
+        layout: str = CHW_LAYOUT,
+    ):
+        assert layout in (CHW_LAYOUT, HWC_LAYOUT), f"Unknown pixel layout {layout!r}"
+        self._layout = layout
         meta_dir = os.path.join(output_dir, "meta_ds")
         imgs_dir = os.path.join(output_dir, "imgs_ds")
         os.makedirs(meta_dir, exist_ok=True)
@@ -402,16 +433,18 @@ class EnergonExampleWriter:
             maxcount=maxcount,
             maxsize=maxsize,
             mtime=0,  # Deterministic shards, so a regenerated shard compares byte-for-byte
-            encoder=False,  # Members below are already-encoded, pre-gzipped bytes
+            encoder=False,  # Members below are already-encoded, pre-compressed bytes
             verbose=0,
         )
         meta_path = os.path.join(meta_dir, f"meta-{index:04d}.jsonl")
         self._meta_file: typing.TextIO = open(meta_path, "w")  # noqa: SIM115
 
-    @staticmethod
-    def _compress(array: np.ndarray) -> bytes:
+    def _compress(self, array: np.ndarray) -> bytes:
+        """Compress channel-last `(..., H, W, C)` pixels in the writer's layout"""
         assert array.dtype == np.uint8, f"Expected uint8 pixels, got {array.dtype}"
-        return gzip.compress(np.ascontiguousarray(array).tobytes(), compresslevel=PIXEL_COMPRESS_LEVEL, mtime=0)
+        if self._layout == HWC_LAYOUT:
+            return gzip.compress(np.ascontiguousarray(array).tobytes(), compresslevel=LEGACY_PIXEL_COMPRESS_LEVEL, mtime=0)
+        return zstd.compress(np.ascontiguousarray(np.moveaxis(array, -1, -3)).tobytes(), level=PIXEL_COMPRESS_LEVEL)
 
     def write(self, example: dict, *, region: Range, sample_name: str) -> None:
         key = energon_key(sample_name, region)
@@ -432,9 +465,13 @@ class EnergonExampleWriter:
             assert sims_genotypes == num_genotypes, f"Simulated genotypes {sims_genotypes} disagree with genotypes considered {num_genotypes}"
             assert sims.shape[2:] == real.shape, f"Simulated images {sims.shape} disagree with the real image {real.shape}"
 
-        pixel_sample = {"__key__": key, REAL_SUFFIX: self._compress(real)}
+        if self._layout == CHW_LAYOUT:
+            real_suffix, sims_suffix = REAL_SUFFIX, SIMS_SUFFIX
+        else:
+            real_suffix, sims_suffix = LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX
+        pixel_sample = {"__key__": key, real_suffix: self._compress(real)}
         if sims is not None:
-            pixel_sample[SIMS_SUFFIX] = self._compress(sims)
+            pixel_sample[sims_suffix] = self._compress(sims)
         if (haplotypes := example.get("haplotypes")) is not None:
             # Fetched lazily by key (like the pixels), so the metadata the packing buffer reads stays small
             pixel_sample[HAPLOTYPES_SUFFIX] = gzip.compress(json.dumps(haplotypes).encode("utf-8"), mtime=0)
@@ -454,6 +491,7 @@ class EnergonExampleWriter:
                     "h": height,
                     "w": width,
                     "c": channels,
+                    "layout": self._layout,
                     "label": None if label is None else int(label),
                     "label_rank": (
                         None if label_rank is None else [int(rank) for rank in label_rank]
@@ -629,6 +667,8 @@ class GraphWriter(RegionActor):
         # Precomputed haplotypes (already checked against the current settings by `vcf_to_graph_examples`)
         self._haplotypes = HaplotypeTree(haplotypes_dir) if haplotypes_dir is not None else None
         self._reuse_comparisons = reuse_comparisons
+        # Unlabeled examples are rejected during training (`models.energon._group_accepted`), so needn't be generated
+        self._skip_unlabeled = OmegaConf.select(cfg, "skip_unlabeled", default=False)
         self._counts: collections.Counter[str] = collections.Counter()
 
     def from_graph(
@@ -676,6 +716,13 @@ class GraphWriter(RegionActor):
             try:
                 # Attempt to gracefully timeout long running regions.
                 with Timeout(self.cfg.timeout):
+                    if self._skip_unlabeled:
+                        # Determine the label (from the haplotypes) before generating any images
+                        if haplotypes is None:
+                            haplotypes = self.generate_haplotypes(item)
+                        if None in haplotypes["true"]:
+                            self._counts["unlabeled"] += 1
+                            continue
                     example = self.from_graph(
                         region, item.graph, item.sampler, item.unique_kmers, item.analysis_variants, item.sample_idx,
                         haplotypes=haplotypes,
@@ -704,7 +751,8 @@ class GraphWriter(RegionActor):
         return num_regions
 
     def counts(self) -> dict[str, int]:
-        """The number of regions whose haplotypes were "precomputed", "generated" inline or "skipped" as precomputed"""
+        """The number of regions whose haplotypes were "precomputed", "generated" inline or "skipped" as precomputed, and
+        the number of regions skipped as "unlabeled" (with `skip_unlabeled`)"""
         return dict(self._counts)
 
     def close(self):
@@ -963,10 +1011,12 @@ def vcf_to_graph_examples(
             for i in range(num_actors)
         ]
         _process_shards(actors, tasks, total=region_count, progress_bar=progress_bar)
+        counts = collections.Counter()
+        for actor_counts in ray.get([actor.counts.remote() for actor in actors]): # type: ignore
+            counts.update(actor_counts)
+        if counts["unlabeled"]:
+            logging.info("Skipped %d unlabeled regions for sample %s", counts["unlabeled"], sample.name)
         if tree is not None:
-            counts = collections.Counter()
-            for actor_counts in ray.get([actor.counts.remote() for actor in actors]): # type: ignore
-                counts.update(actor_counts)
             logging.info(
                 "Used precomputed haplotypes from %s for %d regions (and skipped %d), generated them for %d",
                 haplotypes_dir, counts["precomputed"], counts["skipped"], counts["generated"],

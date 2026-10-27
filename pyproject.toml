@@ -42,6 +42,8 @@ dependencies = [
   "timm",
   "tensorboard",
   "megatron-energon>=7.4,<8",
+  # Pixel member compression (`compression.zstd` in the standard library from Python 3.14)
+  "backports.zstd; python_version < '3.14'",
 ]
 
 [project.optional-dependencies]

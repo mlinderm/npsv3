@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import textwrap
 
 import numpy as np
@@ -11,6 +12,7 @@ import pytest
 import torch
 import yaml
 
+from npsv3.constants import CHW_LAYOUT, HWC_LAYOUT, LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX, REAL_SUFFIX, SIMS_SUFFIX
 from npsv3.images.example import EnergonExampleWriter
 from npsv3.models.energon import (
     EnergonMaskedImageDataModule,
@@ -177,6 +179,60 @@ def test_prepare_skips_empty_shards(tmp_path):
     assert sorted(p.name for p in imgs_dir.glob("*.tar")) == ["imgs-0000-000000.tar", "imgs-0001-000000.tar"]
     with open(tmp_path / "meta_ds" / "train.jsonl") as meta_file:
         assert sum(1 for _ in meta_file) == 10
+
+
+def test_pixel_layouts_round_trip(tmp_path):
+    """Channel-first (zstd) and legacy channel-last (gzip) pixels, even in the same dataset, are read back channel-first"""
+    output_dir = str(tmp_path / "energon")
+    rng = np.random.default_rng(0)
+    writers = [EnergonExampleWriter(0, output_dir, layout=CHW_LAYOUT), EnergonExampleWriter(1, output_dir, layout=HWC_LAYOUT)]
+    expected = {}
+    try:
+        for index in range(20):
+            num_replicates, num_genotypes = 1 + index % 2, 3
+            region = f"chr1:{index * 1000 + 1}-{index * 1000 + 500}"
+            # Random pixels, so any mix-up of the channel, row or column axes changes the images read back
+            real = rng.integers(0, 255, size=(IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), dtype=np.uint8)
+            sims = rng.integers(0, 255, size=(num_replicates, num_genotypes, *real.shape), dtype=np.uint8)
+            writers[index % 2].write(
+                {
+                    "region": region,
+                    "image": real,
+                    "label": 1,
+                    "label.rank": np.array([0, 1, 3]),
+                    "sim.images": sims,
+                    "num_genotypes": num_genotypes,
+                },
+                region=Range(region),
+                sample_name="S0",
+            )
+            flat_sims = np.moveaxis(sims, -1, -3).reshape(-1, IMAGE_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH)
+            expected[region] = (np.moveaxis(real, -1, -3), flat_sims)
+    finally:
+        for writer in writers:
+            writer.close()
+    dataset_path = prepare_energon_dataset(output_dir)
+
+    with open(os.path.join(output_dir, "meta_ds", "train.jsonl")) as meta_file:
+        assert sorted(json.loads(line)["layout"] for line in meta_file) == [CHW_LAYOUT] * 10 + [HWC_LAYOUT] * 10
+    suffixes = set()
+    for shard in (tmp_path / "energon" / "imgs_ds").glob("*.tar"):
+        with tarfile.open(shard) as tar:
+            suffixes.update(name.split(".", 1)[1] for name in tar.getnames())
+    assert {REAL_SUFFIX, SIMS_SUFFIX, LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX} <= suffixes
+
+    dm = _make_dm(dataset_path, repeat=False)
+    seen = set()
+    for batch in dm.train_dataloader():
+        support_end = int(batch.offsets[-1])
+        for group, region in enumerate(batch.meta):
+            real, sims = expected[region]
+            start, end = int(batch.offsets[group]), int(batch.offsets[group + 1])
+            assert torch.equal(batch.images[start:end], torch.from_numpy(sims)), f"Support images differ for {region}"
+            assert torch.equal(batch.images[support_end + group], torch.from_numpy(real)), f"Query image differs for {region}"
+            seen.add(region)
+    dm.teardown()
+    assert seen == set(expected)
 
 
 @pytest.mark.slow

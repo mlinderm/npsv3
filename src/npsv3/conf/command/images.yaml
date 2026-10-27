@@ -9,3 +9,7 @@ filtered_kmer_path: null
 # Pre-computed haplotypes (and comparisons) for the sample, i.e., the output of the "haplotypes" command (if available).
 # Haplotypes are generated on-the-fly for any region without them (e.g., with a different graph).
 haplotypes_dir: null
+
+# Skip regions without a label, i.e., without a resolvable true genotype for the sample, before generating any images.
+# Unlabeled examples are rejected during training, so generating them only consumes time and storage.
+skip_unlabeled: true

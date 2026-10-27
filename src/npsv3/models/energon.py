@@ -1,8 +1,8 @@
 """Megatron-Energon polylithic loader for packed pileup images.
 
 An example's (region's) metadata (`R`, `G`, geometry, label) lives in a small JSON record, with the images themselves
-in a separate gzipped tar. Determining the packing only requires the metadata, enabling a larger lookahead buffer. The
-actual pixel data is only fetched after packing has been determined.
+in a separate tar of compressed members. Determining the packing only requires the metadata, enabling a larger lookahead
+buffer. The actual pixel data is only fetched after packing has been determined.
 """
 
 import contextlib
@@ -46,7 +46,16 @@ from megatron.energon.flavors import BaseWebdatasetFactory, CrudeWebdataset
 from megatron.energon.flavors.webdataset.config import MAIN_FOLDER_NAME
 from torchvision.transforms import v2 as transforms
 
-from npsv3.constants import COMPARISON_SUFFIX, COMPARISONS_AUX, REAL_SUFFIX, SIMS_SUFFIX
+from npsv3.constants import (
+    CHW_LAYOUT,
+    COMPARISON_SUFFIX,
+    COMPARISONS_AUX,
+    HWC_LAYOUT,
+    LEGACY_REAL_SUFFIX,
+    LEGACY_SIMS_SUFFIX,
+    REAL_SUFFIX,
+    SIMS_SUFFIX,
+)
 from npsv3.images.sequence_compare import decode_comparison_record, load_comparison_records
 from npsv3.models.filters import (
     ExampleFilter,
@@ -71,6 +80,11 @@ try:
 except ImportError:
     from zlib import decompress as _decompress
 
+try:
+    from compression import zstd  # Python 3.14+
+except ImportError:
+    from backports import zstd
+
 
 @edataclass
 class GroupMeta(Sample):
@@ -89,6 +103,8 @@ class GroupMeta(Sample):
     #: Lazy handles into the pixel tree; no bytes are read until `.get()`.
     real: Lazy
     sims: Any = None
+    #: Whether the pixels are stored channel-first (`CHW_LAYOUT`), rather than channel-last (`HWC_LAYOUT`)
+    channels_first: bool = False
     #: Image slots this group occupies in a pack. Filled in by `preencode_sample`.
     cost: int = 0
 
@@ -115,6 +131,14 @@ def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> Group
     # `basic_sample_keys` needs it, for restorability) -- it is not the pixel-tar member key, which
     # `EnergonExampleWriter` carries as an explicit `key` field in the JSON payload instead.
     key = meta["key"]
+    # Rows written before the layout was recorded are channel-last
+    layout = meta.get("layout", HWC_LAYOUT)
+    if layout == CHW_LAYOUT:
+        real_suffix, sims_suffix = REAL_SUFFIX, SIMS_SUFFIX
+    elif layout == HWC_LAYOUT:
+        real_suffix, sims_suffix = LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX
+    else:
+        raise ValueError(f"Unknown pixel layout {layout!r} for {key}")
     return GroupMeta(
         **basic_sample_keys(sample),
         r=int(meta["r"]),
@@ -125,10 +149,11 @@ def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> Group
         label=None if meta.get("label") is None else int(meta["label"]),
         label_rank=None if meta.get("label_rank") is None else [int(rank) for rank in meta["label_rank"]],
         region=meta.get("region", key),
-        real=cache.get_lazy(imgs, f"{key}.{REAL_SUFFIX}"),
+        real=cache.get_lazy(imgs, f"{key}.{real_suffix}"),
         # `sims` pixel member only exists in the tar when the writer actually generated `sim.images`
         # (`r > 0`); `g` can now be nonzero (genotypes considered) even without simulated images.
-        sims=cache.get_lazy(imgs, f"{key}.{SIMS_SUFFIX}") if int(meta["r"]) > 0 else None,
+        sims=cache.get_lazy(imgs, f"{key}.{sims_suffix}") if int(meta["r"]) > 0 else None,
+        channels_first=layout == CHW_LAYOUT,
     )
 
 
@@ -165,20 +190,24 @@ def _group_accepted(
 GZIP_MAGIC = b"\x1f\x8b"
 # `wbits` selecting the gzip container (16 + MAX_WBITS)
 GZIP_WBITS = 31
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
-def _fetch_image(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> torch.Tensor:
-    """Return a channel-first `(..., C, H, W)` uint8 *view* of a lazy pixel member stored channel-last as `shape`, i.e.
-    `(..., H, W, C)` (including fetching and any necessary decompression).
+def _fetch_image(lazy: Lazy, sample: Any, shape: tuple[int, ...], *, channels_first: bool = False) -> torch.Tensor:
+    """Return a channel-first `shape`, i.e. `(..., C, H, W)`, uint8 *view* of a lazy pixel member stored channel-first, if
+    `channels_first`, or otherwise channel-last, i.e. `(..., H, W, C)` (including fetching and any necessary decompression).
 
     The view is not copied here, because `build_packed_batch` copies it into the pack anyway. Each extra copy of a pack's
     worth of pixels is another freshly allocated, page-faulted buffer, which dominates a worker's time when faults are
-    expensive.
+    expensive. A channel-first member's view is contiguous, so that copy is a fast block copy, rather than the much slower
+    strided transpose of a channel-last member.
     """
     raw = lazy.get(sample)
-    # `PackedGroupTaskEncoder` disables energon's decoder, so `.bin.gz` members arrive compressed. Check the magic
-    # rather than assume, in case a member was written uncompressed.
-    if raw[:2] == GZIP_MAGIC:
+    # `PackedGroupTaskEncoder` disables energon's decoder, so members arrive compressed. Check the magic rather than
+    # assume, in case a member was written uncompressed.
+    if raw[:4] == ZSTD_MAGIC:
+        raw = zstd.decompress(raw)
+    elif raw[:2] == GZIP_MAGIC:
         raw = _decompress(raw, GZIP_WBITS)
 
     with warnings.catch_warnings():
@@ -186,7 +215,10 @@ def _fetch_image(lazy: Lazy, sample: Any, shape: tuple[int, ...]) -> torch.Tenso
         # into errors, and the alternative, a writable `bytearray`, is another copy)
         warnings.filterwarnings("ignore", message="The given buffer is not writable", category=UserWarning)
         pixels = torch.frombuffer(raw, dtype=torch.uint8)
-    return pixels.reshape(shape).movedim(-1, -3)
+    if channels_first:
+        return pixels.reshape(shape)
+    *leading, channels, height, width = shape
+    return pixels.reshape(*leading, height, width, channels).movedim(-1, -3)
 
 # The base `TaskEncoder`'s `T_encoded_sample` type parameter is `Any` here rather than a concrete type:
 # `select_samples_to_pack` uses it for a flat `GroupMeta` (pre-pack metadata), while `pack_selected_samples`/`batch`
@@ -201,9 +233,9 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
 
     cookers = (Cooker(cook_group),)
     # Skip energon's default decoding (webdataset's `autodecode`). Its `gzfilter` gunzips every `.gz` member with the
-    # `gzip` module, ~2x slower than `_decompress`, and its result is copied again. Everything read through this task
-    # encoder handles raw bytes instead: the metadata rows (`_sample_json`), the pixels (`_fetch_image`), and the
-    # comparison records (`decode_comparison_record`).
+    # `gzip` module, ~2x slower than `_decompress`, and its result is copied again (and it doesn't decode `.zst` members).
+    # Everything read through this task encoder handles raw bytes instead: the metadata rows (`_sample_json`), the pixels
+    # (`_fetch_image`), and the comparison records (`decode_comparison_record`).
     decoder = None
 
     def __init__(
@@ -289,8 +321,9 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
     def pack_selected_samples(self, samples: list[GroupMeta]) -> "PackedGroupBatch":
         groups = []
         for sample in samples:
-            real = _fetch_image(sample.real, sample, (sample.h, sample.w, sample.c))
-            sims = _fetch_image(sample.sims, sample, (sample.r, sample.g, sample.h, sample.w, sample.c))
+            image_shape = (sample.c, sample.h, sample.w)
+            real = _fetch_image(sample.real, sample, image_shape, channels_first=sample.channels_first)
+            sims = _fetch_image(sample.sims, sample, (sample.r, sample.g, *image_shape), channels_first=sample.channels_first)
 
             # `preencode_sample` already rejected unlabeled groups (`_group_accepted`), so `label_rank` is
             # always defined here.
