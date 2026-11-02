@@ -58,6 +58,7 @@ from npsv3.constants import (
 )
 from npsv3.images.sequence_compare import decode_comparison_record, load_comparison_records
 from npsv3.images.subsets import GenotypeSubset, genotype_subset_from_config
+from npsv3.models.copositive import CopositiveTargets, copositive_targets_from_config
 from npsv3.models.filters import (
     ExampleFilter,
     build_filters,
@@ -114,6 +115,10 @@ class GroupMeta(Sample):
     selected: list[int] | None = None
     #: Image slots this group occupies in a pack. Filled in by `preencode_sample`.
     cost: int = 0
+    #: (g,) numerator and denominator weights along the stored genotypes, None for the single-positive targets. Filled in
+    #: by `PackedGroupTaskEncoder.cook_crude_sample` with `copositive` targets.
+    positive_weights: list[float] | None = None
+    denominator_weights: list[float] | None = None
 
 
 def _sample_json(sample: dict) -> dict:
@@ -268,6 +273,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         padding_value: int = LABEL_PADDING_VALUE,
         filters: Sequence[ExampleFilter] = (),
         genotype_subset: GenotypeSubset | None = None,
+        copositive: CopositiveTargets | None = None,
     ):
         """
         Args:
@@ -284,6 +290,8 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             genotype_subset: Pack only these genotypes of each (labeled) group, e.g., to train with a subset of the
                 genotypes in a dataset generated with all of them (see `images.subsets`). The pack cost (and `g_max`)
                 reflect the subset, but all of the group's simulated images are still fetched.
+            copositive: Attach these co-positive aware targets to each (labeled) group for `CopositiveInfoNCE` (see
+                `npsv3.models.copositive`). None for the single-positive targets.
         """
         super().__init__()
         self.budget = budget
@@ -294,27 +302,39 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         self.pad = pad
         self.padding_value = padding_value
         self.filters = tuple(filters)
-        self._needs_comparisons = requires_comparisons(self.filters)
         self.genotype_subset = genotype_subset
+        self.copositive = copositive
+        self._needs_comparisons = requires_comparisons(self.filters) or (
+            copositive is not None and copositive.requires_comparisons
+        )
 
     @stateless
     def cook_crude_sample(self, sample: dict, cooker: Cooker, aux: dict[str, FileStore]) -> GroupMeta:
-        """Apply the filters before cooking, i.e., before any pixel prefetches are scheduled"""
-        if self.filters:
-            row = _sample_json(sample)
-            comparison = None
-            if self._needs_comparisons:
-                store = aux.get(COMPARISONS_AUX)
-                if store is None:
-                    msg = f"Filters {describe_filters(self.filters)} need the {COMPARISONS_AUX!r} aux tree, which this dataset doesn't reference"
-                    raise ValueError(msg)
-                try:
-                    comparison = decode_comparison_record(store[f"{row['key']}.{COMPARISON_SUFFIX}"][0])
-                except KeyError:
-                    comparison = None  # E.g., an unlabeled example (rejected anyway)
-            if not keep_example(self.filters, row, comparison):
-                raise SkipSample
-        return super().cook_crude_sample(sample, cooker, aux)
+        """Apply the filters before cooking, i.e., before any pixel prefetches are scheduled, and attach any co-positive
+        targets"""
+        if not self.filters and self.copositive is None:
+            return super().cook_crude_sample(sample, cooker, aux)
+
+        row = _sample_json(sample)
+        comparison = None
+        if self._needs_comparisons:
+            store = aux.get(COMPARISONS_AUX)
+            if store is None:
+                users = describe_filters([*self.filters, *([self.copositive] if self.copositive is not None else [])])
+                msg = f"{users} need the {COMPARISONS_AUX!r} aux tree, which this dataset doesn't reference"
+                raise ValueError(msg)
+            try:
+                comparison = decode_comparison_record(store[f"{row['key']}.{COMPARISON_SUFFIX}"][0])
+            except KeyError:
+                comparison = None  # E.g., an unlabeled example (rejected anyway)
+        if self.filters and not keep_example(self.filters, row, comparison):
+            raise SkipSample
+
+        group = super().cook_crude_sample(sample, cooker, aux)
+        if self.copositive is not None and group.label is not None and group.g > 0:
+            positive, denominator = self.copositive.targets(row, comparison)
+            group.positive_weights, group.denominator_weights = positive.tolist(), denominator.tolist()
+        return group
 
     @stateless
     def preencode_sample(self, sample: GroupMeta) -> GroupMeta:
@@ -354,12 +374,18 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             assert sample.label_rank is not None, "Unlabeled group reached pack_selected_samples"
             label_rank = torch.tensor(sample.label_rank, dtype=torch.long)
             label = sample.label
+            positive_weights = denominator_weights = None
+            if sample.positive_weights is not None and sample.denominator_weights is not None:
+                positive_weights = torch.tensor(sample.positive_weights, dtype=torch.float32)
+                denominator_weights = torch.tensor(sample.denominator_weights, dtype=torch.float32)
             if sample.selected is not None:
                 # The genotype subset always includes the label
                 selected = torch.tensor(sample.selected, dtype=torch.long)
                 sims = sims.index_select(1, selected)
                 label_rank = label_rank[selected]
                 label = sample.selected.index(label)
+                if positive_weights is not None and denominator_weights is not None:
+                    positive_weights, denominator_weights = positive_weights[selected], denominator_weights[selected]
             groups.append(
                 ImageGroup(
                     query=real,
@@ -367,6 +393,8 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
                     label_rank=label_rank,
                     genotype_label=label,
                     meta=sample.region,
+                    positive_weights=positive_weights,
+                    denominator_weights=denominator_weights,
                 )
             )
 
@@ -385,6 +413,8 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             genotype_label=batch.genotype_label,
             num_genotypes=batch.num_genotypes,
             meta=batch.meta,
+            positive_weights=batch.positive_weights,
+            denominator_weights=batch.denominator_weights,
         )
 
     @stateless
@@ -773,6 +803,10 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         genotype_subset (GenotypeSubset | Mapping | None, optional): Train with only a subset of each example's genotypes
             (a `GenotypeSubset` or its config, with an optional `enabled`, see `npsv3.images.subsets`). Only the train
             split is subset, so validation and testing are with all of the genotypes. Defaults to None (all genotypes).
+        copositive (CopositiveTargets | Mapping | None, optional): Train with these co-positive aware targets (an object
+            or Hydra `_target_` config, see `npsv3.models.copositive`), which need a loss that uses them, i.e.,
+            `CopositiveInfoNCE`. Only the train split has them, so the validation and test losses are single-positive.
+            The train datasets are checked for the data they need up front. Defaults to None (single-positive targets).
     """
 
     def __init__(
@@ -808,15 +842,17 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         verbose: bool = False,
         filters: Sequence[ExampleFilter | Mapping] | None = None,
         genotype_subset: GenotypeSubset | Mapping | None = None,
+        copositive: CopositiveTargets | Mapping | None = None,
         **_kwargs,
     ):
         super().__init__()
         # Filters are objects (once instantiated by Hydra), which don't belong in checkpointed hyperparameters
-        self.save_hyperparameters(ignore=["filters", "genotype_subset"])
+        self.save_hyperparameters(ignore=["filters", "genotype_subset", "copositive"])
         self.train_filters = build_filters(filters)
         self.train_genotype_subset = genotype_subset_from_config(genotype_subset)
         if self.train_genotype_subset is not None:
             logging.info("Training with a subset of the genotypes: %s", self.train_genotype_subset)
+        self.train_copositive = copositive_targets_from_config(copositive)
 
         # `get_train_dataset`/`get_val_dataset` accept either a path or a dict, even though their type stubs only
         # declare `str | EPath | Path` requiring `# type: ignore`s below.
@@ -844,15 +880,19 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 "test": test_metadataset_paths,
             })
 
-        # Filters apply only to the train split, so there is nothing to check without one
-        if self.train_filters and (metadataset_path is not None or train_metadataset_paths is not None):
+        # Filters and co-positive targets apply only to the train split, so there is nothing to check without one
+        train_users = [*self.train_filters, *([self.train_copositive] if self.train_copositive is not None else [])]
+        if train_users and (metadataset_path is not None or train_metadataset_paths is not None):
             if metadataset_path is not None:
                 leaves = _split_leaves(metadataset_path, "train")
             else:
                 paths = [train_metadataset_paths] if isinstance(train_metadataset_paths, str) else train_metadataset_paths
                 leaves = [leaf for path in paths for leaf in _split_leaves(path)]
-            check_filter_requirements(leaves, self.train_filters)
-            logging.info("Filtering training examples with %s", describe_filters(self.train_filters))
+            check_filter_requirements(leaves, train_users)
+            if self.train_filters:
+                logging.info("Filtering training examples with %s", describe_filters(self.train_filters))
+            if self.train_copositive is not None:
+                logging.info("Training with co-positive targets %s", self.train_copositive)
 
         # Normalization moves to the GPU (`on_after_batch_transfer`) to reduce the size of the data transferred (uint8 vs float32).
         self.transforms = transforms.Compose(
@@ -869,7 +909,10 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         self._cache_pools: dict[str, FileStoreCachePool] = {}
 
     def _task_encoder(
-        self, filters: Sequence[ExampleFilter] = (), genotype_subset: GenotypeSubset | None = None
+        self,
+        filters: Sequence[ExampleFilter] = (),
+        genotype_subset: GenotypeSubset | None = None,
+        copositive: CopositiveTargets | None = None,
     ) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
             budget=self.hparams["batch_size"],
@@ -880,6 +923,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             pad=self.hparams["pad"],
             filters=filters,
             genotype_subset=genotype_subset,
+            copositive=copositive,
         )
 
     def _worker_config(self) -> WorkerConfig:
@@ -959,7 +1003,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 packing_buffer_size=self.hparams["packing_buffer_size"],
                 shuffle_buffer_size=self.hparams["shuffle_buffer_size"],
                 max_samples_per_sequence=self.hparams["max_samples_per_sequence"],
-                task_encoder=self._task_encoder(self.train_filters, self.train_genotype_subset),
+                task_encoder=self._task_encoder(self.train_filters, self.train_genotype_subset, self.train_copositive),
                 repeat=self.hparams["repeat"],
             )
         self._loader = self._make_loader(dataset, "train")

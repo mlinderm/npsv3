@@ -50,5 +50,11 @@ filters: null
 #   data.genotype_subset='{include_homozygous: true}'
 # null -> all genotypes.
 genotype_subset: null
+# Train with co-positive aware targets (the train split only), which need `model.loss` to be CopositiveInfoNCE and
+# `command=copositive` train datasets with a `comparisons` aux tree (see npsv3.models.copositive), e.g.,
+#   data.copositive='{_target_: npsv3.models.copositive.CopositiveTargets, variant: gated}'
+# or, setting both the targets and the loss, `+experiments=copositive` (and e.g. `data.copositive.variant=mask`).
+# null -> single-positive targets.
+copositive: null
 mean: [0.5]
 std: [0.5]

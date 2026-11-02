@@ -21,7 +21,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol
 
 import numpy as np
 
@@ -29,6 +29,13 @@ from npsv3.constants import COMPARISONS_AUX
 from npsv3.images.subsets import HomRefDownsample, is_hom_ref_label, read_region_stats, region_key
 
 MissingPolicy = Literal["keep", "exclude"]
+
+
+class DataRequirements(Protocol):
+    """What data a filter (or other per-example consumer, e.g., `copositive.CopositiveTargets`) needs"""
+
+    requires_comparisons: ClassVar[bool]
+    required_fields: ClassVar[tuple[str, ...]]
 
 
 class ExampleFilter(abc.ABC):
@@ -335,7 +342,7 @@ def build_filters(filters: Iterable[ExampleFilter | Mapping] | None) -> tuple[Ex
     return built
 
 
-def requires_comparisons(filters: Iterable[ExampleFilter]) -> bool:
+def requires_comparisons(filters: Iterable[DataRequirements]) -> bool:
     return any(f.requires_comparisons for f in filters)
 
 
@@ -344,13 +351,14 @@ def keep_example(filters: Iterable[ExampleFilter], row: Mapping, comparison: Map
     return all(f.keep(row, comparison) for f in filters)
 
 
-def describe_filters(filters: Iterable[ExampleFilter]) -> str:
+def describe_filters(filters: Iterable[object]) -> str:
     return ", ".join(map(repr, filters))
 
 
-def check_filter_requirements(leaves: Iterable[tuple[Path, Mapping[str, str]]], filters: Sequence[ExampleFilter]) -> None:
+def check_filter_requirements(leaves: Iterable[tuple[Path, Mapping[str, str]]], filters: Sequence[DataRequirements]) -> None:
     """Verify that every train dataset, given as (metadata JSONL path, absolute aux paths) leaves, has the data `filters`
-    need: a `comparisons` aux tree and at least one metadata row with each required field.
+    (or other consumers, e.g., co-positive targets) need: a `comparisons` aux tree and at least one metadata row with each
+    required field.
 
     Raises:
         ValueError: Naming the dataset and how to add the missing data
@@ -362,7 +370,7 @@ def check_filter_requirements(leaves: Iterable[tuple[Path, Mapping[str, str]]], 
     for meta_path, aux in leaves:
         if needs_comparisons and COMPARISONS_AUX not in aux:
             msg = (
-                f"Filters {describe_filters(filters)} need the {COMPARISONS_AUX!r} aux tree, which the dataset with "
+                f"{describe_filters(filters)} need the {COMPARISONS_AUX!r} aux tree, which the dataset with "
                 f"metadata {meta_path} doesn't reference. Add it with `command=compare input=<its dataset.yaml>` (a "
                 "`command=copositive` dataset only inherits the trees its source had when it was written)."
             )
@@ -378,7 +386,7 @@ def check_filter_requirements(leaves: Iterable[tuple[Path, Mapping[str, str]]], 
                             break
             if missing:
                 msg = (
-                    f"Filters {describe_filters(filters)} need the {sorted(missing)} metadata fields, which no row of "
+                    f"{describe_filters(filters)} need the {sorted(missing)} metadata fields, which no row of "
                     f"{meta_path} has. Was it written by `command=copositive`?"
                 )
                 raise ValueError(msg)

@@ -46,6 +46,9 @@ class ImageGroup:
     label_rank: torch.Tensor  # (G,) int64 ranks
     genotype_label: int | None = None
     meta: Any = None
+    # Optional (G,) float32 numerator and denominator weights for `CopositiveInfoNCE` (see `models.copositive`)
+    positive_weights: torch.Tensor | None = None
+    denominator_weights: torch.Tensor | None = None
 
     @property
     def num_replicates(self) -> int:
@@ -74,6 +77,16 @@ class ImageGroup:
         """Rank labels tiled to match :meth:`flat_support`, i.e. ``(R*G,)``."""
         return torch.tile(self.label_rank, (self.num_replicates,))
 
+    def flat_targets(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Numerator and denominator weights tiled to match :meth:`flat_support`, i.e. ``(R*G,)`` each. Without
+        weights, the rank labels' positives (as in ``InfoNCE``) against every other support."""
+        if self.positive_weights is None or self.denominator_weights is None:
+            positive = (torch.eq(self.label_rank, 1) | torch.eq(self.label_rank, 2)).to(torch.float32)
+            denominator = torch.ones_like(positive)
+        else:
+            positive, denominator = self.positive_weights, self.denominator_weights
+        return torch.tile(positive, (self.num_replicates,)), torch.tile(denominator, (self.num_replicates,))
+
 
 @dataclass
 class PackedBatch:
@@ -91,9 +104,15 @@ class PackedBatch:
     genotype_label: torch.Tensor  # (n_groups,) int64, the single positive's genotype index
     num_genotypes: torch.Tensor  # (n_groups,) int32, G_b; with offsets this recovers R_b
     meta: list = field(default_factory=list)  # per-group region strings / keys
+    # Optional (total_support,) float32 numerator and denominator weights for `CopositiveInfoNCE`, tiled R times like
+    # `labels` (but never padded). None unless some group has them (see `ImageGroup.flat_targets`).
+    positive_weights: torch.Tensor | None = None
+    denominator_weights: torch.Tensor | None = None
 
     # Deliberately un-annotated, so it is a class attribute and not a dataclass field
-    _TENSOR_FIELDS = ("images", "labels", "offsets", "widths", "genotype_label", "num_genotypes")
+    _TENSOR_FIELDS = (
+        "images", "labels", "offsets", "widths", "genotype_label", "num_genotypes", "positive_weights", "denominator_weights"
+    )
 
     @property
     def num_groups(self) -> int:
@@ -122,11 +141,15 @@ class PackedBatch:
             indices.extend(start + replicate * num_genotypes + label for replicate in range(num_replicates))
         return torch.tensor(indices, dtype=torch.long)
 
+    def _tensors(self) -> dict[str, torch.Tensor]:
+        """The tensor fields that are set"""
+        return {name: value for name in self._TENSOR_FIELDS if (value := getattr(self, name)) is not None}
+
     def pin_memory(self) -> "PackedBatch":
-        return replace(self, **{name: getattr(self, name).pin_memory() for name in self._TENSOR_FIELDS})
+        return replace(self, **{name: value.pin_memory() for name, value in self._tensors().items()})
 
     def to(self, device, *args, **kwargs) -> "PackedBatch":
-        return replace(self, **{name: getattr(self, name).to(device, *args, **kwargs) for name in self._TENSOR_FIELDS})
+        return replace(self, **{name: value.to(device, *args, **kwargs) for name, value in self._tensors().items()})
 
 
 def select_packs(costs: Sequence[int | tuple[int, Hashable]], *, budget: int) -> list[list[int]]:
@@ -228,6 +251,13 @@ def build_packed_batch(
     if pad and num_rows > labels.shape[0]:
         labels = F.pad(labels, (0, num_rows - labels.shape[0]), value=padding_value)
 
+    # Groups without targets get the single-positive ones, if any group in the pack has them
+    positive_weights = denominator_weights = None
+    if any(group.positive_weights is not None for group in groups):
+        positive_weights, denominator_weights = (
+            torch.cat(weights) for weights in zip(*(group.flat_targets() for group in groups), strict=True)
+        )
+
     return PackedBatch(
         images=images,
         labels=labels,
@@ -239,6 +269,8 @@ def build_packed_batch(
         ),
         num_genotypes=torch.tensor([group.num_genotypes for group in groups], dtype=torch.int32),
         meta=[group.meta for group in groups],
+        positive_weights=positive_weights,
+        denominator_weights=denominator_weights,
     )
 
 

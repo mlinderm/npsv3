@@ -1,0 +1,20 @@
+# @package _global_
+# Train with the co-positive aware InfoNCE (see npsv3.models.copositive). The train datasets must be `command=copositive`
+# datasets with a `comparisons` aux tree. Select another variant (baseline, mask, weight, multi, soft_multi, mask+multi,
+# gated) with e.g. `data.copositive.variant=mask`, or override its rules, e.g., `data.copositive.denominator=mask`.
+data:
+  copositive:
+    _target_: npsv3.models.copositive.CopositiveTargets
+    variant: gated
+    # null -> the variant's rules and categories (see CopositiveTargets)
+    positives: null
+    positive_categories: null
+    denominator: null
+    denominator_categories: null
+    conf_threshold: 0.5
+    score_equiv: 0.7
+    filter_p_label: 0.05
+    filter_p_alt: 0.5
+model:
+  loss:
+    _target_: npsv3.models.paired.CopositiveInfoNCE

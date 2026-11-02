@@ -162,6 +162,67 @@ class InfoNCE(nn.Module):
         return -loss / metric.size(0), metric.size(0)  # Average loss across all variants
 
 
+class CopositiveInfoNCE(InfoNCE):
+    """
+    InfoNCE with co-positive aware targets: (partial) positives beyond the label and down-weighted (or masked) negatives
+    (see `npsv3.models.copositive`).
+
+    Each support j of a variant group has a numerator weight c_j in [0, 1], how much it is a positive, and a denominator
+    weight a_j >= c_j, so it contributes a_j - c_j as a negative. Every support i with c_i > 0 is an anchor with loss
+
+        l_i = -log( e^{s_i} / (e^{s_i} + sum_{j != i} (a_j - c_j) e^{s_j}) )
+
+    and the group's loss is the c-weighted mean of its anchors' losses, sum_i c_i l_i / sum_i c_i. With hard positives
+    (c = a = 1) and negatives (c = 0, a = 1), this is `InfoNCE`: each positive against all the negatives, excluding the
+    other positives, averaged over the positives (SupCon's "outside the log"). Down-weighting a negative's a_j
+    interpolates between a full negative and being masked, and a partial positive (0 < c_j < 1, a_j = 1) is both an anchor
+    (weighted by c_j) and a negative (weighted by 1 - c_j) for the other anchors.
+
+    Args:
+        temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+
+    Inputs:
+        metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
+        target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes.
+        positive_weights (torch.Tensor | None): A 2D nested tensor of shape(|variants|, j1=|support|) with the numerator
+            weights c. None (with `denominator_weights`) for the single-positive targets from `target`, as in `InfoNCE`.
+        denominator_weights (torch.Tensor | None): A 2D nested tensor of shape(|variants|, j1=|support|) with the
+            denominator weights a.
+
+    Returns:
+        tuple[torch.Tensor]: Scalar tensor representing the average loss across variant groups and the number of variants in batch
+    """
+
+    def forward(
+        self,
+        metric: torch.Tensor,
+        target: torch.Tensor,
+        positive_weights: torch.Tensor | None = None,
+        denominator_weights: torch.Tensor | None = None,
+    ):
+        metric = metric / self.temperature  # Scale the similarity scores by the temperature
+        if positive_weights is None or denominator_weights is None:
+            # Map "first-rank" and "second-rank" positives to 1, with every support in the denominator
+            positives = [(torch.eq(t, 1) | torch.eq(t, 2)).to(metric.dtype) for t in target.unbind()]
+            weights = zip(positives, (torch.ones_like(p) for p in positives), strict=True)
+        else:
+            weights = zip(positive_weights.unbind(), denominator_weights.unbind(), strict=True)
+
+        loss = torch.tensor(0.0, dtype=metric.dtype, device=metric.device)
+        for variant_metric, (positive, denominator) in zip(metric.unbind(), weights, strict=True):
+            anchors = torch.nonzero(positive > 0).squeeze(1)
+            # The weight of each support in each anchor's denominator, as an (|anchors|, |support|) log-weight: the anchor
+            # itself with weight 1, and every other support with its negative weight a - c (log(0) = -inf excludes it)
+            negative = torch.clamp(denominator - positive, min=0.0)
+            is_anchor = torch.eq(torch.arange(variant_metric.size(0), device=anchors.device), anchors.unsqueeze(1))
+            log_weight = torch.where(is_anchor, 0.0, torch.log(negative))
+            log_denominator = torch.logsumexp(variant_metric + log_weight, dim=1)
+            anchor_weight = positive[anchors]
+            loss = loss + torch.sum(anchor_weight * (log_denominator - variant_metric[anchors])) / torch.sum(anchor_weight)
+
+        return loss / metric.size(0), metric.size(0)  # Average loss across all variants
+
+
 class RINCE(nn.Module):
     """
     Implements the Ranking Info Noise Contrastive Estimation (RINCE) loss for contrastive learning using precomputed similarity scores
@@ -322,7 +383,20 @@ class PackedVariant(L.LightningModule):
     def _model_step(self, batch, batch_idx):  # noqa: ARG002
         metric, preds, labels, *_ = self(batch)
         # The different loss functions should return their relevant batch size (which may be pairs or number of variants)
-        loss, batch_size = self.loss(metric, labels)
+        if batch.positive_weights is None or batch.denominator_weights is None:
+            loss, batch_size = self.loss(metric, labels)
+        else:
+            if not isinstance(self.loss, CopositiveInfoNCE):
+                msg = f"The batch has co-positive targets (`data.copositive`), which {type(self.loss).__name__} doesn't use; use CopositiveInfoNCE"
+                raise TypeError(msg)
+            # As for the labels, construct the targets with the offsets shared with metrics so the ragged dimension matches
+            offsets = metric.offsets()
+            max_support = torch.max(torch.diff(offsets))
+            positive_weights, denominator_weights = (
+                torch.nested.nested_tensor_from_jagged(weights, offsets=offsets, max_seqlen=max_support)
+                for weights in (batch.positive_weights, batch.denominator_weights)
+            )
+            loss, batch_size = self.loss(metric, labels, positive_weights, denominator_weights)
         return (loss, preds, labels, batch_size)
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
