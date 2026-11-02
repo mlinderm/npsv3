@@ -96,7 +96,7 @@ def read_start(read):
 _REF_N_BYTE = ord("N")
 
 
-def _refine_base_alignment(query: str, ref: str) -> list[BaseAlignment]:
+def _refine_base_alignment(query: str, ref: str) -> np.ndarray:
     """Classify every base of a CMATCH run as MATCH/MISMATCH against `ref`, vectorized over the whole run.
 
     `query` (from pysam's `read.query_sequence`) and `ref` (from images.example._reference_sequence, which
@@ -109,8 +109,9 @@ def _refine_base_alignment(query: str, ref: str) -> list[BaseAlignment]:
     """
     query_arr = np.frombuffer(query.encode("ascii"), dtype=np.uint8)
     ref_arr = np.frombuffer(ref.encode("ascii"), dtype=np.uint8)
-    matches = ((query_arr == ref_arr) | (ref_arr == _REF_N_BYTE)).tolist()
-    return [BaseAlignment.MATCH if match else BaseAlignment.MISMATCH for match in matches]
+    matches = (query_arr == ref_arr) | (ref_arr == _REF_N_BYTE)
+    # BaseAlignment values (rather than members), so pixels can be looked up for the whole run at once
+    return np.where(matches, BaseAlignment.MATCH.value, BaseAlignment.MISMATCH.value)
 
 
 @dataclass

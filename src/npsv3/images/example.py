@@ -15,6 +15,7 @@ import hydra
 import numpy as np
 import pysam
 import ray
+import torch
 import webdataset as wds
 from omegaconf import OmegaConf
 from PIL import Image
@@ -354,8 +355,10 @@ def make_graph_example(
             # the images for each genotype
             replicate_bam_splits = split_bam_by_tag(replicate_bam_path, tmp_dir, tag="SQ")
 
-            # Use the split BAM files to construct images for all genotypes of interest
+            # Use the split BAM files to construct images for all genotypes of interest. Each split BAM is shared by every
+            # genotype that includes its haplotype, so its fragments (and their k-mer evidence) are only read once.
             replicate_images = []
+            fragment_cache = {}
             for possible_genotype in possible_genotypes:
                 # For each possible genotype, use the relevant split BAM file to construct the image
                 replicate_bams = [replicate_bam_splits[f"{h}_{i}"] for i, h in enumerate(possible_genotype)]
@@ -367,6 +370,7 @@ def make_graph_example(
                     kmer_index=kmer_index,
                     ref_seq=ref_seq,
                     realign_cache=realign_cache,
+                    fragment_cache=fragment_cache,
                     compress=True,
                 )
                 replicate_images.append(synth_image_tensor)
@@ -693,6 +697,10 @@ class GraphWriter(RegionActor):
         # runs before from_shard/from_graph. No-op (and no file created) unless profiling is enabled.
         if os.environ.get("NPSV3_REALIGN_PROFILE"):
             os.environ["NPSV3_REALIGN_PROFILE_PATH"] = os.path.join(output_dir, f"images-{index:04d}.realign_profile.log")
+
+        # Each actor is single-threaded (one per CPU), so don't let torch (e.g. resizing images) oversubscribe the CPUs
+        # with its own thread pool. Ray doesn't set OMP_NUM_THREADS for actors that don't reserve CPUs.
+        torch.set_num_threads(1)
 
         self._writer = make_example_writer(cfg, index, output_dir)
         # Compare each example's genotypes with its label for the optional `comparisons` aux tree (if `compare.enabled`)

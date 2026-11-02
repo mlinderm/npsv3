@@ -88,6 +88,9 @@ class ImageGenerator:
             BaseAlignment.INSERT: cfg.pileup.insert_base_pixel,
         }
         # fmt: on
+        self._aligned_value_to_pixel = np.zeros(max(a.value for a in BaseAlignment) + 1)
+        for align, pixel in self._aligned_to_pixel.items():
+            self._aligned_value_to_pixel[align.value] = pixel
 
         self._allele_to_pixel = {
             AlleleAssignment.AMB: cfg.pileup.amb_allele_pixel,
@@ -105,16 +108,13 @@ class ImageGenerator:
     def _align_pixel(self, align):
         if isinstance(align, BaseAlignment):
             return self._aligned_to_pixel[align]
-        return [self._aligned_to_pixel[a] for a in align]
+        # An array of BaseAlignment values (see pileup._refine_base_alignment)
+        return self._aligned_value_to_pixel[align]
 
     def _zscore_pixel(self, zscore):
         if zscore is None:
             return 0
-        return np.clip(
-            self._insert_size_mean_pixel + zscore * self._insert_size_sd_pixel,
-            1,
-            MAX_PIXEL_VALUE,
-        )
+        return min(max(self._insert_size_mean_pixel + zscore * self._insert_size_sd_pixel, 1), MAX_PIXEL_VALUE)
 
     def _allele_pixel(self, realignment: AlleleRealignment):
         if self._binary_allele:
@@ -288,6 +288,7 @@ class CoverageImageGenerator(ImageGenerator):
         kmer_index=None,
         ref_seq: str | None = None,
         realign_cache: dict | None = None,
+        fragment_cache: dict | None = None,
         agreement_sink=None,
         **kwargs,
     ):
@@ -307,13 +308,23 @@ class CoverageImageGenerator(ImageGenerator):
 
         overlapping_fragments = []
         for path in read_paths:
-            fragments = fetch_reads(path, region.expand(self._fetch_flank), reference=self._reference)
+            # The same per-haplotype split BAM is rendered in every genotype that includes that haplotype, so reuse
+            # its (overlapping) fragments, and their k-mer evidence below, rather than re-reading and re-scanning it
+            cache_key = (str(path), str(region))
+            if fragment_cache is not None and cache_key in fragment_cache:
+                overlapping_fragments.extend(fragment_cache[cache_key])
+                continue
 
+            path_fragments = []
+            fragments = fetch_reads(path, region.expand(self._fetch_flank), reference=self._reference)
             for fragment in fragments:
                 # At present we render reads based on the original alignment so we only realign (and track) fragments that could overlap
                 # the image window. If we render "insert" bases, then we look if any part of the fragment overlaps the region
                 if fragment.fragment_overlaps(region, read_overlap_only=not self._insert_bases):
-                    overlapping_fragments.append(fragment)
+                    path_fragments.append(fragment)
+            if fragment_cache is not None:
+                fragment_cache[cache_key] = path_fragments
+            overlapping_fragments.extend(path_fragments)
 
         if len(overlapping_fragments) > max_reads:
             overlapping_fragments = random.sample(overlapping_fragments, k=max_reads)
@@ -334,8 +345,15 @@ class CoverageImageGenerator(ImageGenerator):
                 realign_args = {}
 
             if kmer_index is not None:
-                read1_kmer_evidence = self._scan_kmer_evidence(kmer_index, fragment.read1) if fragment.read1 else None
-                read2_kmer_evidence = self._scan_kmer_evidence(kmer_index, fragment.read2) if fragment.read2 else None
+                kmer_evidence = getattr(fragment, "_kmer_evidence", None) if fragment_cache is not None else None
+                if kmer_evidence is None:
+                    kmer_evidence = (
+                        self._scan_kmer_evidence(kmer_index, fragment.read1) if fragment.read1 else None,
+                        self._scan_kmer_evidence(kmer_index, fragment.read2) if fragment.read2 else None,
+                    )
+                    if fragment_cache is not None:
+                        fragment._kmer_evidence = kmer_evidence
+                read1_kmer_evidence, read2_kmer_evidence = kmer_evidence
             else:
                 read1_kmer_evidence = None
                 read2_kmer_evidence = None
@@ -363,25 +381,41 @@ class CoverageImageGenerator(ImageGenerator):
         # Add pileup bases to the image (downsample reads based on simple coverage-based heuristic; this is now a
         # no-op in the common case since the fragment-level subsample above already bounds the read count, but it
         # remains the final authority since a fragment can contribute up to two reads)
+        # Only render the selected channels (unless the agreement harness needs the full, raw tensor), writing all of
+        # them for a read's slice with a single assignment
+        render_channels = list(range(MAX_NUM_CHANNELS)) if agreement_sink is not None else self._image_channels
+        render_channel_idxs = np.array(render_channels)[None, :]
         row_idxs = np.full((region.length,), 0)
         for read in pileup.overlapping_reads(region, max_reads=max_reads):
+            # Per-read (constant) pixels
+            read_pixels = {
+                PAIRED_CHANNEL: self._zscore_pixel(read.insert_zscore),
+                MAPQ_CHANNEL: self._mapq_pixel(read.mapq),
+                STRAND_CHANNEL: self._strand_to_pixel[read.strand],
+            }
+            if PHASE_CHANNEL in render_channels:
+                read_pixels[PHASE_CHANNEL] = self._phase_pixel(read.phase)
+            if ALLELE_CHANNEL in render_channels:
+                read_pixels[ALLELE_CHANNEL] = self._allele_pixel(read.allele)
+            if READ_ALLELE_CHANNEL in render_channels:
+                read_pixels[READ_ALLELE_CHANNEL] = self._allele_pixel(read.read_allele)
+
             for col_slice, aligned, read_slice in pileup.read_columns(region, read, ref_seq):
-                col_idxs = range(col_slice.start, col_slice.stop)
-                image_tensor[row_idxs[col_slice], col_idxs, ALIGNED_CHANNEL] = self._align_pixel(aligned)
-                image_tensor[row_idxs[col_slice], col_idxs, PAIRED_CHANNEL] = self._zscore_pixel(read.insert_zscore)
-                image_tensor[row_idxs[col_slice], col_idxs, MAPQ_CHANNEL] = self._mapq_pixel(read.mapq)
-                image_tensor[row_idxs[col_slice], col_idxs, STRAND_CHANNEL] = self._strand_to_pixel[read.strand]
-                image_tensor[row_idxs[col_slice], col_idxs, BASEQ_CHANNEL] = self._qual_pixel(
-                    read.baseq(read_slice), self._max_baseq
-                )
-                image_tensor[row_idxs[col_slice], col_idxs, PHASE_CHANNEL] = self._phase_pixel(read.phase)
-                image_tensor[row_idxs[col_slice], col_idxs, ALLELE_CHANNEL] = self._allele_pixel(read.allele)
-                image_tensor[row_idxs[col_slice], col_idxs, READ_ALLELE_CHANNEL] = self._allele_pixel(read.read_allele)
-                ref_votes, alt_votes = read.kmer_votes(read_slice)
-                image_tensor[row_idxs[col_slice], col_idxs, KMER_EVIDENCE_CHANNEL] = self._kmer_evidence_pixel(ref_votes, alt_votes)
+                pixels = np.empty((col_slice.stop - col_slice.start, len(render_channels)), dtype=np.float64)
+                for i, channel in enumerate(render_channels):
+                    if channel == ALIGNED_CHANNEL:
+                        pixels[:, i] = self._align_pixel(aligned)
+                    elif channel == BASEQ_CHANNEL:
+                        pixels[:, i] = self._qual_pixel(read.baseq(read_slice), self._max_baseq)
+                    elif channel == KMER_EVIDENCE_CHANNEL:
+                        pixels[:, i] = self._kmer_evidence_pixel(*read.kmer_votes(read_slice))
+                    else:
+                        pixels[:, i] = read_pixels[channel]
+                col_idxs = np.arange(col_slice.start, col_slice.stop)[:, None]
+                image_tensor[row_idxs[col_slice][:, None], col_idxs, render_channel_idxs] = pixels
 
                 # Increment the 'current' row for the bases we just added to the pileup, overwrite the last row if we exceed
                 # the maximum coverage
-                row_idxs[col_slice] = np.clip(row_idxs[col_slice] + 1, 0, image_height - 1)
+                row_idxs[col_slice] = np.minimum(row_idxs[col_slice] + 1, image_height - 1)
 
         return AnnotatedArray(image_tensor)
