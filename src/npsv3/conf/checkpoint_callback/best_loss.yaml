@@ -1,6 +1,11 @@
+# Keep the checkpoint with the lowest training loss (instead of the most recent), so `<output>/model.ckpt` is the
+# best rather than the final model. Select with `checkpoint_callback=best_loss`.
+#
+# Epochs that don't improve the loss save no checkpoint, so `resume_from=last` can only resume from the last
+# improvement (or a more recent requeue `hpc_ckpt_N.ckpt`), not necessarily the last epoch.
 defaults:
   - base
-  
+
 monitor: "train_loss"
 mode: "min"
 save_top_k: 1

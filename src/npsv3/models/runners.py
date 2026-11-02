@@ -1,4 +1,6 @@
+import glob
 import logging
+import os
 
 import hydra
 import lightning as L
@@ -72,6 +74,30 @@ def load_model_from_checkpoint(cfg, *, strict=True, weights_only=None):
         weights_only=weights_only,
     )
 
+def _resolve_resume_checkpoint(resume_from, output_dir) -> str | None:
+    """Return the checkpoint to resume training from (as `ckpt_path`) for `resume_from`.
+
+    `None` defers to Lightning, which resumes from the newest `hpc_ckpt_N.ckpt` in `default_root_dir` when running under
+    SLURM. Otherwise resume from the most recently modified of `resume_from` (unless it is "last") and the full
+    checkpoints in `output_dir`, i.e., `ModelCheckpoint` and requeue (`hpc_ckpt_N.ckpt`) checkpoints. Including
+    `output_dir` means a requeued job, which re-runs the same command, continues from where it was interrupted rather
+    than from `resume_from` again. Returns `None` (train from scratch) if "last" finds no checkpoints.
+    """
+    if resume_from is None:
+        return None
+    if resume_from != "last" and not os.path.exists(resume_from):
+        raise FileNotFoundError(f"resume_from checkpoint {resume_from} does not exist")
+
+    # Skip symlinks, e.g., `model.ckpt`, which point to (and so would duplicate) another checkpoint
+    candidates = [path for path in glob.glob(os.path.join(output_dir, "*.ckpt")) if not os.path.islink(path)]
+    if resume_from != "last":
+        candidates.append(resume_from)
+    if not candidates:
+        logging.warning("No checkpoints found in %s to resume from, training from scratch", output_dir)
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
 def train(cfg, output_dir=None, **kw_args):
     """Train a Lightning model from scratch or resume from a checkpoint 
 
@@ -85,6 +111,16 @@ def train(cfg, output_dir=None, **kw_args):
     # Reduce precision to enable use of GPU tensor cores
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
+
+    # `model.checkpoint` (fine-tuning) loads only the weights, while `resume_from` restores the full training state,
+    # including the weights, and so would overwrite them
+    resume_from = OmegaConf.select(cfg, "resume_from", default=None)
+    if resume_from is not None and OmegaConf.select(cfg, "model.checkpoint", default=None) is not None:
+        raise ValueError("Specify only one of model.checkpoint (fine-tuning) or resume_from (resume training)")
+    if resume_from is not None and output_dir is None:
+        raise ValueError("resume_from requires an output directory")
+    if resume_from is not None and resume_from != "last":
+        resume_from = hydra.utils.to_absolute_path(resume_from)
 
     dm = hydra.utils.instantiate(cfg.data)
 
@@ -148,6 +184,12 @@ def train(cfg, output_dir=None, **kw_args):
             genotype_subset=getattr(dm, "train_genotype_subset", None),
         )
 
+    # Lightning saves `hpc_ckpt_N.ckpt` checkpoints on the SLURM requeue signal to, and resumes from them in,
+    # `default_root_dir`, which defaults to the current directory. Use the stable output directory instead, since the
+    # current directory can differ between runs (e.g., timestamped Hydra directories).
+    if output_dir is not None:
+        kw_args = {"default_root_dir": output_dir, **kw_args}
+
     trainer = hydra.utils.instantiate(
         cfg.trainer,
         # Text logging in place of a progress bar, which redraws via "\r" and so leaves duplicate lines
@@ -161,9 +203,12 @@ def train(cfg, output_dir=None, **kw_args):
         **kw_args,
     )
 
-    # TODO: Check if we have reached the final, if not, continue training by setting ckpt_path
-    # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#resume-training-state
-    trainer.fit(model=model, datamodule=dm)
+    ckpt_path = _resolve_resume_checkpoint(resume_from, output_dir)
+    if ckpt_path is not None:
+        logging.info("Resuming training from %s", ckpt_path)
+    # Our own checkpoints include non-tensor state (e.g., the energon loader position) that `weights_only` rejects. This
+    # also applies to Lightning's automatic resume from `hpc_ckpt_N.ckpt` when `ckpt_path` is None.
+    trainer.fit(model=model, datamodule=dm, ckpt_path=ckpt_path, weights_only=False)
 
     return checkpoint_callback.best_model_path
 
@@ -173,7 +218,8 @@ def test(cfg, **kw_args):
         torch.set_float32_matmul_precision("high")
 
     dm = hydra.utils.instantiate(cfg.data)
-    model = load_model_from_checkpoint(cfg)
+    # Our own checkpoints include non-tensor state (e.g., the energon loader position) that `weights_only` rejects
+    model = load_model_from_checkpoint(cfg, weights_only=False)
 
     trainer_args = {
         "enable_progress_bar": False,

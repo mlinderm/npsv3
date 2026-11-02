@@ -2,3 +2,5 @@
 command: loss
 model:
   checkpoint: ???
+data:
+  predict_split: test

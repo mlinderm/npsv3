@@ -23,6 +23,7 @@ from npsv3.util.range import Range
 from npsv3.util.variant import VariantFileReader
 
 from .. import (
+    HG38_BWA_MEM3_INDEX,
     HG00733_HG38_BAM,
     HG38_REF_FASTA,
     cache_filter_kmc_database,
@@ -37,13 +38,14 @@ from .. import (
     "input=/storage/mlinderman/projects/sv/npsv3-experiments/resources/HG00733.hgsvc3-hprc-2024-02-23.dipcall.passing.hg38.vcf.gz",
     f"reads={HG00733_HG38_BAM}",
     "graph.ref_kmer_counts_kmc_prefix=/storage/mlinderman/projects/sv/npsv3-experiments/resources/Homo_sapiens_assembly38.non_unique.k${graph.kmer_size}",
+    f"aligner_index={HG38_BWA_MEM3_INDEX}",
     "simulation.replicates=2",
 )
 class TestHG00733GraphExamples:
     def test_graph_to_example(self, request, cfg, hg00733_sample, tmp_path):
-        if not all(os.path.exists(f) for f in (cfg.reference, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
-        if not bwa_index_loaded(cfg.reference):
+        if not bwa_index_loaded(cfg.aligner_index, aligner=cfg.pileup.aligner):
             pytest.skip("BWA index not loaded")
 
         # cSpell:disable
@@ -106,7 +108,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
 
     def test_true_haplotype_strategy(self, request, cfg, hg00733_sample, tmp_path):
         """The "true" haplotype strategy generates the reference, true, and true +/- SV haplotypes"""
-        if not all(os.path.exists(f) for f in (cfg.reference, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
        
         # cSpell:disable
@@ -175,9 +177,9 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         """A sample with no called variant in the region (i.e. every analysis variant's genotype for that
         sample is missing) should be unlabeled unless haplotype.missing_are_ref opts into treating missing
         genotypes as homozygous REF."""
-        if not all(os.path.exists(f) for f in (cfg.reference, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
+        if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
-        if not bwa_index_loaded(cfg.reference):
+        if not bwa_index_loaded(cfg.aligner_index, aligner=cfg.pileup.aligner):
             pytest.skip("BWA index not loaded")
 
         # Same region/variants as test_graph_to_example, but HG00733's genotype is missing at every
@@ -239,7 +241,7 @@ chr1	1134771	.	G	GCACCGTGAGGGGTGTGGCTTCCTCGCCATCTGAGGCTGCAGCCCCTCTCAGGAGGGGGCACC
         human-readable report to the results dir for manual inspection."""
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
-        if not bwa_index_loaded(cfg.reference):
+        if not bwa_index_loaded(cfg.aligner_index, aligner=cfg.pileup.aligner):
             pytest.skip("BWA index not loaded")
 
         region = Range(region_str)
@@ -758,6 +760,7 @@ class TestHGSVC3HPRCPopulationGraphExamples:
     "graph.population_prior=True",
     "haplotype.missing_are_ref=True",
     "pileup=unphased_graph_kmer",
+    f"aligner_index={HG38_BWA_MEM3_INDEX}",
     "simulation.replicates=1",
 )
 class TestHGSVC3HPRCPAVPopulationGraphExamples:
@@ -772,7 +775,7 @@ class TestHGSVC3HPRCPAVPopulationGraphExamples:
     def test_high_loss_regions(self, cfg, hg00096_sample, region_str, tmp_path):
         if not all(os.path.exists(f) for f in (cfg.reference, cfg.input, cfg.reads, f"{cfg.graph.ref_kmer_counts_kmc_prefix}.kmc_pre")):
             pytest.skip("Missing necessary inputs")
-        if not bwa_index_loaded(cfg.reference):
+        if not bwa_index_loaded(cfg.aligner_index, aligner=cfg.pileup.aligner):
             pytest.skip("BWA index not loaded")
 
         region = Range(region_str)

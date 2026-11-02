@@ -10,7 +10,15 @@ from npsv3.simulation import bwa_index_loaded
 from npsv3.util.range import Range
 from npsv3.util.vcf import index_variant_file
 
-from . import B37_REF_FASTA, EXPERIMENTS_DIR, HG002_DIPCALL_VCF, HG002_HG38_BAM, HG38_REF_FASTA, data_path
+from . import (
+    B37_REF_FASTA,
+    EXPERIMENTS_DIR,
+    HG002_DIPCALL_VCF,
+    HG002_HG38_BAM,
+    HG38_BWA_MEM3_INDEX,
+    HG38_REF_FASTA,
+    data_path,
+)
 
 
 def _indexed_vcf(tmp_path, vcf: bytes) -> str:
@@ -21,9 +29,12 @@ def _indexed_vcf(tmp_path, vcf: bytes) -> str:
     index_variant_file(vcf_path)
     return vcf_path
 
-@pytest.mark.skipif(not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required")
+@pytest.mark.skipif(
+    not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA, aligner="bwa"), reason="B37 reference in SHM required"
+)
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
+    "pileup.aligner=bwa",  # There is no bwa-mem3 index for B37
     "simulation.replicates=1",
     "pileup=unphased_variant",
 )
@@ -54,9 +65,12 @@ class TestOnlinePackedImageDataLoader:
         dm.teardown(stage="predict")
 
 
-@pytest.mark.skipif(not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA), reason="B37 reference in SHM required")
+@pytest.mark.skipif(
+    not B37_REF_FASTA or not bwa_index_loaded(B37_REF_FASTA, aligner="bwa"), reason="B37 reference in SHM required"
+)
 @pytest.mark.cfg_overrides(
     f"reference={B37_REF_FASTA}",
+    "pileup.aligner=bwa",  # There is no bwa-mem3 index for B37
     "simulation.replicates=1",
     "pileup=unphased_variant",
     "model=paired_packed_inception_infonce",
@@ -86,9 +100,13 @@ class TestB37Genotyping:
                 assert len(sample["MT"]) == 4, f"Missing or invalid MT in sample entry for {record}"
             assert _i == 0, f"Expected 1 record, found {_i + 1}"
 
-@pytest.mark.skipif(not HG38_REF_FASTA or not bwa_index_loaded(HG38_REF_FASTA), reason="HG38 reference in SHM required")
+@pytest.mark.skipif(
+    not HG38_REF_FASTA or not HG38_BWA_MEM3_INDEX or not bwa_index_loaded(HG38_BWA_MEM3_INDEX),
+    reason="HG38 bwa-mem3 index in SHM required",
+)
 @pytest.mark.cfg_overrides(
     f"reference={HG38_REF_FASTA}",
+    f"aligner_index={HG38_BWA_MEM3_INDEX}",
     "simulation.replicates=1",
     "pileup=unphased_variant",
     "model=paired_packed_inception_infonce",

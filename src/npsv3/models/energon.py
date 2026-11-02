@@ -714,15 +714,16 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
 
     - `metadataset_path`: a single, pre-combined `dataset.yaml` that already defines its own
       train/val/test splits -- e.g. hand-built, or prepared once and reused as-is.
-    - `train_metadataset_paths` (+ optional `val_metadataset_paths` / `test_metadataset_paths`): one
+    - `train_metadataset_paths` / `val_metadataset_paths` / `test_metadataset_paths` (at least one): one
       or more `dataset.yaml` paths *per split*, each written by `prepare_energon_dataset` (which
       always writes a single, unsplit tree -- see its docstring). These are combined in memory into
       one metadataset (`_build_metadataset`), no file written to disk -- the common case, e.g.
-      training across several samples' independently-prepared trees.
+      training across several samples' independently-prepared trees. Any tree can serve as any split, e.g. only
+      `test_metadataset_paths` for the `test` command.
 
     Args:
         metadataset_path (str | None, optional): A pre-combined `dataset.yaml` with real train/val/test
-            splits. Mutually exclusive with `train_metadataset_paths`; exactly one of the two is
+            splits. Mutually exclusive with the per-split `*_metadataset_paths`; one of the two forms is
             required.
         train_metadataset_paths (str | Sequence[str] | None, optional): One or more `dataset.yaml`
             paths written by `prepare_energon_dataset` (called automatically by `vcf_to_graph_examples`
@@ -831,8 +832,9 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             # Used as-is: `get_train_dataset`/`get_val_dataset` accept a path directly, same as a dict.
             self._metadataset = metadataset_path
         else:
-            assert train_metadataset_paths is not None, (
-                "Must pass either `metadataset_path` or `train_metadataset_paths`"
+            split_paths = (train_metadataset_paths, val_metadataset_paths, test_metadataset_paths)
+            assert any(paths is not None for paths in split_paths), (
+                "Must pass either `metadataset_path` or at least one of the per-split `*_metadataset_paths`"
             )
             # Combined once, in-memory (no dataset.yaml written to disk) -- see `_build_metadataset`. A
             # split with no paths given is simply absent, so its dataloader fails loudly if ever called.
@@ -842,7 +844,8 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 "test": test_metadataset_paths,
             })
 
-        if self.train_filters:
+        # Filters apply only to the train split, so there is nothing to check without one
+        if self.train_filters and (metadataset_path is not None or train_metadataset_paths is not None):
             if metadataset_path is not None:
                 leaves = _split_leaves(metadataset_path, "train")
             else:
@@ -860,6 +863,8 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         )
 
         self._loader = None
+        # Loader state from a checkpoint, held until `train_dataloader` creates the loader (see `load_state_dict`)
+        self._pending_loader_state = None
         # One pool per split (see `_make_cache_pool`)
         self._cache_pools: dict[str, FileStoreCachePool] = {}
 
@@ -958,6 +963,9 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 repeat=self.hparams["repeat"],
             )
         self._loader = self._make_loader(dataset, "train")
+        if self._pending_loader_state is not None:
+            self._loader.restore_state_global(self._pending_loader_state)
+            self._pending_loader_state = None
         return self._loader
 
     def val_dataloader(self):
@@ -1016,9 +1024,15 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         return {"loader": self._loader.save_state_global(0)}
 
     def load_state_dict(self, state_dict):
-        if self._loader is None or "loader" not in state_dict:
+        if "loader" not in state_dict:
             return
-        self._loader.restore_state_global(state_dict["loader"])
+        if self._loader is None:
+            # Lightning restores the datamodule *before* it calls `train_dataloader`, so defer restoring the loader until
+            # it is created. Every rank loads the full checkpoint, and so the full global state (energon requires the
+            # same world size as when it was saved).
+            self._pending_loader_state = state_dict["loader"]
+        else:
+            self._loader.restore_state_global(state_dict["loader"])
 
     def teardown(self, stage=None):  # noqa: ARG002
         for pool in self._cache_pools.values():

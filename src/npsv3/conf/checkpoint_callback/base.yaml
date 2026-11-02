@@ -1,2 +1,15 @@
+# Lightning `ModelCheckpoint` instantiated by `runners.train` (with `dirpath` set to the `output` directory) to save
+# checkpoints during training. Its `best_model_path` is returned by `train` and symlinked as `<output>/model.ckpt`, the
+# checkpoint used by downstream commands.
+#
+# With the ModelCheckpoint defaults (`monitor: null`, `save_top_k: 1`) only the most recent checkpoint is kept,
+# written at the end of each (virtual) epoch as `epoch=E-step=S.ckpt`, and so `model.ckpt` is the final model.
+# `enable_version_counter` adds a `-vN` suffix rather than overwriting a same-named checkpoint (e.g., from a prior run
+# in the same directory).
+#
+# These are full checkpoints (model, optimizer, LR scheduler, loop and datamodule state), not just weights, and so
+# `resume_from` (see conf/command/train.yaml) can resume training from them, along with the `hpc_ckpt_N.ckpt`
+# checkpoints Lightning saves to `output` on the SLURM requeue signal. `save_last` isn't needed for
+# `resume_from=last`, which considers every checkpoint in `output`.
 _target_: lightning.pytorch.callbacks.ModelCheckpoint
 enable_version_counter: true

@@ -22,6 +22,8 @@ def ray_setup(tmp_path_factory):
     ray_tmp_dir = tmp_path_factory.mktemp("ray")
     ray.init(
         num_cpus=1,
+        # Ray otherwise sizes the object store from total node memory (reserving ~75GB of address space)
+        object_store_memory=1024**3,
         include_dashboard=False,
         _temp_dir=str(ray_tmp_dir),
         runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers), # type: ignore

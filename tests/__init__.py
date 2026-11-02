@@ -34,6 +34,20 @@ HG38_REF_FASTA = _first_existing(
     "/storage/mlinderman/projects/sv/npsv2-experiments/resources/Homo_sapiens_assembly38.fasta",
 )
 
+# bwa-mem3 index with a dedicated prefix (whose basename differs from the reference's), so its shared memory name doesn't
+# collide with a bwa index of the reference
+HG38_BWA_MEM3_INDEX = next(
+    (
+        prefix
+        for prefix in (
+            "/data/Homo_sapiens_assembly38_bwa3.fasta",
+            os.path.join(RESOURCES_DIR, "Homo_sapiens_assembly38_bwa3.fasta"),
+        )
+        if os.path.exists(f"{prefix}.bwt.2bit.64")
+    ),
+    None,
+)
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 RESULT_DIR = os.path.join(os.path.dirname(__file__), "results")
 

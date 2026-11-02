@@ -23,6 +23,11 @@ threads: 1
 # Path to reference FASTA file
 reference: ???
 
+# Path prefix of the aligner index (see `pileup.aligner`) used for simulation. A bwa-mem3 index should have a dedicated
+# prefix whose basename differs from (and doesn't start with) the reference's, so it doesn't collide in shared memory
+# with a bwa index of the reference (e.g. loaded by npsv2).
+aligner_index: ${reference}
+
 # If the BWA index is already pre-loaded into shared memory, specify the reference name
 shared_reference: null
 

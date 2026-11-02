@@ -455,6 +455,8 @@ class TestEnergonPackedImageDataModule:
     def test_determinism_and_resume(self, energon_dataset, tmp_path, num_workers):
         """Save at step 20, restore in a NEW process, and reproduce hashes 20..40 exactly.
 
+        The state is restored before `train_dataloader` creates the loader, as Lightning does when resuming.
+
         A failure here almost always means something upstream is not actually `@stateless` --
         untracked RNG, dict iteration order, a mutable default, or a value cached on the task
         encoder. The seed is set explicitly rather than inherited, since `pytest-randomly` reseeds
@@ -469,18 +471,18 @@ class TestEnergonPackedImageDataModule:
 
             mode, state_path = sys.argv[1], sys.argv[2]
             dm = _make_dm({energon_dataset!r}, num_workers={num_workers})
-            loader = dm.train_dataloader()
 
             hashes = []
             if mode == "record":
-                it = iter(loader)
+                it = iter(dm.train_dataloader())
                 for step in range(40):
                     hashes.append(batch_hash(next(it)))
                     if step == 19:
                         torch.save(dm.state_dict(), state_path)
             else:
+                # Restore before creating the loader, the order in which Lightning resumes from a checkpoint
                 dm.load_state_dict(torch.load(state_path, weights_only=False))
-                it = iter(loader)
+                it = iter(dm.train_dataloader())
                 for _ in range(20):
                     hashes.append(batch_hash(next(it)))
             print(json.dumps(hashes))

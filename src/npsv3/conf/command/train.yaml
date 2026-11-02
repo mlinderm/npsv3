@@ -1,2 +1,19 @@
 # @package _global_
 command: train
+
+# Resume an interrupted training run, restoring the full training state (weights, optimizer, LR scheduler, epoch/step
+# and data loader position) from a checkpoint. Unlike `model.checkpoint`, which only initializes the weights for
+# fine-tuning (training restarts at epoch 0 with a fresh optimizer and schedule), the rest of the configuration must
+# match the original run, including the number of GPUs. The two are mutually exclusive.
+#
+# * null: Train from scratch, unless running under SLURM and `output` contains a `hpc_ckpt_N.ckpt` checkpoint, which
+#   Lightning saves on the requeue signal (e.g., `--signal=SIGUSR1@180` before the time limit, or
+#   `scancel --signal=USR1 <jobid>`) and then resumes from automatically.
+# * "last": Resume from the most recently modified checkpoint in `output`, whether saved by `checkpoint_callback` or
+#   the requeue signal. Trains from scratch (with a warning) if there are none, so it is safe to set for the first run.
+# * <path>: Resume from that checkpoint, unless `output` contains a more recent checkpoint, e.g., from this same run
+#   before it was requeued. To instead roll back to an earlier checkpoint, use a new `output` directory.
+#
+# Resuming finds checkpoints in a stable `output` directory, so avoid timestamped (e.g., Hydra's default) directories.
+# Stale checkpoints in `output` from a previous run will be resumed, so use a new directory to start over.
+resume_from: null

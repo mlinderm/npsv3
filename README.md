@@ -24,7 +24,7 @@ docker build --target build -t npsv3 .
 To manually install and run NPSV3 from the source, you will need the following dependencies:
 
 * ART (NGS simulator)
-* bwa
+* bwa-mem3 (or bwa)
 * bedtools
 * bcftools
 * goleft
@@ -32,7 +32,6 @@ To manually install and run NPSV3 from the source, you will need the following d
 * jellyfish (with Python bindings)
 * ODGI
 * samblaster
-* sambamba
 * samtools
 
 along with standard command-line utilities, CMake and a C++17 compiler. You can then install with `pip install .` or `uv pip install .`. If planning to run tests or commands via `uv run` set `RAY_ENABLE_UV_RUN_RUNTIME_ENV` to [prevent the Ray library from attempting to reinstall the package](https://github.com/ray-project/ray/issues/54344#issuecomment-3058801560) when it detects `uv run`.
@@ -48,7 +47,7 @@ uv sync
 
 ## Running
 
-Given the multi-step workflow, the typical approach when using the Docker image is to run `npsv3` from a shell. The following command will start a Bash session in the Docker container (replace `/path/to/reference/`directory with the path to directory containing the reference genome and associated BWA indices). `npsv3` is most efficient when the BWA indices are loaded into shared memory. To load BWA indices into shared memory you will need to configure the Docker container with at least 12G of memory and set the shared memory size to 8G or more.
+Given the multi-step workflow, the typical approach when using the Docker image is to run `npsv3` from a shell. The following command will start a Bash session in the Docker container (replace `/path/to/reference/`directory with the path to directory containing the reference genome and associated BWA indices). `npsv3` is most efficient when the BWA indices are loaded into shared memory. To load BWA indices into shared memory you will need to configure the Docker container with at least 12G of memory and set the shared memory size to 8G or more. The Docker image includes bwa, but not bwa-mem3 (the default aligner for simulated reads), so specify `pileup.aligner=bwa`. A bwa-mem3 index of hg38 needs about 11.3G of shared memory (and a correspondingly larger container). Give it a dedicated prefix (`aligner_index`) whose basename differs from the reference's, as bwa and bwa-mem3 share the shared memory namespace.
 
 ```
 docker run --rm --entrypoint /bin/bash \

@@ -343,6 +343,8 @@ def make_graph_example(
                     stats_path=cfg.stats_path if cfg.simulation.gc_norm_covg else None,
                     region=sim_region,
                     aligner=cfg.pileup.aligner,
+                    aligner_index=cfg.aligner_index,
+                    aligner_preset=cfg.pileup.aligner_preset,
                 )
             except ValueError as e:
                 e.add_note(f"Failed to synthesize data for region {region} in sample {sample.name} (replicate {repl})")

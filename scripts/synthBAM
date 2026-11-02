@@ -3,13 +3,15 @@ set -e -o pipefail
 
 TMPDIR_ROOT=$TMPDIR
 REFERENCE=human_g1k_v37.fasta
+INDEX=
 SHAREDREF=
 SAMPLE=
 STATSPATH=
 PHASE_REGION=
 PHASE_VCF=
 PHASE_SAMPLE=
-ALIGNER=bwa
+ALIGNER=bwa-mem3
+PRESET=bcbio
 
 COVERAGE=20
 FRAGMEAN=400
@@ -19,39 +21,14 @@ PROFILE=HS25
 SAMPLES=1
 
 function add_SQ_HP_tag() {
-    python3 -c '
-import pysam
-
-with pysam.AlignmentFile("-", "r") as untagged_file:
-    with pysam.AlignmentFile("-", "w", template=untagged_file) as tagged_file:
-        for read in untagged_file:
-            name = read.query_name
-            # Extract haplotype sequence ID from read name "seq-0-0-..." to 0_0 or "seq-1-1-..." to 1_1
-            # and set SQ to permit downstream splitting of reads by haplotype.
-            haplotype_id = name.split("-", 3)
-            read.set_tag("SQ", f"{haplotype_id[1]}_{haplotype_id[2]}")
-            read.set_tag("HP", (int(haplotype_id[2]) % 2) + 1)  # Set HP to 1 or 2 based on the parity of the last haplotype ID
-            tagged_file.write(read)
-'
+    # Extract haplotype sequence ID from read name "seq-0-0-..." to 0_0 or "seq-1-1-..." to 1_1 and set SQ to permit
+    # downstream splitting of reads by haplotype. Set HP to 1 or 2 based on the parity of the last haplotype ID.
+    awk 'BEGIN { FS = OFS = "\t" } /^@/ { print; next } { split($1, h, "-"); print $0, "SQ:Z:" h[2] "_" h[3], "HP:i:" (h[3] % 2) + 1 }'
 }
 
 function add_SQ_tag() {
-    python3 -c '
-import pysam
-
-with pysam.AlignmentFile("-", "r") as untagged_file:
-    with pysam.AlignmentFile("-", "w", template=untagged_file) as tagged_file:
-        for read in untagged_file:
-            name = read.query_name
-            # Extract haplotype sequence ID from read name "seq-0-0-..." to 0_0 or "seq-1-1-..." to 1_1
-            # and set SQ to permit downstream splitting of reads by haplotype.
-            haplotype_id = name.split("-", 3)
-            read.set_tag("SQ", f"{haplotype_id[1]}_{haplotype_id[2]}")
-            tagged_file.write(read)
-'
+    awk 'BEGIN { FS = OFS = "\t" } /^@/ { print; next } { split($1, h, "-"); print $0, "SQ:Z:" h[2] "_" h[3] }'
 }
-
-
 
 usage()
 {
@@ -63,7 +40,8 @@ Generate synthetic BAMs for single variant and specified zygosity
 Options:
   -h            Print this message
   -R FASTA      Path to reference file, default: $REFERENCE
-  -S FASTA      Reference file already in shared memory, default: undefined
+  -x PREFIX     Path prefix of the aligner index, default: reference file
+  -S FASTA      Reference file already in shared memory (bwa only), default: undefined
   -c integer    Coverage for every sequence in FASTA (i.e. for each haplotype present), default: $COVERAGE
   -m float      Mean fragment size, default: $FRAGMEAN
   -s float      Standard deviation of fragment size, default: $FRAGSD
@@ -77,15 +55,20 @@ Options:
   -v FILE       Phased VCF (if specified, phasing region and phasing sample must be specified), default: undefined
   -r string     Region for phasing, default: undefined
   -N string     Sample in phased VCF, default: undefined
-  -a string     Aligner to use, default: $ALIGNER
+  -a string     Aligner to use, one of "bwa-mem3", "bwa" or "novo", default: $ALIGNER
+  -b string     BWA parameter preset, "bcbio" (-c 250 -M) or "nygc" (-Y -K 100000000, as used for the NYGC 1000 Genomes
+                high-coverage data), default: $PRESET
 EOF
 }
 
-while getopts "hR:S:c:m:s:t:l:p:z:i:p:n:j:g:r:v:N:a:" Option
+while getopts "hR:x:S:c:m:s:t:l:p:z:i:p:n:j:g:r:v:N:a:b:" Option
 do
     case $Option in
         R)
             REFERENCE=$OPTARG
+            ;;
+        x)
+            INDEX=$OPTARG
             ;;
         S)
             SHAREDREF=$OPTARG
@@ -132,6 +115,9 @@ do
         a)
             ALIGNER=$OPTARG
             ;;
+        b)
+            PRESET=$OPTARG
+            ;;
         h)
             usage
             exit 0
@@ -159,20 +145,50 @@ if [[ ! -e "$FASTA" ]]; then
     exit 1
 fi
 
-TMPDIR=$(mktemp -d --tmpdir="$TMPDIR_ROOT") || exit 1
-trap "rm -rf $TMPDIR" 0
+case "$ALIGNER" in
+    bwa-mem3|bwa|novo)
+        ;;
+    *)
+        >&2 echo "Error: Unknown aligner $ALIGNER"
+        >&2 usage
+        exit 1
+        ;;
+esac
 
-cp "$FASTA" "${OUTBAM/%bam/synth.fasta}"
-
-# If shared memory reference is not defined, use reference files
-if [[ -z $SHAREDREF ]]; then
-    SHAREDREF="$REFERENCE"
-fi
+case "$PRESET" in
+    bcbio)
+        BWA_PRESET_ARGS=(-c 250 -M)
+        ;;
+    nygc)
+        BWA_PRESET_ARGS=(-Y -K 100000000)
+        ;;
+    *)
+        >&2 echo "Error: Unknown BWA parameter preset $PRESET"
+        >&2 usage
+        exit 1
+        ;;
+esac
 
 if [[ -n "$PHASE_VCF" && (-z "$PHASE_REGION" || -z "$PHASE_SAMPLE") ]]; then
     >&2 echo "Error: Phase region and sample must be specified with phasing VCF"
     >&2 usage
     exit 1
+fi
+
+TMPDIR=$(mktemp -d --tmpdir="$TMPDIR_ROOT") || exit 1
+trap "rm -rf $TMPDIR" 0
+
+cp "$FASTA" "${OUTBAM/%bam/synth.fasta}"
+
+# If the aligner index is not defined, assume it is alongside the reference
+if [[ -z $INDEX ]]; then
+    INDEX="$REFERENCE"
+fi
+
+# If shared memory reference is not defined, use index files. bwa-mem3 always uses the index path, attaching to the
+# index in shared memory if one with the same basename is present.
+if [[ -z $SHAREDREF ]]; then
+    SHAREDREF="$INDEX"
 fi
 
 for (( s=1; s<=SAMPLES; s++ ))
@@ -182,24 +198,33 @@ do
     else
         SM="$SAMPLE"
     fi
-    # Generate synthetic reads reads1.fq and reads2.fq. art_illumina use time in seconds for seed which can result in identical seeds for data.
+    # Generate synthetic reads reads1.fq and reads2.fq. art_illumina use time in seconds for seed which can result in
+    # identical seeds for data. SYNTH_SEED can be set to fix the seed (e.g. for testing).
     READS_PREFIX=$TMPDIR/reads.synth${s}
-    art_illumina -q -i "$FASTA" -o "$READS_PREFIX" -sam -na -ss "$PROFILE" -l "$LENGTH" -f "$COVERAGE" -p -m "$FRAGMEAN" -s "$FRAGSD" -sp -rs $(od -An -tu4 -N4 /dev/urandom) 1>&2
-    
+    art_illumina -q -i "$FASTA" -o "$READS_PREFIX" -sam -na -ss "$PROFILE" -l "$LENGTH" -f "$COVERAGE" -p -m "$FRAGMEAN" -s "$FRAGSD" -sp -rs ${SYNTH_SEED:-$(od -An -tu4 -N4 /dev/urandom)} 1>&2
+
     >&2 echo "Generating aligned BAM"
     # Generate synthetic aligned BAM using minimal, but representative, pipeline
     # This pipeline should be modified to make the simulated pipeline similar to the
-    # the pipeline used with the actual data
+    # the pipeline used with the actual data. The BAM is consumed immediately (e.g. split by haplotype), so minimal
+    # compression is sufficient.
     ALIGNEDBAM=$TMPDIR/aligned${s}.bam
-    
+    READ_GROUP="@RG\tID:synth${s}\tSM:${SM}\tLB:synth${s}\tPL:illumina\tPU:ART"
+
     if [[ "$ALIGNER" == "novo" ]]; then
         # There doesn't appear to be a way to force the index to remain in memory
         novoalign -d "${REFERENCE}.novo" -F STDFQ -t 400 --Q2Off -c 10 -i PE "${FRAGMEAN%.*},${FRAGSD%.*}" \
-            -o SAM "@RG\tID:synth${s}\tSM:${SM}\tLB:synth${s}\tPL:illumina\tPU:ART" \
-            -f "${READS_PREFIX}1.fq" "${READS_PREFIX}2.fq" 
+            -o SAM "$READ_GROUP" \
+            -f "${READS_PREFIX}1.fq" "${READS_PREFIX}2.fq"
+    elif [[ "$ALIGNER" == "bwa-mem3" ]]; then
+        # --compat=bwa-mem produces records identical to bwa (other than adding the MQ tag)
+        bwa-mem3 mem --compat=bwa-mem "${BWA_PRESET_ARGS[@]}" -v 1 -I "${FRAGMEAN},${FRAGSD}" \
+            -R "$READ_GROUP" \
+            "$INDEX" \
+            "${READS_PREFIX}1.fq" "${READS_PREFIX}2.fq"
     else
-        bwa mem -c 250 -M -v 1 -I "${FRAGMEAN},${FRAGSD}" \
-            -R "@RG\tID:synth${s}\tSM:${SM}\tLB:synth${s}\tPL:illumina\tPU:ART" \
+        bwa mem "${BWA_PRESET_ARGS[@]}" -v 1 -I "${FRAGMEAN},${FRAGSD}" \
+            -R "$READ_GROUP" \
             "$SHAREDREF" \
             "${READS_PREFIX}1.fq" "${READS_PREFIX}2.fq"
     fi | \
@@ -209,9 +234,8 @@ do
     else
         add_SQ_HP_tag
     fi | \
-    samtools view -S -u  - | \
-    sambamba -q sort -t 1 -m 512MiB --tmpdir="$TMPDIR" -o "$ALIGNEDBAM" /dev/stdin
-    
+    samtools sort -l 1 -m 512M -T "$TMPDIR/sort${s}" --write-index -o "${ALIGNEDBAM}##idx##${ALIGNEDBAM}.bai" -
+
     if [[ -n "$PHASE_VCF" ]]; then
         >&2 echo "Phasing with variants in ${PHASE_REGION}"
         whatshap haplotag \
@@ -234,7 +258,7 @@ done
 if [[ "$SAMPLES" -gt 1 ]]; then
     # Combine all of the individual BAM files
     >&2 echo "Generating aligned BAM files with replicates"
-    sambamba -q merge -t 1 "$OUTBAM" $(seq 1 "$SAMPLES" | xargs printf " $TMPDIR/aligned%d.bam")
+    samtools merge -f -l 1 --write-index -o "${OUTBAM}##idx##${OUTBAM}.bai" $(seq 1 "$SAMPLES" | xargs printf " $TMPDIR/aligned%d.bam")
 else
     mv "$TMPDIR/aligned1.bam" "$OUTBAM"
     mv "$TMPDIR/aligned1.bam.bai" "$OUTBAM.bai"

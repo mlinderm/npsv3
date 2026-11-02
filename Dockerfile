@@ -41,7 +41,6 @@ RUN apt-get -qq update && apt-get install --no-install-recommends -yq \
   bcftools \
   bedtools \
   bwa \
-  sambamba \
   samtools \
   tabix \
   && apt-get clean -y \

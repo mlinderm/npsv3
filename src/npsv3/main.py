@@ -13,13 +13,17 @@ from npsv3.util.config import setup_resolvers
 
 
 def _check_shared_reference(cfg: DictConfig):
-    """Check if BWA shared index is loaded, loading it if specified configuration"""
+    """Check if the aligner's shared index is loaded, loading it if specified configuration"""
     if cfg.simulation.replicates > 0:
-        cfg.shared_reference = bwa_index_loaded(hydra.utils.to_absolute_path(cfg.reference), load=cfg.load_reference)
+        aligner = cfg.pileup.aligner
+        index = hydra.utils.to_absolute_path(cfg.aligner_index)
+        cfg.shared_reference = bwa_index_loaded(index, load=cfg.load_reference, aligner=aligner)
         if not cfg.shared_reference:
             logging.warning(
-                "Consider loading BWA indices into shared memory before generating examples with 'bwa shm %s'",
-                cfg.reference,
+                "Consider loading %s indices into shared memory before generating examples with '%s shm %s'",
+                aligner,
+                aligner,
+                index,
             )
 
 
@@ -49,6 +53,19 @@ def _make_filter_paths_absolute(cfg: DictConfig):
     filters = OmegaConf.select(cfg, "data.filters")
     for i in range(len(filters) if filters is not None else 0):
         _make_paths_absolute(cfg, [f"data.filters.{i}.region_stats"])
+
+
+def _make_energon_data_paths_absolute(cfg: DictConfig):
+    """Make the energon data config's metadataset and filter paths absolute. The data is addressed by metadataset(s)
+    rather than by WebDataset URLs, either a single pre-combined `metadataset_path` or per-split `*_metadataset_paths`."""
+    for key in (
+        "data.metadataset_path",
+        "data.train_metadataset_paths",
+        "data.val_metadataset_paths",
+        "data.test_metadataset_paths",
+    ):
+        _make_path_or_list_absolute(cfg, key)
+    _make_filter_paths_absolute(cfg)
 
 
 def _graph_shards(cfg: DictConfig) -> list[str] | None:
@@ -90,7 +107,7 @@ def main(cfg: DictConfig) -> None:
         from npsv3.genotype import genotype
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "stats_path", "model.checkpoint"])
+        _make_paths_absolute(cfg, ["reference", "aligner_index", "stats_path", "model.checkpoint"])
         _check_shared_reference(cfg)
 
         sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
@@ -111,7 +128,7 @@ def main(cfg: DictConfig) -> None:
 
         _make_paths_absolute(
             cfg,
-            ["reference", "reads", "input", "stats_path", "unique_kmer_path", "filtered_kmer_path", "hom_ref_downsample.region_stats"],
+            ["reference", "aligner_index", "reads", "input", "stats_path", "unique_kmer_path", "filtered_kmer_path", "hom_ref_downsample.region_stats"],
         )
         _check_shared_reference(cfg)
 
@@ -183,17 +200,7 @@ def main(cfg: DictConfig) -> None:
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         _make_paths_absolute(cfg, ["model.encoder.checkpoint_path", "data.cache_dir"])
-
-        # The energon data config is addressed by metadataset(s) rather than by WebDataset URLs,
-        # either a single pre-combined `metadataset_path` or per-split `*_metadataset_paths`.
-        for key in (
-            "data.metadataset_path",
-            "data.train_metadataset_paths",
-            "data.val_metadataset_paths",
-            "data.test_metadataset_paths",
-        ):
-            _make_path_or_list_absolute(cfg, key)
-        _make_filter_paths_absolute(cfg)
+        _make_energon_data_paths_absolute(cfg)
 
         checkpoint = train(cfg, output_dir=output)
 
@@ -214,8 +221,8 @@ def main(cfg: DictConfig) -> None:
         # If no output directory is specified, use the Hydra output directory (the current working directory)
         output = os.getcwd() if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
-        _make_paths_absolute(cfg, ["model.checkpoint"])
-        OmegaConf.update(cfg, "data.test_urls", _to_webdataset_urls(cfg.data.test_urls), merge=False)
+        _make_paths_absolute(cfg, ["model.checkpoint", "data.cache_dir"])
+        _make_energon_data_paths_absolute(cfg)
 
         metrics = test(cfg)
         with open(os.path.join(output, "metrics.json"), "w") as file:
@@ -230,17 +237,7 @@ def main(cfg: DictConfig) -> None:
         torch.set_num_threads(cfg.threads)
 
         _make_paths_absolute(cfg, ["model.checkpoint", "data.cache_dir"])
-        
-        # The energon data config is addressed by metadataset(s) rather than by WebDataset URLs,
-        # either a single pre-combined `metadataset_path` or per-split `*_metadataset_paths`.
-        for key in (
-            "data.metadataset_path",
-            "data.train_metadataset_paths",
-            "data.val_metadataset_paths",
-            "data.test_metadataset_paths",
-        ):
-            _make_path_or_list_absolute(cfg, key)
-        _make_filter_paths_absolute(cfg)
+        _make_energon_data_paths_absolute(cfg)
 
         # If no output file is specified, create a fixed file in the Hydra output directory
         output = "losses.pkl.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)

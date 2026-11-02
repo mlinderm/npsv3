@@ -207,6 +207,30 @@ class TestPackedVariantWithEnergonLoader:
 
         assert checkpoint_path is not None and os.path.exists(checkpoint_path)
 
+    def test_train_resume_from_last(self, paired_energon_datasets, tmp_path):
+        """`resume_from=last` must continue a run from its most recent checkpoint, including the loader position
+        (saved in the checkpoint), not restart it as `model.checkpoint` (fine-tuning) does."""
+
+        def train(max_epochs, *extra):
+            overrides = [
+                f"data.metadataset_path={paired_energon_datasets['train']}",
+                *(f"data.{key}={value}" for key, value in {**_DATA_TEST_OVERRIDES, "limit_train_batches": 2}.items()),
+                "+trainer.accelerator=cpu",
+                f"trainer.max_epochs={max_epochs}",
+                "command=train",
+                *extra,
+            ]
+            cfg = hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *overrides])
+            return runners.train(cfg, output_dir=str(tmp_path))
+
+        first = train(1)
+        assert os.path.basename(first) == "epoch=0-step=2.ckpt"
+        checkpoint = torch.load(first, weights_only=False, map_location="cpu")
+        assert "loader" in checkpoint["EnergonPackedImageDataModule"], "The loader position must be checkpointed"
+
+        resumed = train(2, "resume_from=last")
+        assert os.path.basename(resumed) == "epoch=1-step=4.ckpt", "Resumed training must continue the epoch/step"
+
     def test_loss_records_region_losses(self, paired_energon_datasets, tmp_path):
         """`runners.predict` (the `loss` command) must run over the energon loader and record every region's loss.
         Regression test for Lightning's `MisconfigurationException` when it tried to re-instantiate energon's
@@ -243,6 +267,29 @@ class TestPackedVariantWithEnergonLoader:
             np.testing.assert_allclose(row.genotype_metric, row.metric.mean(axis=0))
             assert row.label_metric == pytest.approx(row.genotype_metric[row.genotype])
             assert row.prediction_metric == pytest.approx(row.genotype_metric[row.prediction])
+
+    def test_test_reports_metrics(self, paired_energon_datasets, tmp_path):
+        """`runners.test` (the `test` command) must load a checkpoint, including its non-tensor loader state, and
+        evaluate it on the energon loader's test split."""
+        train_overrides = [
+            *_data_overrides(paired_energon_datasets, limit_train_batches=1, limit_val_batches=0),
+            "+trainer.accelerator=cpu",
+            "trainer.max_epochs=1",
+        ]
+        train_cfg = hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *train_overrides])
+        checkpoint_path = runners.train(train_cfg, output_dir=str(tmp_path))
+
+        # Only the test split, as when testing with an image dataset that wasn't used for training
+        test_overrides = [
+            f"data.test_metadataset_paths={paired_energon_datasets['test']}",
+            *(f"data.{key}={value}" for key, value in _DATA_TEST_OVERRIDES.items()),
+            "+trainer.accelerator=cpu",
+            "command=test",
+            f"model.checkpoint='{checkpoint_path}'",
+        ]
+        test_cfg = hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *test_overrides])
+        (metrics,) = runners.test(test_cfg)
+        assert np.isfinite(metrics["test_loss"])
 
     def test_ddp_two_rank_training(self, paired_energon_datasets, tmp_path):
         """Two ranks train without hanging and finish with identical weights, confirming DDP's

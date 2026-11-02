@@ -69,7 +69,11 @@ save_realignment_bam_dir: null
 
 # Downsample reads to this fraction of the total reads
 downsample: 1.0
-aligner: "bwa"
+# Aligner for simulated reads: "bwa-mem3" (in bwa compatibility mode, ~4x faster with identical alignments) or "bwa"
+aligner: "bwa-mem3"
+# BWA parameter preset for simulated reads: "bcbio" (-c 250 -M) or "nygc" (-Y -K 100000000, matching the NYGC 1000
+# Genomes high-coverage alignments)
+aligner_preset: "nygc"
 
 example_fn: "npsv3.images.example.vcf_to_graph_examples"
 
