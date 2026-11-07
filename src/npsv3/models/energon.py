@@ -737,6 +737,44 @@ class _OpaqueIterable:
         return iter(self.loader)
 
 
+class _RestartingLoader:
+    """Makes each pass over a limited validation loader start from the top.
+
+    Energon only resets a limited dataset when iteration reaches `StopIteration` (and, with workers, the loader keeps
+    returning the same iterator until then). Lightning stops after `limit_val_batches` without asking for the batch
+    that would raise it, so without this the next pass finishes the previous one, getting no batches, or the remainder
+    after the sanity check. Doing so here, instead of just discarding the iterator, is what also resets `LimitDataset`'s
+    offset and works without workers. The cost is finishing the pass left partial by the sanity check, once per fit.
+    """
+
+    def __init__(self, loader):
+        self.loader = loader
+        self._active = None
+
+    def __len__(self):
+        return len(self.loader)
+
+    @property
+    def _iterator(self):
+        # Lightning finds the workers to shut down at the end of a stage via this attribute of the `DataLoader`
+        return self.loader._iterator
+
+    @_iterator.setter
+    def _iterator(self, value):
+        self.loader._iterator = value
+
+    def __iter__(self):
+        # A generator so that nothing starts until the first batch is requested, since Lightning also calls `iter()` on
+        # non-`DataLoader` iterables just to check that they are iterable.
+        if self._active is not None:
+            for _ in self._active:
+                pass
+        self._active = iter(self.loader)
+        # Not `yield from`, which would close `_active` along with this generator, instead of leaving it to be finished
+        for batch in self._active:
+            yield batch
+
+
 class EnergonPackedImageDataModule(L.LightningDataModule):
     """Lightning DataModule over the polylithic energon trees.
 
@@ -1024,7 +1062,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 limit=self.hparams["limit_val_batches"],
                 task_encoder=self._task_encoder(),
             )
-        return self._make_loader(dataset, "val")
+        return _RestartingLoader(self._make_loader(dataset, "val"))
 
     def test_dataloader(self):
         with _quiet_energon(self.hparams["verbose"]):

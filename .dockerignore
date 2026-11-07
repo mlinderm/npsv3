@@ -21,4 +21,35 @@ CLAUDE.md
 # Compiled Documentation
 docs/_build
 
-tests/results
+tests/results.git
+.envrc
+CMakeFiles
+lightning_logs
+outputs
+multirun
+scripts/synthbam-benchmark/inputs
+*.sif
+*.tar
+
+# In-tree build products from building SeqLib on the host (rebuilt in the container)
+**/*.o
+**/*.pico
+**/*.a
+**/*.so
+**/*.so.*
+lib/seqlib/Makefile
+lib/seqlib/config.h
+lib/seqlib/config.log
+lib/seqlib/config.status
+lib/seqlib/stamp-h1
+lib/seqlib/src/Makefile
+lib/seqlib/src/.deps
+lib/seqlib/src/seqtools/Makefile
+lib/seqlib/src/seqtools/.deps
+lib/seqlib/bwa/bwa
+lib/seqlib/fermi-lite/fml-asm
+lib/seqlib/htslib/bgzip
+lib/seqlib/htslib/htsfile
+lib/seqlib/htslib/tabix
+lib/seqlib/htslib/config.h
+lib/seqlib/htslib/version.h

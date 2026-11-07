@@ -1,6 +1,8 @@
 import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import hydra
 import lightning as L
@@ -124,38 +126,75 @@ class InfoNCE(nn.Module):
     similarity scores than negative pairs (label=0) within each variant group. It applies
     temperature scaling and uses log-ratio separation between positives and all negatives.
 
+    Each variant group has R replicates of its G genotypes' supports, laid out replicates-major (support r*G + g), with
+    logits s_{r,g} = metric_{r,g} / temperature. Let P be the positive genotypes ("first-" and "second-rank" labels) and
+    N the negatives (label 0). Every positive support is an anchor, averaged outside the log (SupCon's L_out), against
+    the negatives in its denominator. With `negatives="all"`, those are the negatives of every replicate
+
+        L = -1/(R |P|) sum_r sum_{g in P} log( e^{s_{r,g}} / (e^{s_{r,g}} + sum_{r'} sum_{h in N} e^{s_{r',h}}) )
+
+    and with `negatives="replicate"`, only the negatives of the anchor's replicate, i.e., a softmax within each replicate
+
+        L = -1/(R |P|) sum_r sum_{g in P} log( e^{s_{r,g}} / (e^{s_{r,g}} + sum_{h in N} e^{s_{r,h}}) )
+
+    Every genotype of a replicate is simulated from the same reads, so the latter is invariant to a replicate-level
+    shift in the similarity to the query. The batch loss is the mean of the groups' losses. With R = 1 they are the same.
+
     Args:
         temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+        negatives (str, optional): The negatives in each anchor's denominator, those of "all" replicates or the
+            anchor's "replicate" only (requires `num_genotypes`). Default is "all".
 
     Inputs:
         metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
         target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes.
+        num_genotypes (torch.Tensor | None): A (|variants|,) tensor with the number of genotypes G of each variant
+            group. Only needed for `negatives="replicate"`.
 
     Returns:
         tuple[torch.Tensor]: Scalar tensor representing the average InfoNCE loss across variant groups and the number of variants in batch
     """
 
-    def __init__(self, temperature=0.07):
-        super().__init__()
-        self.temperature = temperature
+    NEGATIVES = ("all", "replicate")
 
-    def forward(self, metric: torch.Tensor, target: torch.Tensor):
+    def __init__(self, temperature=0.07, negatives: Literal["all", "replicate"] = "all"):
+        super().__init__()
+        if negatives not in self.NEGATIVES:
+            msg = f"Unknown negatives {negatives!r}, expected one of {self.NEGATIVES}"
+            raise ValueError(msg)
+        self.temperature = temperature
+        self.negatives = negatives
+
+    @staticmethod
+    def _group_genotypes(metric: torch.Tensor, num_genotypes: torch.Tensor | None, *, needed: bool) -> list[int | None]:
+        """The number of genotypes of each variant group, as Python ints, or None for each group if not `needed`"""
+        if not needed:
+            return [None] * metric.size(0)
+        if num_genotypes is None:
+            msg = "The replicate-aware loss needs the number of genotypes (`num_genotypes`) of each variant group"
+            raise ValueError(msg)
+        return [int(g) for g in num_genotypes.tolist()]
+
+    def forward(self, metric: torch.Tensor, target: torch.Tensor, num_genotypes: torch.Tensor | None = None):
         target = torch.where(torch.eq(target, 1) | torch.eq(target, 2), 1, 0) # Map "first-rank" and "second-rank" positives to 1
         metric = metric / self.temperature  # Scale the similarity scores by the temperature
+        group_genotypes = self._group_genotypes(metric, num_genotypes, needed=self.negatives == "replicate")
 
         loss = torch.tensor([0.0], dtype=metric.dtype, device=metric.device)
-        for variant_metric, variant_target in zip(metric.unbind(), target.unbind(), strict=True):
-            negative_mask = variant_target == 0
-            negatives = variant_metric[negative_mask]
-            positives = variant_metric[torch.logical_not(negative_mask)]
+        for variant_metric, variant_target, variant_genotypes in zip(metric.unbind(), target.unbind(), group_genotypes, strict=True):
+            # Each row is the supports contrasted with each other: every replicate (1, R*G), or each replicate (R, G)
+            row_size = variant_genotypes if variant_genotypes is not None else variant_metric.size(0)
+            rows = variant_metric.view(-1, row_size)
+            negative_mask = variant_target.view(-1, row_size) == 0
 
             # Compute log(softmax) using log-sum-exp trick (similar to log_softmax) to ensure numerical stability
-            max_value = torch.max(variant_metric)
-            numerator = positives - max_value
+            max_value = torch.amax(rows, dim=1, keepdim=True)
+            numerator = rows - max_value
+            negatives = torch.sum(torch.where(negative_mask, torch.exp(numerator), 0.0), dim=1, keepdim=True)
             # Normalize by the number of positives "outside the log". This is the approach described in the SupCon paper.
             # Normalizing seems to improve learning and accuracy relative to just a "sum".
-            variant_loss= torch.mean(
-                numerator - torch.log(torch.exp(numerator) + torch.sum(torch.exp(negatives - max_value)) + 1e-8)
+            variant_loss = torch.mean(
+                (numerator - torch.log(torch.exp(numerator) + negatives + 1e-8))[torch.logical_not(negative_mask)]
             )
             loss += variant_loss
 
@@ -167,31 +206,129 @@ class CopositiveInfoNCE(InfoNCE):
     InfoNCE with co-positive aware targets: (partial) positives beyond the label and down-weighted (or masked) negatives
     (see `npsv3.models.copositive`).
 
-    Each support j of a variant group has a numerator weight c_j in [0, 1], how much it is a positive, and a denominator
-    weight a_j >= c_j, so it contributes a_j - c_j as a negative. Every support i with c_i > 0 is an anchor with loss
+    Each variant group has R replicates of its G genotypes' supports, laid out replicates-major (support r*G + g), with
+    logits s_{r,g} = metric_{r,g} / temperature. Each genotype g has a numerator weight c_g in [0, 1], how much it is a
+    positive, and a denominator weight a_g >= c_g, so it contributes a_g - c_g as a negative. Let y be the label (the
+    "first-rank" genotype). The `formulation` determines how the replicates enter the loss:
 
-        l_i = -log( e^{s_i} / (e^{s_i} + sum_{j != i} (a_j - c_j) e^{s_j}) )
+    "support": Every support (r, g) with c_g > 0 is an anchor, against the negatives of every replicate, and the group's
+    loss is the c-weighted mean of its anchors' losses ("all" over the positives and replicates)
 
-    and the group's loss is the c-weighted mean of its anchors' losses, sum_i c_i l_i / sum_i c_i. With hard positives
-    (c = a = 1) and negatives (c = 0, a = 1), this is `InfoNCE`: each positive against all the negatives, excluding the
-    other positives, averaged over the positives (SupCon's "outside the log"). Down-weighting a negative's a_j
-    interpolates between a full negative and being masked, and a partial positive (0 < c_j < 1, a_j = 1) is both an anchor
-    (weighted by c_j) and a negative (weighted by 1 - c_j) for the other anchors.
+        l_{r,g} = -log( e^{s_{r,g}} / (e^{s_{r,g}} + sum_{(r',h) != (r,g)} (a_h - c_h) e^{s_{r',h}}) )
+        L = sum_{r,g} c_g l_{r,g} / (R sum_g c_g)
+
+    With hard positives (c = a = 1) and negatives (c = 0, a = 1), this is `InfoNCE` (with `negatives="all"`): each
+    positive against all the negatives, excluding the other positives, averaged over the positives. Down-weighting a
+    negative's a_g interpolates between a full negative and being masked, and a partial positive (0 < c_g < 1, a_g = 1)
+    is both an anchor (weighted by c_g) and a negative (weighted by 1 - c_g) for the other anchors. The label's share of
+    the loss is only 1 / sum_g c_g, and every replicate of every positive must beat the negatives.
+
+    "replicate" (option 3A/r): A softmax within each replicate, with the (c-weighted) positives pooled inside the log,
+    averaged over the replicates ("any" over the positives, "all" over the replicates)
+
+        L = -1/R sum_r log( sum_g c_g e^{s_{r,g}} / sum_g a_g e^{s_{r,g}} )
+
+    "all_negatives" (option 3A): Each replicate is an anchor, with its (c-weighted) positives pooled inside the log as in
+    "replicate", against the negatives of every replicate (not averaged over R) as in "support". The anchors don't
+    depend on the positives, so unlike "support" the label isn't diluted by alternatives ("any" over the positives, "all"
+    over the replicates)
+
+        N_r = sum_g c_g e^{s_{r,g}}
+        L = -1/R sum_r log( N_r / (N_r + sum_g sum_{r'} (a_g - c_g) e^{s_{r',g}}) )
+
+    "pooled" (option 3B/pooled): Each label replicate is an anchor, with the other genotypes pooled by their mean over
+    the replicates, e_g = 1/R sum_r e^{s_{r,g}}, consistent with `transforms.pooled_softmax`
+
+        L = -1/R sum_r log( (c_y e^{s_{r,y}} + sum_{g != y} c_g e_g) / (c_y e^{s_{r,y}} + sum_{g != y} c_g e_g + sum_g (a_g - c_g) e_g) )
+
+    With a single positive (c = 1[g = y]) and R > 1, "all_negatives" and "support" are `InfoNCE` with `negatives="all"`,
+    while "replicate" is `InfoNCE` with `negatives="replicate"`, and "pooled" contrasts each label replicate with the
+    replicate-mean of the negatives, so neither of the latter is `InfoNCE` with `negatives="all"`. With R = 1,
+    "replicate", "pooled" and "all_negatives" are the same, as are all four with a single positive.
+
+    Without `positive_weights` and `denominator_weights`, the weights are derived from `target`: c = 1 for the
+    "first-" and "second-rank" positives and a = 1. The batch loss is the mean of the groups' losses.
 
     Args:
         temperature (float, optional): Scaling factor applied to similarity scores before exponentiation. Default is 0.07.
+        formulation (str, optional): How the replicates enter the loss, "support", "replicate", "pooled" or
+            "all_negatives" (all but "support" require `num_genotypes`). Default is "support".
 
     Inputs:
         metric (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with distances between query and support embeddings.
         target (torch.Tensor): A 2D nested tensor of shape(|variants|, j1=|support|) with 1 for support embeddings with the correct genotypes.
         positive_weights (torch.Tensor | None): A 2D nested tensor of shape(|variants|, j1=|support|) with the numerator
-            weights c. None (with `denominator_weights`) for the single-positive targets from `target`, as in `InfoNCE`.
+            weights c (tiled over the replicates). None (with `denominator_weights`) for the single-positive targets from
+            `target`, as in `InfoNCE`.
         denominator_weights (torch.Tensor | None): A 2D nested tensor of shape(|variants|, j1=|support|) with the
-            denominator weights a.
+            denominator weights a (tiled over the replicates).
+        num_genotypes (torch.Tensor | None): A (|variants|,) tensor with the number of genotypes G of each variant
+            group. Only needed for the "replicate", "pooled" and "all_negatives" formulations.
 
     Returns:
         tuple[torch.Tensor]: Scalar tensor representing the average loss across variant groups and the number of variants in batch
     """
+
+    FORMULATIONS = ("support", "replicate", "pooled", "all_negatives")
+
+    def __init__(
+        self, temperature=0.07, formulation: Literal["support", "replicate", "pooled", "all_negatives"] = "support"
+    ):
+        super().__init__(temperature)
+        if formulation not in self.FORMULATIONS:
+            msg = f"Unknown co-positive formulation {formulation!r}, expected one of {self.FORMULATIONS}"
+            raise ValueError(msg)
+        self.formulation = formulation
+
+    @staticmethod
+    def _log_negatives(metric: torch.Tensor, positive: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
+        """log sum (a_g - c_g) e^{metric} over all of the (..., G) logits, with (G,) weights"""
+        # Select the negatives instead of relying on log(0) = -inf: with no negatives, as when every genotype is a positive,
+        # the gradient of logsumexp over only -inf is NaN, while over nothing it is -inf and has no gradient
+        negative = torch.clamp(denominator - positive, min=0.0)
+        is_negative = negative > 0
+        return torch.logsumexp((metric[..., is_negative] + torch.log(negative[is_negative])).ravel(), dim=0)
+
+    @staticmethod
+    def _support_loss(metric: torch.Tensor, positive: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
+        """The "support" formulation's loss for one group's (R*G,) logits and weights"""
+        anchors = torch.nonzero(positive > 0).squeeze(1)
+        # The weight of each support in each anchor's denominator, as an (|anchors|, |support|) log-weight: the anchor
+        # itself with weight 1, and every other support with its negative weight a - c (log(0) = -inf excludes it)
+        negative = torch.clamp(denominator - positive, min=0.0)
+        is_anchor = torch.eq(torch.arange(metric.size(0), device=anchors.device), anchors.unsqueeze(1))
+        log_weight = torch.where(is_anchor, 0.0, torch.log(negative))
+        log_denominator = torch.logsumexp(metric + log_weight, dim=1)
+        anchor_weight = positive[anchors]
+        return torch.sum(anchor_weight * (log_denominator - metric[anchors])) / torch.sum(anchor_weight)
+
+    @staticmethod
+    def _replicate_loss(metric: torch.Tensor, positive: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
+        """The "replicate" formulation's loss for one group's (R, G) logits and (G,) weights"""
+        log_numerator = torch.logsumexp(metric + torch.log(positive), dim=1)
+        log_denominator = torch.logsumexp(metric + torch.log(denominator), dim=1)
+        return torch.mean(log_denominator - log_numerator)
+
+    @staticmethod
+    def _pooled_loss(
+        metric: torch.Tensor, positive: torch.Tensor, denominator: torch.Tensor, is_label: torch.Tensor
+    ) -> torch.Tensor:
+        """The "pooled" formulation's loss for one group's (R, G) logits and (G,) weights and label indicator"""
+        # log e_g, the log-mean-exp of each genotype over the replicates
+        log_pooled = torch.logsumexp(metric, dim=0) - math.log(metric.size(0))
+        log_positive = torch.log(positive)
+        # (R, G) numerator terms: the label in the anchor's replicate and the pooled alternatives (log(0) = -inf excludes)
+        numerator = torch.where(is_label, metric + log_positive, log_pooled + log_positive)
+        log_numerator = torch.logsumexp(numerator, dim=1)
+        log_negatives = CopositiveInfoNCE._log_negatives(log_pooled, positive, denominator)
+        return torch.mean(torch.logaddexp(log_numerator, log_negatives) - log_numerator)
+
+    @staticmethod
+    def _all_negatives_loss(metric: torch.Tensor, positive: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
+        """The "all_negatives" formulation's loss for one group's (R, G) logits and (G,) weights"""
+        log_numerator = torch.logsumexp(metric + torch.log(positive), dim=1)
+        log_negatives = CopositiveInfoNCE._log_negatives(metric, positive, denominator)
+        return torch.mean(torch.logaddexp(log_numerator, log_negatives) - log_numerator)
 
     def forward(
         self,
@@ -199,6 +336,7 @@ class CopositiveInfoNCE(InfoNCE):
         target: torch.Tensor,
         positive_weights: torch.Tensor | None = None,
         denominator_weights: torch.Tensor | None = None,
+        num_genotypes: torch.Tensor | None = None,
     ):
         metric = metric / self.temperature  # Scale the similarity scores by the temperature
         if positive_weights is None or denominator_weights is None:
@@ -207,18 +345,25 @@ class CopositiveInfoNCE(InfoNCE):
             weights = zip(positives, (torch.ones_like(p) for p in positives), strict=True)
         else:
             weights = zip(positive_weights.unbind(), denominator_weights.unbind(), strict=True)
+        group_genotypes = self._group_genotypes(metric, num_genotypes, needed=self.formulation != "support")
 
         loss = torch.tensor(0.0, dtype=metric.dtype, device=metric.device)
-        for variant_metric, (positive, denominator) in zip(metric.unbind(), weights, strict=True):
-            anchors = torch.nonzero(positive > 0).squeeze(1)
-            # The weight of each support in each anchor's denominator, as an (|anchors|, |support|) log-weight: the anchor
-            # itself with weight 1, and every other support with its negative weight a - c (log(0) = -inf excludes it)
-            negative = torch.clamp(denominator - positive, min=0.0)
-            is_anchor = torch.eq(torch.arange(variant_metric.size(0), device=anchors.device), anchors.unsqueeze(1))
-            log_weight = torch.where(is_anchor, 0.0, torch.log(negative))
-            log_denominator = torch.logsumexp(variant_metric + log_weight, dim=1)
-            anchor_weight = positive[anchors]
-            loss = loss + torch.sum(anchor_weight * (log_denominator - variant_metric[anchors])) / torch.sum(anchor_weight)
+        for variant_metric, variant_target, (positive, denominator), variant_genotypes in zip(
+            metric.unbind(), target.unbind(), weights, group_genotypes, strict=True
+        ):
+            if self.formulation == "support":
+                loss = loss + self._support_loss(variant_metric, positive, denominator)
+                continue
+            # The (R, G) logits, and the per-genotype weights and labels from the first replicate (they are tiled)
+            logits = variant_metric.view(-1, variant_genotypes)
+            genotype_positive, genotype_denominator = positive[:variant_genotypes], denominator[:variant_genotypes]
+            if self.formulation == "replicate":
+                loss = loss + self._replicate_loss(logits, genotype_positive, genotype_denominator)
+            elif self.formulation == "all_negatives":
+                loss = loss + self._all_negatives_loss(logits, genotype_positive, genotype_denominator)
+            else:
+                is_label = torch.eq(variant_target[:variant_genotypes], 1)
+                loss = loss + self._pooled_loss(logits, genotype_positive, genotype_denominator, is_label)
 
         return loss / metric.size(0), metric.size(0)  # Average loss across all variants
 
@@ -383,8 +528,10 @@ class PackedVariant(L.LightningModule):
     def _model_step(self, batch, batch_idx):  # noqa: ARG002
         metric, preds, labels, *_ = self(batch)
         # The different loss functions should return their relevant batch size (which may be pairs or number of variants)
+        # The replicate-aware InfoNCE losses need each group's number of genotypes to recover its (R, G) supports
+        loss_kwargs = {"num_genotypes": batch.num_genotypes} if isinstance(self.loss, InfoNCE) else {}
         if batch.positive_weights is None or batch.denominator_weights is None:
-            loss, batch_size = self.loss(metric, labels)
+            loss, batch_size = self.loss(metric, labels, **loss_kwargs)
         else:
             if not isinstance(self.loss, CopositiveInfoNCE):
                 msg = f"The batch has co-positive targets (`data.copositive`), which {type(self.loss).__name__} doesn't use; use CopositiveInfoNCE"
@@ -396,7 +543,7 @@ class PackedVariant(L.LightningModule):
                 torch.nested.nested_tensor_from_jagged(weights, offsets=offsets, max_seqlen=max_support)
                 for weights in (batch.positive_weights, batch.denominator_weights)
             )
-            loss, batch_size = self.loss(metric, labels, positive_weights, denominator_weights)
+            loss, batch_size = self.loss(metric, labels, positive_weights, denominator_weights, **loss_kwargs)
         return (loss, preds, labels, batch_size)
 
     def training_step(self, batch, batch_idx, dataloader_idx=0):
@@ -404,27 +551,25 @@ class PackedVariant(L.LightningModule):
 
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_loss_ema", self.train_loss_ema(loss), on_step=True, on_epoch=False, prog_bar=True)
-        batch_value = self.train_metrics(preds, label)
-        num_variants = label.size(0)
-        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        self.train_metrics(preds, label)
+        # Log the metric objects, not their per-batch values, so Lightning computes from counts summed across ranks
+        self.log_dict(self.train_metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=label.size(0))
 
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label, batch_size = self._model_step(batch, batch_idx)
 
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        batch_value = self.val_metrics(preds, label)
-        num_variants = label.size(0)
-        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.val_metrics(preds, label)
+        self.log_dict(self.val_metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=label.size(0))
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         loss, preds, label, batch_size = self._model_step(batch, batch_idx)
 
-        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        batch_value = self.test_metrics(preds, label)
-        num_variants = label.size(0)
-        self.log_dict(batch_value, on_step=False, on_epoch=True, prog_bar=True, batch_size=num_variants)
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.test_metrics(preds, label)
+        self.log_dict(self.test_metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=label.size(0))
 
         return loss
 
@@ -485,7 +630,8 @@ class RecordLossCallback(L.pytorch.callbacks.Callback):
             group_offsets = torch.tensor([0, end - start], device=offsets.device)
             group_metric = torch.nested.nested_tensor_from_jagged(metric_values[start:end], offsets=group_offsets)
             group_labels = torch.nested.nested_tensor_from_jagged(label_values[start:end], offsets=group_offsets)
-            loss = model.loss(group_metric, group_labels)[0].item()
+            loss_kwargs = {"num_genotypes": num_genotypes[group : group + 1]} if isinstance(model.loss, InfoNCE) else {}
+            loss = model.loss(group_metric, group_labels, **loss_kwargs)[0].item()
 
             # Supports are replicate-major replicates of the G genotypes, i.e., support index = r*G + g, and the labels
             # are the per-genotype label ranks tiled R times

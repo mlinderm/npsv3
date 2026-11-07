@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import itertools
 import json
 import os
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import tarfile
 import textwrap
 
+import lightning as L
 import numpy as np
 import pytest
 import torch
@@ -22,6 +24,7 @@ from npsv3.models.energon import (
     PackedGroupTaskEncoder,
     _group_accepted,
     _group_cost,
+    _RestartingLoader,
     estimate_epoch_batches,
     prepare_energon_dataset,
 )
@@ -599,6 +602,132 @@ def _combine_as_train_and_val(metadataset_path: str, tmp_path) -> str:
     with open(combined_path, "w") as combined_file:
         yaml.safe_dump(combined, combined_file, sort_keys=False)
     return combined_path
+
+
+class _FiniteLoader:
+    """Stands in for an energon loader: its state only resets if a pass is run to completion."""
+
+    def __init__(self, length):
+        self.length = length
+        self.started = self.completed = 0
+        self._iterator = "workers"
+
+    def __len__(self):
+        return self.length
+
+    def __iter__(self):
+        self.started += 1
+        yield from range(self.length)
+        self.completed += 1
+
+
+class TestRestartingLoader:
+    def test_reports_wrapped_length(self):
+        assert len(_RestartingLoader(_FiniteLoader(4))) == 4
+
+    def test_full_passes_need_no_draining(self):
+        inner = _FiniteLoader(4)
+        loader = _RestartingLoader(inner)
+        for round_index in range(1, 4):
+            assert list(loader) == [0, 1, 2, 3]
+            assert inner.started == inner.completed == round_index
+
+    def test_iter_alone_starts_nothing(self):
+        """Lightning calls `iter()` once on non-`DataLoader` iterables just to check they are iterable. That must not
+        start a pass, or the first real pass would drain an entire pass that nothing asked for."""
+        inner = _FiniteLoader(4)
+        loader = _RestartingLoader(inner)
+        iter(loader)
+        assert inner.started == 0
+
+    def test_stopping_at_the_limit_finishes_the_pass(self):
+        """Lightning stops after `limit` batches without asking for the next, which would raise `StopIteration`."""
+        inner = _FiniteLoader(4)
+        loader = _RestartingLoader(inner)
+        for _ in range(3):
+            assert list(itertools.islice(iter(loader), 4)) == [0, 1, 2, 3]
+        assert inner.started == 3
+        assert inner.completed == 2, "Each pass but the latest should have been finished by the next"
+
+    def test_partial_pass_is_finished_before_restarting(self):
+        """The sanity check takes only a few batches, and the abandoned iterator is closed when it is replaced."""
+        inner = _FiniteLoader(4)
+        loader = _RestartingLoader(inner)
+        partial = iter(loader)
+        assert next(partial) == 0
+        del partial
+        assert list(loader) == [0, 1, 2, 3]
+        assert inner.completed == 2
+
+    def test_lightning_can_shut_down_the_wrapped_workers(self):
+        """Lightning's `_shutdown_workers_and_reset_iterator` only finds workers via a `_iterator` attribute."""
+        inner = _FiniteLoader(4)
+        loader = _RestartingLoader(inner)
+        assert loader._iterator == "workers"
+        loader._iterator = None
+        assert inner._iterator is None
+
+
+class _ValBatchRecorder(L.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones(1))
+        self.passes = []
+
+    def training_step(self, batch, batch_idx):
+        return (self.scale * batch.images.float().mean()).squeeze()
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), lr=0.0)
+
+    def on_validation_epoch_start(self):
+        self.passes.append([])
+
+    def validation_step(self, batch, batch_idx):
+        self.passes[-1].append(batch_hash(batch))
+
+
+class TestValidationPasses:
+    @pytest.mark.parametrize(("num_workers", "num_sanity_val_steps"), [(0, 2), (0, 0), (2, 2), (2, 0)])
+    def test_every_epoch_validates_the_same_batches(self, energon_dataset, tmp_path, num_workers, num_sanity_val_steps):
+        """Regression test for validation only running on alternate epochs. Energon only resets a limited dataset when
+        a pass reaches `StopIteration`, but Lightning stops at `limit_val_batches` without asking for it."""
+        limit_val_batches = 4
+        dm = EnergonPackedImageDataModule(
+            metadataset_path=_combine_as_train_and_val(energon_dataset, tmp_path),
+            batch_size=256,
+            w_bucket=IMAGE_WIDTH,
+            w_max=IMAGE_WIDTH,
+            g_max=36,
+            r_max=2,
+            packing_buffer_size=128,
+            shuffle_buffer_size=256,
+            num_workers=num_workers,
+            cache_workers=2,
+            max_cache_size_gbytes=1,
+            limit_val_batches=limit_val_batches,
+        )
+        model = _ValBatchRecorder()
+        trainer = L.Trainer(
+            accelerator="cpu",
+            devices=1,
+            max_epochs=4,
+            limit_train_batches=1,
+            limit_val_batches=limit_val_batches,
+            num_sanity_val_steps=num_sanity_val_steps,
+            enable_checkpointing=False,
+            logger=False,
+            enable_progress_bar=False,
+        )
+        trainer.fit(model, datamodule=dm)
+
+        epochs = model.passes[-4:]
+        assert len(epochs[0]) == limit_val_batches
+        assert epochs == [epochs[0]] * 4, "Every epoch must validate the same, complete, set of batches"
+        if num_sanity_val_steps > 0:
+            assert model.passes[0] == epochs[0][:num_sanity_val_steps]
+
+        assert trainer.val_dataloaders.loader._iterator is None, "Lightning must be able to shut down the workers"
 
 
 class TestMetadatasetPathModes:

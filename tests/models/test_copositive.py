@@ -116,12 +116,34 @@ RNG = np.random.default_rng(42)
 METRICS = [RNG.uniform(-1, 1, size=R * len(ranks)).astype(np.float32) for ranks in LABEL_RANKS]
 
 
-def _loss(loss_fn, metrics, ranks, positive=None, denominator=None):
-    labels = _nested(*(torch.tensor(_tiled(r, R), dtype=torch.long) for r in ranks))
+def _loss(loss_fn, metrics, ranks, positive=None, denominator=None, num_replicates=R):
+    labels = _nested(*(torch.tensor(_tiled(r, num_replicates), dtype=torch.long) for r in ranks))
     weights = []
     if positive is not None:
-        weights = [_nested(*(_tiled(p, R) for p in positive)), _nested(*(_tiled(d, R) for d in denominator))]
-    return loss_fn(_nested(*metrics), labels, *weights)[0].item()
+        weights = [
+            _nested(*(_tiled(p, num_replicates) for p in positive)),
+            _nested(*(_tiled(d, num_replicates) for d in denominator)),
+        ]
+    num_genotypes = torch.tensor([len(r) for r in ranks], dtype=torch.int32)
+    return loss_fn(_nested(*metrics), labels, *weights, num_genotypes=num_genotypes)[0].item()
+
+
+def _anchored_loss(s, c, a, is_label, formulation):
+    """The "replicate" (3A/r), "all_negatives" (3A) or "pooled" (3B/pooled) loss for (R, G) logits from their anchor
+    weights, as in the `loss_distribution` notebook"""
+    num_replicates = s.shape[0]
+    replicate = np.eye(num_replicates, dtype=bool)[:, :, None]  # (K=R, R, 1) anchor k is replicate r
+    if formulation == "replicate":
+        numerator = (replicate * c).reshape(num_replicates, -1)
+        denominator = numerator + (replicate * (a - c)).reshape(num_replicates, -1)
+    elif formulation == "all_negatives":
+        numerator = (replicate * c).reshape(num_replicates, -1)
+        denominator = numerator + np.tile(a - c, num_replicates)
+    else:
+        numerator = (replicate * is_label + np.where(is_label, 0.0, c) / num_replicates).reshape(num_replicates, -1)
+        denominator = numerator + np.tile(a - c, num_replicates) / num_replicates
+    e = np.exp(s.ravel())
+    return np.mean(np.log(denominator @ e) - np.log(numerator @ e))
 
 
 def test_single_positive_is_infonce():
@@ -176,6 +198,151 @@ def test_loss_gradients_are_finite():
     assert torch.all(torch.isfinite(values.grad))
 
 
+def test_infonce_negatives():
+    """InfoNCE with each replicate's negatives only, against the loss computed directly from its definition"""
+    ranks = [1, 0, 1, 3]  # Two positives, so each is contrasted only with the negatives
+    s = METRICS[1].astype(np.float64).reshape(R, -1) / 0.07
+    positive = np.asarray(ranks) == 1
+    negatives = np.sum(np.exp(s[:, ~positive]), axis=1, keepdims=True)
+    expected = -np.mean(np.log(np.exp(s) / (np.exp(s) + negatives))[:, positive])
+    assert _loss(InfoNCE(negatives="replicate"), [METRICS[1]], [ranks]) == pytest.approx(expected, rel=1e-4)
+
+    # The negatives of every replicate (the default)
+    expected = -np.mean(np.log(np.exp(s) / (np.exp(s) + np.sum(negatives)))[:, positive])
+    assert _loss(InfoNCE(), [METRICS[1]], [ranks]) == pytest.approx(expected, rel=1e-4)
+
+    # With one replicate they are the same
+    one = [m[: len(r)] for m, r in zip(METRICS, LABEL_RANKS, strict=True)]
+    assert _loss(InfoNCE(negatives="replicate"), one, LABEL_RANKS, num_replicates=1) == pytest.approx(
+        _loss(InfoNCE(), one, LABEL_RANKS, num_replicates=1), rel=1e-5
+    )
+
+    with pytest.raises(ValueError, match="Unknown negatives"):
+        InfoNCE(negatives="any")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="num_genotypes"):
+        InfoNCE(negatives="replicate")(_nested(*METRICS), _nested(*(torch.tensor(_tiled(r, R)) for r in LABEL_RANKS)))
+
+
+def test_single_positive_replicate_is_replicate_infonce():
+    expected = _loss(InfoNCE(negatives="replicate"), METRICS, LABEL_RANKS)
+    assert _loss(CopositiveInfoNCE(formulation="replicate"), METRICS, LABEL_RANKS) == pytest.approx(expected, rel=1e-5)
+    baseline = ([[1, 0, 0, 0, 0], [0, 0, 1, 0]], [[1] * 5, [1] * 4])
+    loss = _loss(CopositiveInfoNCE(formulation="replicate"), METRICS, LABEL_RANKS, *baseline)
+    assert loss == pytest.approx(expected, rel=1e-5)
+
+
+def test_single_positive_all_negatives_is_infonce():
+    baseline = ([[1, 0, 0, 0, 0], [0, 0, 1, 0]], [[1] * 5, [1] * 4])
+    expected = _loss(InfoNCE(negatives="all"), METRICS, LABEL_RANKS)
+    all_negatives = CopositiveInfoNCE(formulation="all_negatives")
+    assert _loss(all_negatives, METRICS, LABEL_RANKS) == pytest.approx(expected, rel=1e-5)
+    assert _loss(all_negatives, METRICS, LABEL_RANKS, *baseline) == pytest.approx(expected, rel=1e-5)
+    assert _loss(CopositiveInfoNCE(), METRICS, LABEL_RANKS, *baseline) == pytest.approx(expected, rel=1e-5)
+    # The negatives of every replicate, not only the anchor's
+    assert _loss(CopositiveInfoNCE(formulation="replicate"), METRICS, LABEL_RANKS, *baseline) != pytest.approx(expected, rel=1e-3)
+
+
+@pytest.mark.parametrize(("formulation", "dilution"), [("all_negatives", 1), ("support", 3)])
+def test_label_share_with_equivalent_alternatives(formulation, dilution):
+    """Two positive alternatives far from the query leave the label's gradient unchanged, unless they are also anchors"""
+
+    def label_gradient(num_alternatives):
+        num_genotypes = 2 + num_alternatives
+        values = torch.tensor(_tiled([0.5, 0.25, *([-100] * num_alternatives)], R), requires_grad=True)
+        metric = torch.nested.nested_tensor_from_jagged(values, offsets=torch.tensor([0, values.numel()]))
+        labels = _nested(torch.tensor(_tiled([1] + [0] * (num_genotypes - 1), R), dtype=torch.long))
+        positive = _nested(_tiled([1, 0, *([1] * num_alternatives)], R))
+        denominator = _nested(_tiled([1] * num_genotypes, R))
+        loss_fn = CopositiveInfoNCE(formulation=formulation)
+        loss_fn(metric, labels, positive, denominator, torch.tensor([num_genotypes]))[0].backward()
+        return values.grad[0].item()  # type: ignore[union-attr]
+
+    assert label_gradient(2) == pytest.approx(label_gradient(0) / dilution, rel=1e-5)
+
+
+@pytest.mark.parametrize("formulation", ["replicate", "pooled", "all_negatives"])
+def test_replicate_formulations(formulation):
+    """The replicate-aware formulations with partial, multiple and masked weights, against the notebook's anchor weights"""
+    # A down-weighted negative in the first group, and a masked negative, partial and multiple positives in the second
+    weights = ([[1, 0, 0, 0, 0], [0, 0.25, 1, 1]], [[1, 1, 1, 0.5, 1], [0, 1, 1, 1]])
+    expected = np.mean([
+        _anchored_loss(
+            metric.astype(np.float64).reshape(R, -1) / 0.07,
+            np.asarray(c, dtype=np.float64),
+            np.asarray(a, dtype=np.float64),
+            np.asarray(ranks) == 1,
+            formulation,
+        )
+        for metric, ranks, c, a in zip(METRICS, LABEL_RANKS, *weights, strict=True)
+    ])
+    loss = _loss(CopositiveInfoNCE(formulation=formulation), METRICS, LABEL_RANKS, *weights)
+    assert loss == pytest.approx(expected, rel=1e-4)
+
+
+def test_one_replicate_formulations_are_the_same():
+    one = [m[: len(r)] for m, r in zip(METRICS, LABEL_RANKS, strict=True)]
+    weights = ([[1, 0.5, 0, 0, 0], [0, 1, 1, 0]], [[1, 1, 0, 0.5, 1], [1] * 4])
+    losses = [
+        _loss(CopositiveInfoNCE(formulation=f), one, LABEL_RANKS, *weights, num_replicates=1)
+        for f in ("replicate", "pooled", "all_negatives")
+    ]
+    assert losses[0] == pytest.approx(losses[1], rel=1e-5)
+    assert losses[0] == pytest.approx(losses[2], rel=1e-5)
+
+
+@pytest.mark.parametrize("formulation", CopositiveInfoNCE.FORMULATIONS)
+def test_formulation_gradients_are_finite(formulation):
+    values = torch.tensor(np.concatenate(METRICS), requires_grad=True)
+    offsets = torch.tensor(np.cumsum([0, *(len(m) for m in METRICS)]))
+    metric = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+    labels = _nested(*(torch.tensor(_tiled(r, R), dtype=torch.long) for r in LABEL_RANKS))
+    weights = ([[1, 0.5, 0, 0, 0], [0, 0, 1, 0]], [[1, 1, 0, 0.5, 1], [1] * 4])
+    positive, denominator = (_nested(*(_tiled(w, R) for w in ws)) for ws in weights)
+    num_genotypes = torch.tensor([len(r) for r in LABEL_RANKS], dtype=torch.int32)
+    loss, _ = CopositiveInfoNCE(formulation=formulation)(metric, labels, positive, denominator, num_genotypes)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert values.grad is not None
+    assert torch.all(torch.isfinite(values.grad))
+
+    with pytest.raises(ValueError, match="Unknown co-positive formulation"):
+        CopositiveInfoNCE(formulation="any")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("formulation", CopositiveInfoNCE.FORMULATIONS)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_gradients_without_negatives(formulation, dtype):
+    """Finite gradients with a group with no negatives, and in half precision as in the worst case of `16-mixed`"""
+    # Every genotype of the first group is a positive, or masked, so it has no loss
+    weights = ([[1, 0.5, 0, 0.25, 1], [0, 0, 1, 0]], [[1, 0.5, 0, 0.25, 1], [1, 0.5, 1, 1]])
+    values = torch.tensor(np.concatenate(METRICS), dtype=dtype, requires_grad=True)
+    offsets = torch.tensor(np.cumsum([0, *(len(m) for m in METRICS)]))
+    metric = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+    labels = _nested(*(torch.tensor(_tiled(r, R), dtype=torch.long) for r in LABEL_RANKS))
+    positive, denominator = (_nested(*(_tiled(w, R) for w in ws)) for ws in weights)
+    num_genotypes = torch.tensor([len(r) for r in LABEL_RANKS], dtype=torch.int32)
+
+    loss, _ = CopositiveInfoNCE(formulation=formulation)(metric, labels, positive, denominator, num_genotypes)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert values.grad is not None
+    assert torch.all(torch.isfinite(values.grad))
+    assert torch.all(values.grad[: offsets[1]] == 0)
+    assert torch.any(values.grad[offsets[1] :] != 0)
+
+    # A batch of only such groups still has a graph to backpropagate
+    values = torch.tensor(METRICS[0], dtype=dtype, requires_grad=True)
+    metric = torch.nested.nested_tensor_from_jagged(values, offsets=offsets[:2])
+    positive, denominator = (_nested(_tiled(w, R)) for w in ([1] * 5, [1] * 5))
+    loss, _ = CopositiveInfoNCE(formulation=formulation)(
+        metric, _nested(torch.tensor(_tiled(LABEL_RANKS[0], R), dtype=torch.long)), positive, denominator, num_genotypes[:1]
+    )
+    loss.backward()
+    assert loss.item() == 0
+    assert values.grad is not None
+    assert torch.all(values.grad == 0)
+
+
 class _MeanEncoder(nn.Module):
     """Embed each image as its per-channel mean, so the model step runs without a real encoder"""
 
@@ -228,6 +395,13 @@ def test_model_step_uses_targets():
 
     with pytest.raises(TypeError, match="CopositiveInfoNCE"):
         _model(InfoNCE())._model_step(batch, 0)
+
+    # The replicate-aware formulations get the groups' number of genotypes from the batch
+    for formulation in ("replicate", "pooled", "all_negatives"):
+        loss, *_ = _model(CopositiveInfoNCE(formulation=formulation))._model_step(batch, 0)
+        assert torch.isfinite(loss)
+    loss, *_ = _model(InfoNCE(negatives="replicate"))._model_step(single, 0)
+    assert torch.isfinite(loss)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -326,15 +500,14 @@ def test_targets_require_copositive_dataset(tmp_path):
         _make_dm(uncompared, copositive=CopositiveTargets())
 
 
-def test_copositive_experiment_config(hydra_setup, copositive_dataset):  # noqa: ARG001
-    """`+experiments=copositive` switches both the targets and the loss"""
+def test_copositive_model_config(hydra_setup, copositive_dataset):  # noqa: ARG001
+    """`model=paired_packed_inception_copositive_infonce` switches both the targets and the loss"""
     cfg = hydra.compose(
         config_name="config",
         overrides=[
-            "model=paired_packed_inception_infonce",
+            "model=paired_packed_inception_copositive_infonce",
             "data=energon_packed_images",
             f"data.train_metadataset_paths=[{copositive_dataset}]",
-            "+experiments=copositive",
             "data.copositive.variant=mask",
         ],
     )

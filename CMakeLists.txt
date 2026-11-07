@@ -60,6 +60,10 @@ add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra>")
 
 # Optional AddressSanitizer support for Debug builds
 option(ENABLE_ASAN "Enable AddressSanitizer in Debug builds" OFF)
+
+# Avoid host-specific (e.g., -march=native) code generation in vendored dependencies, so the extension can run on
+# other machines than it was built on (e.g., in a container)
+option(NPSV3_PORTABLE "Build vendored dependencies without -march=native" OFF)
 if(ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address)

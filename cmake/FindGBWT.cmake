@@ -74,11 +74,17 @@ else()
   message(STATUS "GBWT not found, vendoring vgteam/sdsl-lite + jltsiren/gbwt v1.4...")
 
   set(SDSL_LITE_INSTALL_DIR "${CMAKE_BINARY_DIR}/lib/sdsl-lite-install")
+  # sdsl-lite unconditionally compiles with -march=native, strip it for portable builds (NPSV3_PORTABLE)
+  set(_SDSL_LITE_PATCH_COMMAND "")
+  if (NPSV3_PORTABLE)
+    set(_SDSL_LITE_PATCH_COMMAND PATCH_COMMAND sed -i "s/ -march=native//" CMakeLists.txt)
+  endif()
   ExternalProject_Add(
     SdslLite
     GIT_REPOSITORY https://github.com/vgteam/sdsl-lite.git
     PREFIX "${CMAKE_BINARY_DIR}/lib/sdsl-lite"
     UPDATE_COMMAND ""
+    ${_SDSL_LITE_PATCH_COMMAND}
     CONFIGURE_COMMAND ""
     # sdsl-lite's own install.sh runs `cmake .. && make sdsl && make install` in its build/ directory;
     # passing CXXFLAGS=-fPIC (same reason as this project's Boost fallback's cxxflags="-fPIC") so the

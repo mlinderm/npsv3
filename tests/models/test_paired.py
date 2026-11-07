@@ -232,9 +232,9 @@ class TestPackedVariantWithEnergonLoader:
         assert os.path.basename(resumed) == "epoch=1-step=4.ckpt", "Resumed training must continue the epoch/step"
 
     def test_loss_records_region_losses(self, paired_energon_datasets, tmp_path):
-        """`runners.predict` (the `loss` command) must run over the energon loader and record every region's loss.
-        Regression test for Lightning's `MisconfigurationException` when it tried to re-instantiate energon's
-        `SavableDataLoader` to inject a predict batch sampler."""
+        """`runners.predict` (the `loss` command, which defaults to the test split) must run over the energon loader and
+        record every region's loss. Regression test for Lightning's `MisconfigurationException` when it tried to
+        re-instantiate energon's `SavableDataLoader` to inject a predict batch sampler."""
         train_overrides = [
             f"data.metadataset_path={paired_energon_datasets['train']}",
             *(f"data.{key}={value}" for key, value in {**_DATA_TEST_OVERRIDES, "limit_train_batches": 1}.items()),
@@ -248,7 +248,9 @@ class TestPackedVariantWithEnergonLoader:
             config_name="config",
             overrides=[
                 *CFG_OVERRIDES,
-                *train_overrides,
+                f"data.test_metadataset_paths={paired_energon_datasets['test']}",
+                *(f"data.{key}={value}" for key, value in _DATA_TEST_OVERRIDES.items()),
+                "+trainer.accelerator=cpu",
                 "command=loss",
                 f"model.checkpoint='{checkpoint_path}'",
             ],
@@ -258,7 +260,7 @@ class TestPackedVariantWithEnergonLoader:
 
         df = pd.read_pickle(losses_path)
         assert len(df) > 0
-        assert df["region"].str.startswith("chr1:").all(), "Rows are the train split's regions"
+        assert df["region"].str.startswith("chr3:").all(), "Rows are the test split's regions"
         assert np.isfinite(df["loss"]).all()
         assert (df["correct"] == (df["genotype"] == df["prediction"])).all()
         for row in df.itertuples():

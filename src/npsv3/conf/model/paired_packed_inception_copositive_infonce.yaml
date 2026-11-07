@@ -1,0 +1,35 @@
+# @package _global_
+model:
+  _target_: npsv3.models.paired.PackedVariant
+  encoder:
+    _target_: npsv3.models.paired.InceptionEncoder
+    num_channels: ${len:${pileup.image_channels}}
+    projection_size: 512
+  metric:
+    _target_: torch.nn.CosineSimilarity
+  loss:
+    _target_: npsv3.models.paired.CopositiveInfoNCE
+    formulation: replicate
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.01
+  predictor:
+    _target_: npsv3.models.paired.MaximizingPredictor
+
+data:
+  copositive:
+    _target_: npsv3.models.copositive.CopositiveTargets
+    variant: gated
+    # null -> the variant's rules and categories (see CopositiveTargets)
+    positives: null
+    positive_categories: null
+    denominator: null
+    denominator_categories: null
+    conf_threshold: 0.5
+    score_equiv: 0.7
+    filter_p_label: 0.05
+    filter_p_alt: 0.5

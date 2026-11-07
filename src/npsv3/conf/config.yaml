@@ -4,8 +4,8 @@ defaults:
   - pileup: unphased_graph
   - simulation
   - compare
-  - model: paired_packed_inception_contrastive
   - data: energon_packed_images
+  - model: paired_packed_inception_infonce
   - trainer: paired
   - command: genotype
   - checkpoint_callback: base

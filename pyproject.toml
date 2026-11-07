@@ -53,6 +53,10 @@ harmonize = [
   "pyabpoa",
   "pywfa",
 ]
+# Launch Hydra multiruns (e.g., parameter sweeps) as SLURM jobs via submitit (`hydra/launcher=submitit_slurm`)
+slurm = [
+  "hydra-submitit-launcher>=1.2",
+]
 
 [project.urls]
 Documentation = "https://github.com/mlinderm/npsv3#readme"
