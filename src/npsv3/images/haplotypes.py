@@ -28,7 +28,8 @@ AlleleSet = set[tuple[str, int]]
 """The resolved analysis-variant alleles carried by a haplotype, as (variant_id, allele index) pairs"""
 
 TrueHaplotypeIdxs = list[int | None]
-"""The sample's genotype as indices into the haplotype list (empty if the "true" haplotypes are not in the graph)"""
+"""The sample's genotype as indices into the haplotype list (empty if the "true" haplotypes are not in the graph, e.g., the
+sample isn't in the VCF, which `generate_haplotypes` normalizes to all None entries)"""
 
 Haplotypes = tuple[list[HaplotypePath], list[AlleleSet], TrueHaplotypeIdxs]
 """Tuple of (haplotypes, alleles per haplotype, true haplotype indices)"""
@@ -49,7 +50,16 @@ def as_kmer_classify(filtered_kmers: FilteredKmers, sample: Sample) -> KmerClass
 class InsufficientHaplotypesError(RuntimeError):
     """Raised when we cannot assemble >=2 distinct haplotypes for a region, even after
     attempting to recover a population-panel individual's embedded haplotype for any still-missing
-    analysis-variant ALT allele."""
+    analysis-variant ALT allele.
+
+    Attributes:
+        haplotypes: The `haplotype_record` of the single haplotype that was generated (i.e., one with only reference
+            alleles for the analysis variants), if any, e.g., so genotyping can report the region as homozygous for it
+    """
+
+    def __init__(self, *args, haplotypes: dict | None = None):
+        super().__init__(*args)
+        self.haplotypes = haplotypes
 
 
 def sample_path(graph: Graph, sample_name: str, haplotype: int, contig: str) -> HaplotypePath | None:
@@ -61,6 +71,70 @@ def sample_path(graph: Graph, sample_name: str, haplotype: int, contig: str) -> 
     return graph.path_nodes(path_name)
 
 
+def _variant_allele_nodes(graph: Graph, variant: Variant) -> dict[int, frozenset[int]] | None:
+    """Map of allele index -> the nodes that distinguish that allele's path from the variant's other alleles (only the
+    alleles with paths, i.e., not '*'), or None if the variant was excluded from graph construction.
+
+    This mirrors the graph's own bookkeeping of the variant paths each node identifies (`Graph::node_variant_paths_`):
+    an ALT allele is identified by its ALT node, i.e., its path's nodes not in the REF path (deletions have a zero-length
+    ALT node), and the REF allele by the reference nodes any of the ALT alleles replace (for an insertion, a zero-length
+    reference node).
+    """
+    allele_paths = _variant_allele_paths(graph, variant)
+    if not allele_paths:
+        return None
+    ref_nodes = frozenset(allele_paths[0])
+    allele_nodes = {0: frozenset()}
+    for allele, path in allele_paths.items():
+        if allele == 0:
+            continue
+        alt_nodes = frozenset(path)
+        allele_nodes[allele] = alt_nodes - ref_nodes
+        allele_nodes[0] |= ref_nodes - alt_nodes
+    return allele_nodes
+
+
+def decode_variant_alleles(
+    graph: Graph, haplotypes: Sequence[HaplotypePath], variants: Sequence[Variant]
+) -> list[list[int | None]]:
+    """The allele of each of `variants` (of any size, not only the analysis variants) carried by each haplotype.
+
+    A haplotype carries an ALT allele if it passes through that allele's ALT node, and otherwise the REF allele if it
+    passes through the reference nodes the variant's ALT alleles replace. A haplotype that does neither, e.g., one with an
+    overlapping deletion spanning the variant, carries the variant's first '*' allele, if it has one, or otherwise the
+    REF allele (as for the sampler's own decoding, `Graph::ApplyReferenceFallback`).
+
+    Args:
+        graph: Graph for the region
+        haplotypes: Haplotypes as sequences of graph node IDs
+        variants: The variants, e.g., every VCF record overlapping the graph's region
+
+    Returns:
+        list[list[int | None]]: For each haplotype, the allele index for each variant (in the order of `variants`), or
+        None for the variants that were excluded from graph construction (e.g., those not strictly inside the region)
+    """
+    decoders = []
+    for variant in variants:
+        allele_nodes = _variant_allele_nodes(graph, variant)
+        star = next((a for a in range(1, variant.num_alleles) if variant.allele_length_change(a) is None), None)
+        decoders.append((allele_nodes, 0 if star is None else star))
+
+    result = []
+    for haplotype in haplotypes:
+        nodes = frozenset(int(node) for node in haplotype)
+        alleles: list[int | None] = []
+        for allele_nodes, fallback in decoders:
+            if allele_nodes is None:
+                alleles.append(None)
+                continue
+            allele = next((a for a, distinct in allele_nodes.items() if a != 0 and not distinct.isdisjoint(nodes)), None)
+            if allele is None:
+                allele = 0 if not allele_nodes[0].isdisjoint(nodes) else fallback
+            alleles.append(allele)
+        result.append(alleles)
+    return result
+
+
 def haplotype_record(
     graph: Graph,
     region: Range,
@@ -70,6 +144,7 @@ def haplotype_record(
     true_haplotype_idxs: TrueHaplotypeIdxs,
     *,
     ploidy: int = 2,
+    variants: Sequence[Variant] | None = None,
 ) -> dict:
     """JSON-serializable record of an example's candidate haplotypes, linking its genotype indices back to the graph.
 
@@ -86,9 +161,12 @@ def haplotype_record(
         sample_paths: The sample's own haplotype paths in the graph (None if absent or not fully resolved)
         sample_sequences: Their sequences
         graph_region: The graph's region
+        variant_ids: The IDs of `variants` (only if `variants` is provided)
+        variant_alleles: Each candidate's allele for each of `variants`, None if the variant isn't in the graph (only if
+            `variants` is provided, see `decode_variant_alleles`)
     """
     own_paths = [sample_path(graph, sample_name, i, region.contig) for i in range(ploidy)]
-    return {
+    record = {
         "paths": [[int(node) for node in path] for path in haplotypes],
         "alleles": [sorted([variant_id, int(allele)] for variant_id, allele in allele_set) for allele_set in alleles],
         "true": [None if idx is None else int(idx) for idx in true_haplotype_idxs],
@@ -98,6 +176,10 @@ def haplotype_record(
         "sample_sequences": [None if path is None else graph.path_sequence(path) for path in own_paths],
         "graph_region": str(graph.region),
     }
+    if variants is not None:
+        record["variant_ids"] = [variant.variant_id for variant in variants]
+        record["variant_alleles"] = decode_variant_alleles(graph, haplotypes, variants)
+    return record
 
 
 def generate_haplotypes(
@@ -106,29 +188,44 @@ def generate_haplotypes(
     sampler: HaplotypeSamplerOverlay,
     region: Range,
     sample: Sample,
-    sample_idx: int,
+    sample_idx: int | None,
     filtered_kmers: FilteredKmers,
     analysis_variants: Sequence[Variant],
     *,
     strategy: "HaplotypeStrategy",
     ploidy: int = 2,
     exact_reference: bool = False,
+    variants: Sequence[Variant] | None = None,
 ) -> dict:
     """Generate an example's candidate haplotypes with `strategy` and return them as a `haplotype_record`.
 
     The record's `true` entries are None if any analysis variant's genotype for the sample is missing or filtered (see
-    below), in which case the example is unlabeled. This is the only haplotype generation used by image generation,
-    whether run inline or ahead of time (`command=haplotypes`), so the two can't disagree.
+    below), or if the sample isn't in the VCF (`sample_idx` is None, e.g., when genotyping), in which case the example
+    is unlabeled. This is the only haplotype generation used by image generation, whether run inline or ahead of time
+    (`command=haplotypes`), so the two can't disagree.
+
+    Args:
+        variants: If provided, record each candidate's alleles for all of these variants (e.g., every VCF record in the
+            region, not just the analysis variants) in the record's `variant_alleles` (see `haplotype_record`)
 
     Raises:
-        InsufficientHaplotypesError: If fewer than 2 haplotypes are generated
+        InsufficientHaplotypesError: If fewer than 2 haplotypes are generated (with the record for the single haplotype,
+            if one was generated)
     """
     haplotypes, alleles, true_haplotype_idxs = strategy(
         graph, sampler, region, sample, filtered_kmers, analysis_variants, ploidy=ploidy, exact_reference=exact_reference,
     )
+    if not true_haplotype_idxs:
+        # None of the sample's own haplotype paths are in the graph (e.g., the sample isn't in the VCF), so it's unlabeled
+        true_haplotype_idxs = [None] * ploidy
     if len(haplotypes) < 2:  # noqa: PLR2004
         msg = f"Fewer than 2 haplotypes for region {region} in {sample.name} (have {len(haplotypes)})"
-        raise InsufficientHaplotypesError(msg)
+        record = None
+        if haplotypes:
+            record = haplotype_record(
+                graph, region, sample.name, haplotypes, alleles, [None] * ploidy, ploidy=ploidy, variants=variants,
+            )
+        raise InsufficientHaplotypesError(msg, haplotypes=record)
     assert len(true_haplotype_idxs) == ploidy, f"Expected {ploidy} true haplotypes, got {len(true_haplotype_idxs)}"
 
     # Graph construction embeds a sample's "true" haplotype path as reference nodes wherever a variant's genotype
@@ -137,7 +234,7 @@ def generate_haplotypes(
     # is specified to translate fully missing genotypes to homozygous REF (relevant for merged high-quality assemblies
     # where missing variants are assumed to be identical to the reference rather than "not genotyped"). Filtered
     # genotypes are treated as fully missing if cfg.graph.filtered_as_missing (matching graph construction).
-    if analysis_variants and None not in true_haplotype_idxs and any(
+    if analysis_variants and sample_idx is not None and None not in true_haplotype_idxs and any(
         resolve_genotype_alleles(
             variant.genotype(sample_idx),
             ploidy=ploidy,
@@ -148,7 +245,9 @@ def generate_haplotypes(
     ):
         true_haplotype_idxs = [None] * ploidy
 
-    return haplotype_record(graph, region, sample.name, haplotypes, alleles, true_haplotype_idxs, ploidy=ploidy)
+    return haplotype_record(
+        graph, region, sample.name, haplotypes, alleles, true_haplotype_idxs, ploidy=ploidy, variants=variants,
+    )
 
 
 def decode_haplotype_record(payload: bytes | bytearray | str | dict) -> dict:

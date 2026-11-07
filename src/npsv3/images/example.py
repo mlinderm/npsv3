@@ -140,7 +140,7 @@ def make_graph_example(
     sampler: HaplotypeSamplerOverlay,
     unique_kmers: UniqueKmersOverlay,
     region: Range,
-    sample_idx: int,
+    sample_idx: int | None,
     sample: Sample,
     read_path: PathType,
     filtered_kmers: FilteredKmers | None,
@@ -557,14 +557,59 @@ def make_hom_ref_downsample(cfg) -> tuple[HomRefDownsample | None, dict[str, Reg
     return downsample, read_region_stats(stats_path)
 
 
+FAILURES_GLOB = "failures-*.jsonl"
+"""The per-actor failures sidecar files in an image dataset's directory (see `FailureWriter`)"""
+
+FAILURE_INSUFFICIENT_HAPLOTYPES = "InsufficientHaplotypes"
+FAILURE_TIMEOUT = "Timeout"
+FAILURE_PRECOMPUTED_SKIPPED = "PrecomputedSkipped"
+FAILURE_UNLABELED = "Unlabeled"
+FAILURE_DOWNSAMPLED = "Downsampled"
+
+
+class FailureWriter:
+    """Writes one JSON row per region without an example to the actor's `failures-NNNN.jsonl` sidecar file.
+
+    Each row has the example's `key`, `region`, `sample`, the `reason` (one of the `FAILURE_*` constants) and an optional
+    `message`. Rows for `FAILURE_INSUFFICIENT_HAPLOTYPES` also have the `haplotypes` record of the single haplotype that
+    was generated (if any), e.g., so a genotyper can report every variant in the region as homozygous for it.
+    """
+
+    def __init__(self, index: int, output_dir: str):
+        os.makedirs(output_dir, exist_ok=True)
+        self.path = os.path.join(output_dir, f"failures-{index:04d}.jsonl")
+        self._file = open(self.path, "w")  # noqa: SIM115
+
+    def write(self, key: str, region: Range, sample: str, reason: str, message: str | None = None, **kwargs) -> None:
+        row = {"key": key, "region": str(region), "sample": sample, "reason": reason, "message": message, **kwargs}
+        self._file.write(json.dumps(row))
+        self._file.write("\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def read_failures(output_dir: PathType) -> list[dict]:
+    """Read every failure row (see `FailureWriter`) in `output_dir`'s failures sidecar files"""
+    rows = []
+    for path in sorted(pathlib.Path(output_dir).glob(FAILURES_GLOB)):
+        with open(path) as file:
+            rows.extend(json.loads(line) for line in file if line.strip())
+    return rows
+
+
 @dataclasses.dataclass
 class GraphRegion:
     """A region's graph, and the objects derived from it, read from a graph shard record"""
 
     graph_key: str
     region: Range
-    sample_idx: int
+    sample_idx: int | None
+    """The sample's index in the VCF, None if it isn't in the VCF (e.g., when genotyping), so its examples are unlabeled"""
     analysis_variants: list[Variant]
+    variants: list[Variant]
+    """Every VCF record overlapping the region, including those excluded from the graph"""
     graph: Graph
     unique_kmers: UniqueKmersOverlay
     sampler: HaplotypeSamplerOverlay
@@ -586,6 +631,7 @@ class RegionActor:
         ploidy: int = 2,
         min_variant_size: int = 50,
         exact_reference: bool = False,
+        variant_alleles: bool = False,
     ):
         self.cfg = cfg
         self.vcf_path = vcf_path
@@ -593,6 +639,8 @@ class RegionActor:
         self.ploidy = ploidy
         self.min_variant_size = min_variant_size
         self.exact_reference = exact_reference
+        # Record each candidate's alleles for every variant in the region in the haplotype records (e.g., for genotyping)
+        self.variant_alleles = variant_alleles
         self.haplotype_strategy = hydra.utils.instantiate(cfg.haplotype.strategy, cfg=cfg, _recursive_=False)
         self.sampler_params = hydra.utils.instantiate(cfg.haplotype.sampler_params)
         self._filtered_kmer_path = filtered_kmer_path
@@ -620,15 +668,18 @@ class RegionActor:
             strategy=self.haplotype_strategy,
             ploidy=self.ploidy,
             exact_reference=self.exact_reference,
+            variants=item.variants if self.variant_alleles else None,
         )
 
     def iter_regions(self, shard_path: PathType, split: int = 0, num_splits: int = 1) -> Iterator[GraphRegion]:
         """Yield the `split`-th of `num_splits` strided subsets of the regions in `shard_path`"""
         with VariantFileReader.open(self.vcf_path) as vcf_file:
-            sample_idx = vcf_file.samples().index(self.sample.name)
+            samples = vcf_file.samples()
+            sample_idx = samples.index(self.sample.name) if self.sample.name in samples else None
             for record in iter_graph_records(shard_path, split, num_splits):
                 region = Range(record[REGION_MEMBER].decode())
-                analysis_variants = _filter_variants(list(vcf_file.fetch(region)), self.min_variant_size)
+                variants = list(vcf_file.fetch(region))
+                analysis_variants = _filter_variants(variants, self.min_variant_size)
 
                 members = decode_graph_record(record)
                 graph = Graph.load_bytes(members[GRAPH_MEMBER])
@@ -656,6 +707,7 @@ class RegionActor:
                     region=region,
                     sample_idx=sample_idx,
                     analysis_variants=analysis_variants,
+                    variants=variants,
                     graph=graph,
                     unique_kmers=unique_kmers,
                     sampler=sampler,
@@ -684,10 +736,13 @@ class GraphWriter(RegionActor):
         exact_reference: bool = False,
         haplotypes_dir: str | None = None,
         reuse_comparisons: bool = False,
+        variant_alleles: bool = False,
+        record_failures: bool = False,
     ):
         super().__init__(
             cfg, vcf_path, sample, filtered_kmer_path,
             ploidy=ploidy, min_variant_size=min_variant_size, exact_reference=exact_reference,
+            variant_alleles=variant_alleles,
         )
 
         # If NPSV3_REALIGN_PROFILE profiling is requested, give this actor's process its own aux log file
@@ -716,6 +771,8 @@ class GraphWriter(RegionActor):
         # Optionally skip some of the hom. ref. examples, using the cohort's counts for each region
         self._hom_ref_downsample, self._region_stats = make_hom_ref_downsample(cfg)
         self._counts: collections.Counter[str] = collections.Counter()
+        # Record every region without an example (see `FailureWriter`), so every region is accounted for (e.g., genotyping)
+        self._failures = FailureWriter(index, output_dir) if record_failures else None
 
     def from_graph(
         self,
@@ -724,7 +781,7 @@ class GraphWriter(RegionActor):
         sampler: HaplotypeSamplerOverlay,
         unique_kmers: UniqueKmersOverlay,
         analysis_variants: Sequence[Variant],
-        sample_idx: int,
+        sample_idx: int | None,
         haplotypes: dict | None = None,
     ) -> dict:
         return make_graph_example(
@@ -756,31 +813,39 @@ class GraphWriter(RegionActor):
             if haplotypes is not None and (reason := haplotypes.get("skipped")) is not None:
                 logging.warning("Skipping region %s for sample %s as for its precomputed haplotypes: %s", region, self.sample.name, reason)
                 self._counts["skipped"] += 1
+                self._record_failure(key, region, FAILURE_PRECOMPUTED_SKIPPED, reason)
                 continue
             precomputed = haplotypes is not None
 
             try:
                 # Attempt to gracefully timeout long running regions.
                 with Timeout(self.cfg.timeout):
-                    if self._skip_unlabeled or self._hom_ref_downsample is not None:
-                        # Determine the label (from the haplotypes) before generating any images
-                        if haplotypes is None:
-                            haplotypes = self.generate_haplotypes(item)
+                    if haplotypes is None and (self._skip_unlabeled or self._hom_ref_downsample is not None or self.variant_alleles):
+                        # Determine the label (from the haplotypes) before generating any images (and with all the
+                        # variants' alleles, which `make_graph_example` doesn't record)
+                        haplotypes = self.generate_haplotypes(item)
+                    if haplotypes is not None:
                         if self._skip_unlabeled and None in haplotypes["true"]:
                             self._counts["unlabeled"] += 1
+                            self._record_failure(key, region, FAILURE_UNLABELED)
                             continue
                         if not self._keep_hom_ref(key, haplotypes["true"]):
                             self._counts["downsampled"] += 1
+                            self._record_failure(key, region, FAILURE_DOWNSAMPLED)
                             continue
                     example = self.from_graph(
                         region, item.graph, item.sampler, item.unique_kmers, item.analysis_variants, item.sample_idx,
                         haplotypes=haplotypes,
                     )
-            except TimeoutError:
+            except TimeoutError as e:
                 logging.exception("Timeout error for region %s for sample %s", region, self.sample.name)
+                self._counts["timeout"] += 1
+                self._record_failure(key, region, FAILURE_TIMEOUT, str(e))
                 continue
             except InsufficientHaplotypesError as e:
                 logging.warning("Skipping region %s for sample %s due to too few haplotypes sampled: %s", region, self.sample.name, e)
+                self._counts["insufficient_haplotypes"] += 1
+                self._record_failure(key, region, FAILURE_INSUFFICIENT_HAPLOTYPES, str(e), haplotypes=e.haplotypes)
                 continue
             except Exception as e:
                 e.add_note(f"Error generating images for region {region} for sample {self.sample.name} from shard {shard_path}")
@@ -799,6 +864,10 @@ class GraphWriter(RegionActor):
             num_regions += 1
         return num_regions
 
+    def _record_failure(self, key: str, region: Range, reason: str, message: str | None = None, **kwargs) -> None:
+        if self._failures is not None:
+            self._failures.write(key, region, self.sample.name, reason, message, **kwargs)
+
     def _keep_hom_ref(self, key: str, true: Sequence[int | None]) -> bool:
         """Whether to keep the example with true haplotype indices `true` (always, unless it is hom. ref. and dropped by
         `hom_ref_downsample`)"""
@@ -814,7 +883,8 @@ class GraphWriter(RegionActor):
     def counts(self) -> dict[str, int]:
         """The number of regions whose haplotypes were "precomputed", "generated" inline or "skipped" as precomputed, and
         the number of regions skipped as "unlabeled" (with `skip_unlabeled`) or "downsampled" (with `hom_ref_downsample`,
-        and the number of hom. ref. regions kept because they were "downsample_missing" from its region statistics)"""
+        and the number of hom. ref. regions kept because they were "downsample_missing" from its region statistics), or
+        skipped after a "timeout" or with "insufficient_haplotypes"."""
         return dict(self._counts)
 
     def close(self):
@@ -824,6 +894,8 @@ class GraphWriter(RegionActor):
         self._writer.close()
         if self._comparisons is not None:
             self._comparisons.close()
+        if self._failures is not None:
+            self._failures.close()
         close_alignment_file_cache()
 
 
@@ -992,10 +1064,23 @@ def vcf_to_graph_examples(
     min_variant_size: int = 50,
     exact_reference: bool = False,
     haplotypes_dir: PathType | None = None,
-):
+    variant_alleles: bool = False,
+    record_failures: bool = False,
+    allow_empty: bool = False,
+) -> tuple[str | None, dict[str, int]]:
     """Generate the image dataset for `sample` in `output_dir`.
 
+    Returns:
+        The path to the dataset's `dataset.yaml` (None if no examples were generated and `allow_empty`) and the counts of
+        regions by outcome (see `GraphWriter.counts`)
+
     Args:
+        variant_alleles: Record every candidate's alleles for every VCF record in its region (not just the analysis
+            variants) in its haplotype record (see `images.haplotypes.haplotype_record`), e.g., for genotyping
+        record_failures: Record every region without an example in the `failures-*.jsonl` sidecar files (see
+            `FailureWriter`), e.g., for genotyping
+        allow_empty: If no examples are generated (e.g., every region was skipped), return no dataset instead of raising
+            an error
         haplotypes_dir: A `command=haplotypes` output directory (see `vcf_to_haplotypes`) for the sample, generated with
             the current settings, whose haplotypes (and comparisons, if `compare.enabled` with the same options) are used
             for each region they were generated for with the same graph. Haplotypes are generated inline for the rest.
@@ -1077,6 +1162,8 @@ def vcf_to_graph_examples(
                 exact_reference=exact_reference,
                 haplotypes_dir=None if haplotypes_dir is None else str(haplotypes_dir),
                 reuse_comparisons=reuse_comparisons,
+                variant_alleles=variant_alleles,
+                record_failures=record_failures,
             )
             for i in range(num_actors)
         ]
@@ -1086,6 +1173,11 @@ def vcf_to_graph_examples(
             counts.update(actor_counts)
         if counts["unlabeled"]:
             logging.info("Skipped %d unlabeled regions for sample %s", counts["unlabeled"], sample.name)
+        if counts["insufficient_haplotypes"] or counts["timeout"]:
+            logging.info(
+                "Skipped %d regions with insufficient haplotypes and %d that timed out for sample %s",
+                counts["insufficient_haplotypes"], counts["timeout"], sample.name,
+            )
         if counts["downsampled"] or counts["downsample_missing"]:
             logging.info(
                 "Skipped %d downsampled hom. ref. regions for sample %s (and kept %d hom. ref. regions without statistics)",
@@ -1098,6 +1190,10 @@ def vcf_to_graph_examples(
             )
         del actors
 
+        if allow_empty and counts["precomputed"] + counts["generated"] == 0:
+            logging.warning("No examples were generated for sample %s, so no dataset is prepared in %s", sample.name, output_dir)
+            return None, dict(counts)
+
         # Programmatic preparation of the energon dataset
         from npsv3.models.energon import prepare_energon_dataset, set_aux_tree
         dataset_path = prepare_energon_dataset(
@@ -1107,6 +1203,7 @@ def vcf_to_graph_examples(
             output_dir, ComparisonOptions.from_config(cfg.compare), num_workers=cfg.threads
         ):
             set_aux_tree(dataset_path, COMPARISONS_AUX, f"./{COMPARISONS_DIR}")
+    return dataset_path, dict(counts)
 
 
 def vcf_to_haplotypes(

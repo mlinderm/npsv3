@@ -273,6 +273,7 @@ def serialize_graph_and_unique_kmers(
     pool_kmers=False,
     ref_kmer_counts_path: PathType | None = None,
     region: Range | None = None,
+    regions: Sequence[Range] | None = None,
     max_size_shard=256 * 1024 * 1024,  # 256 MB
     progress_bar=False,
     unique_kmer_dir: PathType | None = None,
@@ -287,6 +288,9 @@ def serialize_graph_and_unique_kmers(
         min_variant_size (int, optional): _description_. Defaults to 50.
         pool_kmers (bool, optional): _description_. Defaults to False.
         region (Range | None, optional): Specific region to process. Defaults to None.
+        regions (Sequence[Range] | None, optional): Exactly the graph regions to construct (e.g., the regions to
+            genotype, `npsv3.genotyping.inputs.genotyping_regions`), instead of computing them from the analysis variants
+            in `vcf_path` (and `region`). Mutually exclusive with `region`. Defaults to None.
         max_size_shard (int, optional): _description_. Defaults to 200MB.
         progress_bar (bool, optional): _description_. Defaults to False.
         unique_kmer_dir (PathType | None, optional): Directory for the pooled unique k-mer database. Defaults to
@@ -298,9 +302,22 @@ def serialize_graph_and_unique_kmers(
     attached to image datasets as their `graphs` aux tree.
     """
 
+    if regions is not None and region is not None:
+        msg = "Only one of `region` and `regions` can be specified"
+        raise ValueError(msg)
+
     with contextlib.ExitStack() as stack:
         tmp_dir = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
-        vcf_file = stack.enter_context(VariantFileReader.open(str(vcf_path)))
+        if regions is None:
+            vcf_file = stack.enter_context(VariantFileReader.open(str(vcf_path)))
+            graph_regions = (
+                variants_region
+                for variants_region, _ in overlapping_variants(
+                    vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size,
+                )
+            )
+        else:
+            graph_regions = iter(regions)
 
         # Create thread-specific graph shards and k-mer fasta files to avoid contention on a single file handle
         # across threads.
@@ -320,8 +337,9 @@ def serialize_graph_and_unique_kmers(
 
         logging.info("Generating all graphs and unique k-mers to %s", os.path.join(output_dir, SHARD_GLOB))
         region_count = 0
-        for variants_region, _ in tqdm(
-            overlapping_variants(vcf_file, flank=cfg.pileup.variant_padding, region=region, min_variant_size=min_variant_size),
+        for variants_region in tqdm(
+            graph_regions,
+            total=None if regions is None else len(regions),
             disable=not progress_bar,
             desc="Pre-generating graphs and associated k-mers",
             mininterval=5.0,
