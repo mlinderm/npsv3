@@ -185,6 +185,19 @@ class TestPrepareGenotypingHaplotypes:
         assert alleles == [{("v1", 0)}, {("v1", 1)}]
         assert true_idxs == [1, 0]
 
+    def test_true_haplotypes_not_added_when_disabled(self):
+        """With `add_true_haplotypes=False` (e.g., genotyping), the sample's own paths are ignored even if in the graph"""
+        graph = cast("Graph", _MockGraph(
+            self.region.contig, self.REF,
+            paths={"SAMPLE#0#chr1#0": self.ALT, "SAMPLE#1#chr1#0": self.ALT},
+        ))
+        haplotypes, alleles, true_idxs = prepare_genotyping_haplotypes(
+            graph, self.sampler, [], self.variants, self.region.contig, "SAMPLE", add_true_haplotypes=False,
+        )
+        assert haplotypes == [self.REF]
+        assert alleles == [{("v1", 0)}]
+        assert true_idxs == []
+
     def test_missing_true_haplotype_path_is_skipped(self):
         """A ploidy index without a corresponding path in the graph (i.e. not fully resolved) should
         be silently skipped rather than raising an error."""

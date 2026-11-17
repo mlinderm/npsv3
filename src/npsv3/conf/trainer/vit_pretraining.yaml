@@ -3,15 +3,20 @@ defaults:
   - /trainer/base@trainer
 
 trainer:
-  # Utilize mixed precision
-  precision: "16-mixed"
+  # Utilize mixed precision. bf16 has the dynamic range of fp32, so unlike 16-mixed it needs no GradScaler and
+  # activations practically can't overflow to inf (which, after a long run at a constant LR, collapsed a 16-mixed run's GradScaler
+  # scale to 0 and its weights to NaN). Requires Ampere or newer GPUs, which all our GPU partitions have.
+  precision: "bf16-mixed"
 
   # As described in: https://arxiv.org/pdf/2106.10270
   gradient_clip_val: 1.0
 
 model:
   optimizer:
-    # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
+    # Raised from 1e-8 as a 16-mixed workaround
+    # (https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7).
+    # The optimizer state is fp32 under either mixed precision, so bf16 doesn't need it, but it's kept so training
+    # remains comparable with earlier runs.
     eps: 1e-7
 
 # https://openaccess.thecvf.com/content/CVPR2023/supplemental/Li_Scaling_Language-Image_Pre-Training_CVPR_2023_supplemental.pdf

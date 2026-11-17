@@ -8,7 +8,8 @@ defaults:
 # The virtual epoch length (limit_train_batches) and validation length (limit_val_batches) both live
 # on the data config -- `data.limit_train_batches` (null -> models.energon.estimate_epoch_batches)
 # and `data.limit_val_batches` -- because `runners.train` derives both from there rather than from
-# this trainer config. The timm CosineLRScheduler steps on interval="epoch" and
-# check_val_every_n_epoch counts epochs, so a fixed virtual-epoch length keeps their current
-# semantics instead of rewriting them to be step-driven. It also gives every DDP rank the same
-# number of steps, which is what stops ranks reaching the all-reduce an unequal number of times.
+# this trainer config. The timm CosineLRScheduler (ViT configs) steps on interval="epoch", the
+# torch warmup_cosine schedule (Inception configs) derives its total steps from max_epochs x this
+# length, and check_val_every_n_epoch counts epochs, so a fixed virtual-epoch length keeps their
+# semantics. It also gives every DDP rank the same number of steps, which is what stops ranks
+# reaching the all-reduce an unequal number of times.

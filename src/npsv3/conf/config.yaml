@@ -40,9 +40,6 @@ stats_path: ???
 # Input (inference) VCF file
 input: ???
 
-# Background VCF file for generating/tagging haplotypes
-background: ???
-
 # Input alignment file (BAM, CRAM)
 reads: ???
 

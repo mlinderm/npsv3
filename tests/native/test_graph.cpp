@@ -570,6 +570,51 @@ chr1	11	.	C	G	.	GAP1	.	GT:FT	0|1:GAP1	0|1:PASS
   }
 }
 
+TEST(GraphConstructionSyntheticTest, SitesOnlyRecordsAreEquivalentToMissingGenotypes) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAGAAAACAAAAAAAAA)FASTA");
+
+  // The middle record has either explicitly missing genotypes or no genotype fields at all
+  for (const std::string middle_genotype : { "GT\t./.", ".\t." }) {
+    test::TestVCFFile vcf(std::string(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample
+chr1	6	.	G	T	.	PASS	.	GT	0|1
+chr1	11	.	C	G	.	PASS	.	)VCF") + middle_genotype + R"VCF(
+chr1	16	.	A	C	.	PASS	.	GT	0|1
+)VCF");
+
+    Graph graph(fasta.file_path_, vcf.file_path_, Range("chr1", 0, 20));
+
+    // The alleles of the middle record are present in the graph, but on no sample's path, which continue uninterrupted
+    // through its reference allele
+    ASSERT_EQ(graph.get_node_count(), 10) << middle_genotype;
+    ASSERT_EQ(graph.PathSequence("Sample#0#chr1#0"), "AAAAAGAAAACAAAAAAAAA") << middle_genotype;
+    ASSERT_EQ(graph.PathSequence("Sample#1#chr1#0"), "AAAAATAAAACAAAACAAAA") << middle_genotype;
+    ASSERT_FALSE(graph.has_path("Sample#0#chr1#1")) << middle_genotype;
+    ASSERT_FALSE(graph.has_path("Sample#1#chr1#1")) << middle_genotype;
+  }
+}
+
+TEST(GraphConstructionSyntheticTest, SitesOnlyVCF) {
+  test::TestFastaFile fasta(R"FASTA(>chr1
+AAAAAAAAAACAAAAAAAAA)FASTA");
+
+  // No samples, FORMAT column or GT definition
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	11	.	C	G	.	PASS	.
+)VCF");
+
+  Graph graph(fasta.file_path_, vcf.file_path_, Range("chr1", 0, 20));
+  ASSERT_EQ(graph.get_node_count(), 4);
+  ASSERT_EQ(graph.PathSequence("chr1"), "AAAAAAAAAACAAAAAAAAA");
+}
+
 TEST_F(GraphConstructionTest, IgnoreMissingGenotypes) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">

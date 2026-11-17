@@ -107,21 +107,32 @@ def main(cfg: DictConfig) -> None:
         from npsv3.genotype import genotype
         from npsv3.util.sample import Sample
 
-        _make_paths_absolute(cfg, ["reference", "aligner_index", "stats_path", "model.checkpoint"])
+        _make_paths_absolute(
+            cfg,
+            [
+                "reference", "aligner_index", "stats_path", "model.checkpoint", "reads", "population", "inference", "work_dir",
+                "images_dir", "unique_kmer_path", "filtered_kmer_path", "data.cache_dir", "graph.ref_kmer_counts_kmc_prefix",
+            ],
+        )
         _check_shared_reference(cfg)
 
-        sample = Sample.from_json(hydra.utils.to_absolute_path(cfg.stats_path))
+        sample = Sample.from_json(cfg.stats_path)
 
         # If no output file is specified, create a fixed file in the Hydra output directory
-        output = "genotypes.vcf.gz" if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
+        output = os.path.abspath("genotypes.vcf.gz") if OmegaConf.is_missing(cfg, "output") else hydra.utils.to_absolute_path(cfg.output)
 
         genotype(
             cfg,
-            hydra.utils.to_absolute_path(cfg.reads),
+            cfg.reads,
             sample,
-            hydra.utils.to_absolute_path(cfg.input),
+            cfg.population,
             output,
-            background_vcf=hydra.utils.to_absolute_path(cfg.background),
+            inference_vcf=cfg.inference,
+            work_dir=cfg.work_dir,
+            images_dir=cfg.images_dir,
+            graph_shards=_graph_shards(cfg),
+            unique_kmer_path=cfg.unique_kmer_path,
+            filtered_kmer_path=cfg.filtered_kmer_path,
         )
     elif cfg.command == "images":
         from npsv3.util.sample import Sample

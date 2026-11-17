@@ -486,6 +486,39 @@ chr1	101	.	A	C	.	.	.	GT:PS	0|1:102	0/1:.
   EXPECT_THROW(variant->genotype(-1), std::out_of_range);
 }
 
+TEST_F(VariantFilteringTest, SitesOnlyRecordGenotypesAreMissing) {
+  test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
+##contig=<ID=chr1,length=1000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	101	.	A	C	.	.	.	.	.	.
+chr1	201	.	A	C	.	.	.	GT	./.	./.
+)VCF");
+
+  auto reader = VariantFileReader::Open(vcf.file_path_);
+  ASSERT_TRUE(reader);
+
+  auto sites_only = reader->NextVariant();
+  ASSERT_TRUE(sites_only);
+  auto explicitly_missing = reader->NextVariant();
+  ASSERT_TRUE(explicitly_missing);
+
+  auto genotypes = sites_only->Genotypes();
+  auto expected_genotypes = explicitly_missing->Genotypes();
+  ASSERT_EQ(genotypes.size(), 2);
+  for (size_t i = 0; i < genotypes.size(); i++) {
+    EXPECT_EQ(genotypes[i].num_alleles(), expected_genotypes[i].num_alleles());
+    EXPECT_TRUE(genotypes[i].AllAlleles(Variant::Genotype::kMissingAllele));
+    EXPECT_EQ(genotypes[i].phase(), expected_genotypes[i].phase());
+
+    auto sample = sites_only->genotype(i);
+    EXPECT_EQ(sample.genotype().num_alleles(), 2);
+    EXPECT_TRUE(sample.genotype().AllAlleles(Variant::Genotype::kMissingAllele));
+    EXPECT_FALSE(sample.is_filtered());
+  }
+  EXPECT_THROW(sites_only->genotype(2), std::out_of_range);
+}
+
 TEST_F(VariantFilteringTest, SetFilterToPass) {
   test::TestVCFFile vcf(R"VCF(##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">

@@ -21,6 +21,11 @@ max_diplotypes: 36
 # `graph.population_excluded_samples`) for any still-missing variant allele instead of dropping the region.
 population_haplotype_topup: true
 
+# Add the sample's "true" haplotypes (its own paths in the graph, if present) to the sampled haplotypes, and use them for
+# the label. Forced off for genotyping (see `npsv3.genotyping.images.FORCED_SETTINGS`), where the sample's genotypes may
+# still be in the VCF (e.g., the population VCF is the truth set) and so must not inform its candidate haplotypes.
+add_true_haplotypes: true
+
 # Haplotype sampler scoring parameters (partly adapted from Sirén et al. 2024)
 sampler_params:
   _target_: npsv3.graphs.haplotype.HaplotypeSamplerOverlay.Params

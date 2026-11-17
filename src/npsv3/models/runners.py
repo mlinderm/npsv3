@@ -8,6 +8,7 @@ import torch
 from omegaconf import ListConfig, OmegaConf
 
 from npsv3.models.energon import available_splits, estimate_epoch_batches
+from npsv3.models.numerical_guard import NumericalGuard, checkpoint_problem
 
 
 class TextLoggingCallback(L.pytorch.callbacks.Callback):
@@ -74,14 +75,34 @@ def load_model_from_checkpoint(cfg, *, strict=True, weights_only=None):
         weights_only=weights_only,
     )
 
+def _resume_checkpoint_problem(path) -> str | None:
+    """Describe why the checkpoint file at `path` can't be resumed from (e.g., it is unreadable, its GradScaler scale is
+    0 or it has non-finite weights), or return None if it can."""
+    try:
+        try:
+            # Memory-map to avoid reading all of a large checkpoint up front (requires the default zipfile format)
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+        except RuntimeError:
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:  # noqa: BLE001
+        return f"it could not be loaded ({type(e).__name__}: {e})"
+    if not isinstance(checkpoint, dict):
+        return "it is not a Lightning checkpoint"
+    return checkpoint_problem(checkpoint)
+
+
 def _resolve_resume_checkpoint(resume_from, output_dir) -> str | None:
     """Return the checkpoint to resume training from (as `ckpt_path`) for `resume_from`.
 
     `None` defers to Lightning, which resumes from the newest `hpc_ckpt_N.ckpt` in `default_root_dir` when running under
-    SLURM. Otherwise resume from the most recently modified of `resume_from` (unless it is "last") and the full
-    checkpoints in `output_dir`, i.e., `ModelCheckpoint` and requeue (`hpc_ckpt_N.ckpt`) checkpoints. Including
-    `output_dir` means a requeued job, which re-runs the same command, continues from where it was interrupted rather
-    than from `resume_from` again. Returns `None` (train from scratch) if "last" finds no checkpoints.
+    SLURM. Otherwise resume from the most recently modified usable checkpoint among `resume_from` (unless it is "last")
+    and the full checkpoints in `output_dir`, i.e., `ModelCheckpoint` and requeue (`hpc_ckpt_N.ckpt`) checkpoints.
+    Including `output_dir` means a requeued job, which re-runs the same command, continues from where it was interrupted
+    rather than from `resume_from` again. Returns `None` (train from scratch) if "last" finds no checkpoints.
+
+    Candidates are loaded newest first, and skipped (with a warning) if unusable, e.g., unreadable or numerically
+    collapsed (GradScaler scale of 0 or non-finite weights/optimizer state), until the first usable one. Raises if there
+    are candidates but none are usable, rather than silently training from scratch.
     """
     if resume_from is None:
         return None
@@ -95,7 +116,11 @@ def _resolve_resume_checkpoint(resume_from, output_dir) -> str | None:
     if not candidates:
         logging.warning("No checkpoints found in %s to resume from, training from scratch", output_dir)
         return None
-    return max(candidates, key=os.path.getmtime)
+    for path in sorted(candidates, key=os.path.getmtime, reverse=True):
+        if (problem := _resume_checkpoint_problem(path)) is None:
+            return path
+        logging.warning("Skipping checkpoint %s, which can't be resumed from since %s", path, problem)
+    raise RuntimeError(f"None of the checkpoints to resume from are usable: {', '.join(sorted(candidates))}")
 
 
 def train(cfg, output_dir=None, **kw_args):
@@ -182,6 +207,7 @@ def train(cfg, output_dir=None, **kw_args):
             world_size=_resolve_world_size(cfg),
             filters=getattr(dm, "train_filters", ()),
             genotype_subset=getattr(dm, "train_genotype_subset", None),
+            occupancy=OmegaConf.select(cfg, "data.estimated_occupancy", default=0.95),
         )
 
     # Lightning saves `hpc_ckpt_N.ckpt` checkpoints on the SLURM requeue signal to, and resumes from them in,
@@ -190,12 +216,20 @@ def train(cfg, output_dir=None, **kw_args):
     if output_dir is not None:
         kw_args = {"default_root_dir": output_dir, **kw_args}
 
+    # Text logging in place of a progress bar, which redraws via "\r" and so leaves duplicate lines
+    # once stdout is redirected to a file (see `TextLoggingCallback`)
+    callbacks = [checkpoint_callback, TextLoggingCallback()]
+    # Skip non-finite steps, stop on numerical collapse and refuse to save non-finite checkpoints (enabled unless
+    # `numerical_guard.enabled=false`)
+    guard_cfg = OmegaConf.select(cfg, "numerical_guard", default=None)
+    guard_cfg = {} if guard_cfg is None else OmegaConf.to_container(guard_cfg, resolve=True)
+    if guard_cfg.pop("enabled", True):
+        callbacks.append(NumericalGuard(**guard_cfg))
+
     trainer = hydra.utils.instantiate(
         cfg.trainer,
-        # Text logging in place of a progress bar, which redraws via "\r" and so leaves duplicate lines
-        # once stdout is redirected to a file (see `TextLoggingCallback`)
         enable_progress_bar=False,
-        callbacks=[checkpoint_callback, TextLoggingCallback()],
+        callbacks=callbacks,
         limit_val_batches=limit_val_batches,
         num_sanity_val_steps=num_sanity_val_steps,
         limit_test_batches=limit_test_batches,

@@ -1,274 +1,250 @@
+"""Genotype a sample with a trained model (`command=genotype`).
+
+The stages reuse the same components as training-data generation, so genotyping can't drift from how the model was trained:
+
+1. Prepare the VCF the graphs are built from, without the sample and with any inference VCF's sites
+   (`npsv3.genotyping.inputs`), and determine the regions to genotype.
+2. Build the graphs for those regions, and 3. generate their images in parallel (`npsv3.genotyping.images`).
+4. Score the images with the model on the CPU or GPU(s) (`npsv3.genotyping.predict`).
+5. Write the genotyped VCF (`npsv3.genotyping.vcf`).
+
+See `npsv3/genotyping/GENOTYPING_PLAN.md` for the design.
+"""
+
+import contextlib
 import logging
 import os
 import tempfile
-import weakref
+from collections import Counter
 from collections.abc import Sequence
 
-import lightning as L
-import pysam
-import ray
-import torch
-from pysam import bcftools
-from torchvision.transforms import v2 as transforms
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from npsv3.graphs.graph_constructor import variant_path_to_allele, variant_path_to_id
-from npsv3.images.example import make_graph_example_from_region
-from npsv3.models.loaders import _pack_and_pad_images, to_tensor
-from npsv3.models.runners import load_model_from_checkpoint
-from npsv3.util.config import setup_resolvers
-from npsv3.util.range import Range
+from npsv3.genotyping.images import (
+    GENERATION_FILE,
+    GRAPHS_DIR,
+    IMAGES_DIR,
+    generate_genotyping_images,
+    genotyping_config,
+)
+from npsv3.genotyping.inputs import (
+    GENOTYPING_VCF,
+    INFERENCE_SITES_VCF,
+    GenotypingInputs,
+    check_provenance,
+    file_provenance,
+    genotyping_regions,
+    prepare_genotyping_vcf,
+    write_provenance,
+)
+from npsv3.genotyping.predict import PREDICTIONS_DIR, predict_genotypes, read_predictions, resolve_devices
+from npsv3.genotyping.vcf import scoring_options, write_genotypes_vcf
+from npsv3.images.example import read_failures
+from npsv3.types import PathType
 from npsv3.util.sample import Sample
-from npsv3.util.variant import Variant, overlapping_variants, vg_variant_id
-from npsv3.util.vcf import bcftools_format, bcftools_index, index_variant_file
 
 PLOIDY = 2
-VCF_HEADER_TYPES_TO_COPY = frozenset(["GENERIC", "STRUCTURED", "INFO", "FILTER", "CONTIG"])
+MIN_VARIANT_SIZE = 50
+"""Minimum size of the analysis variants, as for training"""
+
+INPUTS_DIR = "inputs"
+"""The prepared inputs, in the working directory (or a specified images directory, so they can be reused together)"""
+
+DATASET_FILE = "dataset.yaml"
+
+REGION_SELECTIONS = ("inference", "all")
+"""With an inference VCF, genotype the regions with an analysis variant with an inference allele, or every region"""
+
+GRAPH_PROVENANCE_KEYS = (
+    "population", "inference", "reference", "sample", "ploidy", "min_variant_size", "variant_padding", "region_selection", "graph",
+)
+"""The inputs and settings that determine the graphs (i.e., not the sample's reads)"""
 
 
-@ray.remote
-class VariantExamples:
-    """Ray actor for generating packed image batches for each variant individually in a VCF file"""
+def _region_selection(cfg: DictConfig) -> str:
+    selection = OmegaConf.select(cfg, "region_selection", default="inference")
+    if selection not in REGION_SELECTIONS:
+        msg = f"region_selection must be one of {', '.join(REGION_SELECTIONS)}, not {selection!r}"
+        raise ValueError(msg)
+    return selection
 
-    def __init__(
-        self,
-        cfg,
-        *,
-        read_path: str,
-        sample: Sample,
-        inference_vcf: str,
-        background_vcf: str | None = None,
-        mean=(0.5,),
-        std=(0.5,),
-        batch_size=64,
-    ):
-        self.cfg = cfg
-        self.read_path = read_path
-        self.sample = sample
-        self.src_vcf_file = pysam.VariantFile(inference_vcf)
-        self._src_vcf_file_finalizer = weakref.finalize(self, self.src_vcf_file.close)
-        self._src_vcf_file_header = self.src_vcf_file.header
-        self.background_vcf = background_vcf
 
-        self.transforms = transforms.Compose(
-            [
-                transforms.ToDtype(torch.float32, scale=True),  # Normalize expects float input
-                transforms.Normalize(mean=mean, std=std),
-            ]
+def _provenance(cfg: DictConfig, reads: str, sample: Sample, population_vcf: str, inference_vcf: str | None) -> dict:
+    """The inputs and settings that determine the prepared VCF, graphs and images. The image settings the model depends on
+    are checked separately (`npsv3.genotyping.predict.check_generation`)."""
+    graph = genotyping_config(cfg, sample.name).graph
+    return {
+        "population": file_provenance(population_vcf),
+        "inference": file_provenance(inference_vcf),
+        "reads": file_provenance(reads),
+        "reference": file_provenance(cfg.reference),
+        "sample": sample.name,
+        "ploidy": PLOIDY,
+        "min_variant_size": MIN_VARIANT_SIZE,
+        "variant_padding": cfg.pileup.variant_padding,
+        "region_selection": _region_selection(cfg),
+        "graph": OmegaConf.to_container(graph, resolve=True),
+    }
+
+
+def _resolved_devices(cfg: DictConfig):
+    devices = OmegaConf.select(cfg, "devices", default="cpu")
+    return OmegaConf.to_object(devices) if isinstance(devices, ListConfig) else devices
+
+
+def _check_empty(images_dir: str) -> None:
+    """Images can't be added to an earlier run's, even one that didn't finish, since the two would be mixed"""
+    if os.path.isdir(images_dir) and os.listdir(images_dir):
+        msg = (
+            f"{images_dir} already has files. Remove it to regenerate the images or, if it has complete images, specify it "
+            "with images_dir to reuse them."
         )
-
-        self.batch_size = batch_size
-
-    def _example_generator(self, region: Range):
-        for record in self.src_vcf_file.fetch(**region.pysam_fetch):
-            variant = Variant.from_pysam(record)
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as dst_dir:
-                dst_vcf = os.path.join(dst_dir, "variant.vcf.gz")
-                with pysam.VariantFile(dst_vcf, mode="wz", header=self._src_vcf_file_header) as dst_vcf_file:
-                    dst_vcf_file.write(record)
-                index_variant_file(dst_vcf)
-
-                example = make_graph_example_from_region(
-                    self.cfg,
-                    variant.reference_region,
-                    self.read_path,
-                    self.sample,
-                    background_vcf=self.background_vcf,
-                    inference_vcf=dst_vcf,
-                )
-                query_image = to_tensor(example["image"])
-                support_images = to_tensor(example["sim.images"])
-                label = torch.from_numpy(example["label.rank"])
-                yield (query_image, support_images, label, example.get("label"), example["region"], example["label.alleles"])
-
-    def from_region(self, region: Range):
-        # Perform the packing and padding in the actor to maximize the work done in parallel
-        yield from _pack_and_pad_images(
-            self._example_generator(region), batch_size=self.batch_size, image_transform=self.transforms, pad=False
-        )
+        raise ValueError(msg)
 
 
-class OnlinePackedImageDataModule(L.LightningDataModule):
-    """Lightning DataModule for performing prediction on packed images generated on-the-fly using Ray actors"""
+def genotype(  # noqa: PLR0913
+    cfg: DictConfig,
+    reads: PathType,
+    sample: Sample,
+    population_vcf: PathType,
+    output: PathType,
+    *,
+    inference_vcf: PathType | None = None,
+    work_dir: PathType | None = None,
+    images_dir: PathType | None = None,
+    graph_shards: Sequence[PathType] | None = None,
+    unique_kmer_path: PathType | None = None,
+    filtered_kmer_path: PathType | None = None,
+) -> Counter:
+    """Genotype `sample` and write a phased VCF to `output`.
 
-    def __init__(self, cfg, *, inference_vcf: str, **kwargs):
-        super().__init__()
-        self.save_hyperparameters(ignore=["cfg"])
-        self.cfg = cfg
-        self.inference_vcf = inference_vcf
-        self.kwargs = kwargs
+    Args:
+        cfg: The genotyping configuration
+        reads: The sample's (preprocessed) reads
+        sample: The sample, with its KMC k-mer database
+        population_vcf: Phased population VCF (bgzipped and indexed). The sample is excluded if present.
+        output: The output VCF
+        inference_vcf: VCF (bgzipped and indexed) of the variants to genotype, which may not be in the population VCF. If
+            None, all of the population's analysis variants are genotyped. Otherwise, `region_selection` determines the
+            regions genotyped, and every inference record is reported.
+        work_dir: Directory for the intermediate files, which is always kept. If None, a temporary directory.
+        images_dir: Directory for the images (`work_dir`/images by default). If it already has complete images, the input
+            preparation, graphs and images are skipped, after checking they were created from the same inputs.
+        graph_shards: Graphs from an earlier run with the same inputs to skip graph building
+        unique_kmer_path: The unique k-mers for `graph_shards`
+        filtered_kmer_path: The sample's k-mers filtered to the unique k-mers of `graph_shards`
 
-    def setup(self, **_kwargs):
-        # We use Ray actors to parallelize example generation (instead of multiple DataLoader workers)
-        self._ray_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        ray.init(
-            num_cpus=self.cfg.threads,
-            num_gpus=0,
-            _temp_dir=self._ray_dir.name,
-            ignore_reinit_error=True,
-            include_dashboard=False,
-            runtime_env=ray.runtime_env.RuntimeEnv(worker_process_setup_hook=setup_resolvers),
-        )
+    Returns:
+        The number of records written by outcome
 
-        group_padding = self.cfg.pileup.variant_padding // 2
-        self.regions = [region for region, *_ in overlapping_variants(self.inference_vcf, flank=group_padding)]
-        logging.info("Genotyping variants in %d regions", len(self.regions))
-
-    def predict_dataloader(self):
-        actors = [
-            VariantExamples.remote(self.cfg, inference_vcf=self.inference_vcf, **self.kwargs)
-            for i in range(self.cfg.threads)
-        ]
-        pool = ray.util.ActorPool(actors)
-        for region in self.regions:
-            pool.submit(lambda actor, region: actor.from_region.remote(region), region)
-
-        # Yield batches from any actor as they become available (each actor produces a generator with possibly multiple batches)
-        # https://docs.ray.io/en/latest/ray-core/ray-generator.html#how-to-wait-for-generator-without-blocking-a-thread-compatibility-to-ray-wait-and-ray-get
-        ready, unready = [], [pool.get_next_unordered()]
-        while unready:
-            # Yield any ready examples
-            ready, unready = ray.wait(unready)
-            for ready_gen in ready:
-                try:
-                    yield ray.get(next(ready_gen))
-                except StopIteration:
-                    pass
-                else:
-                    unready.append(ready_gen)
-            # Check for additional generators available from the pool. Don't wait (timeout=0) if we already have unready generators to avoid blocking.
-            # Otherwise block until a new generator is available (timeout=None).
-            try:
-                while pool.has_next():
-                    unready.append(pool.get_next_unordered(timeout=0 if unready else None))
-            except TimeoutError:
-                pass
-
-    def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        # PackedBatch.to only moves its tensor fields, leaving `meta` on the host
-        return batch.to(device)
-
-    def teardown(self, **_kwargs):
-        ray.shutdown()
-        self._ray_dir.cleanup()
-
-
-def _dict_of_alleles(genotype: Sequence[Sequence[str]]) -> dict[str, tuple[str | None, ...]]:
-    """Create a dictionary mapping variant IDs to allele indices in the predicted genotype
-
-    For example, `(("alt_abc_0", "alt_def_1"), ("alt_abc_1", "alt_def_1"))` returns
-    `{ "abc": (0, 1), "def": (1,1) }`
+    Raises:
+        ValueError: If the configuration is invalid, or the intermediate files to reuse don't match the inputs
     """
-    dict_of_alleles = {}
-    for g, alleles in enumerate(genotype):
-        for a in alleles:
-            var_id = variant_path_to_id(a)
-            curr = dict_of_alleles.get(var_id, ())
-            dict_of_alleles[var_id] = (*curr, *((None,) * (g - len(curr))), variant_path_to_allele(a))
-    return dict_of_alleles
+    reads, population_vcf, output = os.path.abspath(reads), os.path.abspath(population_vcf), os.path.abspath(output)
+    inference_vcf = None if inference_vcf is None else os.path.abspath(inference_vcf)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
 
+    # Check everything we can before any of the expensive stages
+    if cfg.simulation.replicates < 1:
+        msg = "At least one replicate (simulation.replicates) is required for genotyping"
+        raise ValueError(msg)
+    if graph_shards is not None and len(graph_shards) == 0:
+        # E.g., a pattern that didn't match, which otherwise looks like there is nothing to genotype
+        msg = "graph_shards was specified, but has no graph shards"
+        raise ValueError(msg)
 
-class VCFWriterCallback(L.Callback):
-    """Lightning callback for writing genotyping results to a VCF file during prediction"""
+    # Ensure valid devices specification before getting too far
+    devices = _resolved_devices(cfg)
+    resolve_devices(devices)
+    
+    options = scoring_options(cfg)
+    if not os.path.isfile(cfg.model.checkpoint):
+        msg = f"Model checkpoint {cfg.model.checkpoint} doesn't exist"
+        raise ValueError(msg)
+    provenance = _provenance(cfg, reads, sample, population_vcf, inference_vcf)
 
-    def __init__(self, sample: Sample, inference_vcf: str, output_path: str):
-        self.sample = sample
-        self.inference_vcf = inference_vcf
-        self.output_path = output_path
+    if work_dir is None:
+        work_context = tempfile.TemporaryDirectory(prefix="npsv3-genotype-", ignore_cleanup_errors=True)
+    else:
+        os.makedirs(work_dir, exist_ok=True)
+        work_context = contextlib.nullcontext(os.path.abspath(work_dir))
 
-    def setup(self, trainer, pl_module, stage):  # noqa: ARG002
-        # Initialize output VCF file from existing VCF
-        self.src_vcf_file = pysam.VariantFile(self.inference_vcf, drop_samples=True)
+    with work_context as work_path:
+        provided_images = None if images_dir is None else os.path.abspath(images_dir)
+        resolved_images = os.path.join(work_path, IMAGES_DIR) if provided_images is None else provided_images
+        # Prepared inputs live with images that were specified, so those images can be reused without the working directory
+        inputs_dir = os.path.join(work_path if provided_images is None else provided_images, INPUTS_DIR)
+        reuse_images = provided_images is not None and os.path.exists(os.path.join(provided_images, GENERATION_FILE))
 
-        # Create header for destination file, copying existing header fields, samples, and
-        # adding NPSV-specific header lines TODO: Add metadata about the model, etc.
-        self._dst_header = pysam.VariantHeader()
-        src_header = self.src_vcf_file.header
-        for record in src_header.records:
-            if record.type in VCF_HEADER_TYPES_TO_COPY:
-                self._dst_header.add_record(record)
-        self._dst_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-        self._dst_header.add_line(
-            '##FORMAT=<ID=MT,Number=.,Type=Float,Description="Metric between real and simulated data">'
+        if reuse_images:
+            logging.info("Using the existing images in %s", resolved_images)
+            check_provenance(inputs_dir, provenance)
+            merged_vcf, sites_vcf = os.path.join(inputs_dir, GENOTYPING_VCF), os.path.join(inputs_dir, INFERENCE_SITES_VCF)
+            vcf_path = merged_vcf if os.path.exists(merged_vcf) else population_vcf
+            inference_sites = sites_vcf if inference_vcf is not None else None
+            failures = read_failures(resolved_images)
+        else:
+            _check_empty(resolved_images)
+            if graph_shards:
+                check_provenance(os.path.dirname(os.path.abspath(graph_shards[0])), provenance, keys=GRAPH_PROVENANCE_KEYS)
+            os.makedirs(inputs_dir, exist_ok=True)
+            inputs: GenotypingInputs = prepare_genotyping_vcf(
+                population_vcf, inputs_dir, sample_name=sample.name, inference_vcf=inference_vcf, threads=cfg.threads,
+            )
+            write_provenance(inputs_dir, provenance)
+            vcf_path, inference_sites = inputs.vcf_path, inputs.inference_sites
+            failures = []
+
+        regions = genotyping_regions(
+            vcf_path,
+            flank=cfg.pileup.variant_padding,
+            min_variant_size=MIN_VARIANT_SIZE,
+            inference_sites=inference_sites if _region_selection(cfg) == "inference" else None,
         )
-        self._dst_header.add_sample(self.sample.name)
+        logging.info("Genotyping %d regions in sample %s", len(regions), sample.name)
 
-        self.dst_vcf_file = pysam.VariantFile(self.output_path, mode="wz", header=self._dst_header)
+        dataset_path = None
+        if reuse_images:
+            candidate = os.path.join(resolved_images, DATASET_FILE)
+            dataset_path = candidate if os.path.exists(candidate) else None
+        elif regions:
+            images = generate_genotyping_images(
+                cfg,
+                reads,
+                sample,
+                inputs,
+                regions,
+                work_path,
+                graph_shards=graph_shards,
+                unique_kmer_path=unique_kmer_path,
+                filtered_kmer_path=filtered_kmer_path,
+                images_dir=resolved_images,
+                ploidy=PLOIDY,
+                min_variant_size=MIN_VARIANT_SIZE,
+                progress_bar=True,
+            )
+            dataset_path, failures = images.dataset_path, images.failures
+            if not graph_shards:
+                # So these graphs can be reused, but only for these same inputs
+                write_provenance(os.path.join(work_path, GRAPHS_DIR), provenance)
 
-    def teardown(self, trainer, pl_module, stage):  # noqa: ARG002
-        self.dst_vcf_file.close()
-        self.src_vcf_file.close()
+        predictions, rejected = None, []
+        if dataset_path is not None:
+            result = predict_genotypes(cfg, dataset_path, os.path.join(work_path, PREDICTIONS_DIR), devices=devices)
+            predictions, rejected = read_predictions(result.predictions_dir), result.rejected
 
-    def on_predict_batch_end(self, trainer, model, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: ARG002
-        for metric, pred, _label, region, alleles in zip(*outputs, strict=True):
-            # Fetch the corresponding variants in the region to create destination records
-            records = list(self.src_vcf_file.fetch(region=region))
-            assert len(records) > 0, f"Didn't find any records in region {region}"
-
-            # Link the predictions to the relevant records/alleles based on the VG allele paths in the predicted haplotypes
-            var_to_gts = _dict_of_alleles(alleles[pred.item()])
-
-            sample_metric = metric.round(decimals=4).tolist()  # Since records were grouped, all share metric
-            for record in records:
-                # In "variant" mode we can get other records in the region that were not included in this genotyping
-                # run, so we skip records without genotypes.
-                var_id = vg_variant_id(record)
-                if var_id not in var_to_gts:
-                    continue
-                dst_samples = [{"GT": var_to_gts[var_id], "MT": sample_metric}]
-                # Create and write new record with genotypes
-                dst_record = self._dst_header.new_record(
-                    contig=record.contig,
-                    start=record.start,
-                    stop=record.stop,
-                    alleles=record.alleles,
-                    id=record.id,
-                    qual=record.qual,
-                    filter=record.filter,
-                    info=record.info,
-                    samples=dst_samples,
-                )
-                self.dst_vcf_file.write(dst_record)
-
-
-def genotype(
-    cfg, read_path: str, sample: Sample, inference_vcf: str, output_path: str, *, background_vcf: str | None = None
-):
-    assert cfg.simulation.replicates >= 1, "At least one replicate is required for genotyping"
-    torch.set_num_threads(min(4, cfg.threads))
-
-    # Create the datamodule and genotyper model
-    datamodule = OnlinePackedImageDataModule(
-        cfg,
-        read_path=read_path,
-        sample=sample,
-        inference_vcf=inference_vcf,
-        background_vcf=background_vcf,
-        batch_size=cfg.data.batch_size,
-    )
-    model = load_model_from_checkpoint(cfg, strict=True)
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as output_dir:
-        unsorted_output_path = os.path.join(output_dir, "genotypes.vcf.gz")
-        trainer_args = {
-            "callbacks": [
-                L.pytorch.callbacks.TQDMProgressBar(refresh_rate=50),  # Reduce refresh rate to mitigate performance issues
-                VCFWriterCallback(sample=sample, inference_vcf=inference_vcf, output_path=unsorted_output_path),
-            ],
-            "logger": False, # Disable logging (we don't need it for prediction)
-        }
-
-        trainer = L.Trainer(**trainer_args)
-        trainer.predict(model=model, datamodule=datamodule)
-
-        # Sort output file and index (if relevant)
-        bcftools.sort(
-            *bcftools_index(output_path),
-            "-O",
-            bcftools_format(output_path),
-            "-o",
-            output_path,
-            "-T",
-            output_dir,
-            unsorted_output_path,
-            catch_stdout=False,
+        counts = write_genotypes_vcf(
+            vcf_path,
+            output,
+            sample_name=sample.name,
+            regions=regions,
+            images_dir=resolved_images,
+            predictions=predictions,
+            rejected=rejected,
+            failures=failures,
+            options=options,
+            inference_sites=inference_sites,
+            checkpoint=cfg.model.checkpoint,
+            ploidy=PLOIDY,
         )
+    return counts

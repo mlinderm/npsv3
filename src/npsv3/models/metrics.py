@@ -94,20 +94,34 @@ class ExponentialMovingAverage(torchmetrics.Metric):
     def __init__(self, decay: float = 0.98, **kwargs):
         if not 0.0 <= decay < 1.0:
             raise ValueError(f"decay must be in [0, 1), got {decay}")
-        # `forward()`'s per-step `compute()` is already unsynced via `dist_sync_on_step` (default
-        # False); this instead covers a bare `.compute()` call, e.g. if this metric were ever logged
-        # directly rather than via `forward()`. Either way, a per-rank running average isn't something a
-        # cross-rank reduction could combine correctly, so keep it local.
+        # Both `forward()` and a bare `.compute()` call `compute()`, so keep it unsynced: a per-rank running
+        # average isn't something a cross-rank reduction could combine correctly.
         kwargs.setdefault("sync_on_compute", False)
         super().__init__(**kwargs)
         self.decay = decay
         self.add_state("average", default=torch.tensor(0.0), dist_reduce_fx=None)
         self.add_state("bias_correction", default=torch.tensor(1.0), dist_reduce_fx=None)
 
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Update the average with `value` and return the running average.
+
+        torchmetrics' default `forward()` returns the metric of the current batch alone, which for a bias-corrected EMA
+        is just `value`, not the average.
+        """
+        self.update(value)
+        self._forward_cache = self.compute()
+        return self._forward_cache
+
     def update(self, value: torch.Tensor) -> None:
+        """Fold `value` into the average, skipping a non-finite value so a single NaN/inf doesn't poison it forever.
+
+        Uses `torch.where` rather than a Python conditional to skip, to avoid a host-device sync on every update.
+        """
         value = value.detach().to(self.average.dtype)
-        self.average = self.decay * self.average + (1.0 - self.decay) * value
-        self.bias_correction = self.decay * self.bias_correction
+        finite = torch.isfinite(value)
+        self.average = torch.where(finite, self.decay * self.average + (1.0 - self.decay) * value, self.average)
+        self.bias_correction = torch.where(finite, self.decay * self.bias_correction, self.bias_correction)
 
     def compute(self) -> torch.Tensor:
+        """The bias-corrected average of the finite values so far, NaN if there are none."""
         return self.average / (1.0 - self.bias_correction)

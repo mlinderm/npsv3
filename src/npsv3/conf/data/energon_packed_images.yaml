@@ -17,15 +17,36 @@ w_bucket: ${pileup.image_width}
 w_max: ${pileup.image_width}
 g_max: ${haplotype.max_diplotypes}
 r_max: ${simulation.replicates}
-packing_buffer_size: 512
+# Groups per packing round. Packs fill in (shuffled) buffer order, so each round ends in one partial pack; larger
+# buffers waste fewer steps (see EnergonPackedImageDataModule)
+packing_buffer_size: 4096
 shuffle_buffer_size: 4096
 max_samples_per_sequence: 64
+# Sequences each train worker reads from each dataset at once (energon's parallel_shard_iters; null -> 16). A worker
+# interleaves (datasets) x this many sequences, which sets the aux block cache's working set (below). Changes the train
+# sample order, so it must match a checkpoint being resumed.
+parallel_shard_iters: null
 num_workers: ${threads}
 # Prefetch threads in *each* DataLoader worker
 cache_workers: 4
 # Pixel cache cap per rank (i.e., per GPU), split evenly across that rank's train/val worker processes. The node-local
 # disk request (e.g. the SLURM localdisk gres) must cover this times the number of GPUs.
 max_cache_size_gbytes: 54
+# Aux (pixel) read tuning for parallel filesystems (see npsv3.util.aux_io). Each pixel part is a small random read from a
+# large shard; with GPFS's 4 MiB st_blksize, each would otherwise cost a full 4 MiB read.
+#   read_buffer_bytes: buffer for binary reads with default buffering (0 -> Python's default, st_blksize)
+#   aux_block_bytes / aux_block_cache_mbytes: a per-process LRU of aligned shard blocks that serves consecutive
+#     samples' parts with one read (consecutive samples are adjacent on disk). The cache is RAM in *every* DataLoader
+#     worker (train and val) of every rank, in addition to max_cache_size_gbytes (disk); 0 MiB disables it.
+# The cache needs about one block per interleaved sequence ((datasets) x parallel_shard_iters), or it reads blocks that are
+# evicted before use. For ~100 datasets: the defaults suit parallel_shard_iters=16 (~2.7x fewer reads than the buffer cap
+# alone, at the same bytes); parallel_shard_iters=4 with aux_block_bytes=1048576 and aux_block_cache_mbytes=1024 gives
+# ~8x fewer (see the table in npsv3.util.aux_io).
+# null -> the NPSV3_READ_BUFFER_BYTES / NPSV3_AUX_BLOCK_BYTES / NPSV3_AUX_BLOCK_CACHE_MBYTES environment variables,
+# or the defaults 64 KiB / 256 KiB / 512 MiB.
+read_buffer_bytes: null
+aux_block_bytes: null
+aux_block_cache_mbytes: null
 # Warn, with thread stack dumps, when a worker takes longer than this to produce a batch (null disables). A worker's
 # first batch also fills the shuffle and packing buffers, and so gets the longer initial timeout (null -> the same).
 watchdog_timeout_seconds: 60
@@ -33,6 +54,10 @@ watchdog_initial_timeout_seconds: 600
 # Virtual-epoch length in packed batches. null -> runners.train estimates one true pass from the
 # dataset's manifests scaled by the DDP world size.
 limit_train_batches: null
+# Expected fraction of each pack's budget that packing fills, used only by that estimate (ignored when
+# limit_train_batches is set). ~0.95-0.96 is observed with next-fit packing and a 4096-group packing buffer; lower it
+# with a smaller packing_buffer_size.
+estimated_occupancy: 0.95
 limit_val_batches: 32
 limit_test_batches: 32
 # Split `predict` makes a single pass over, and an optional cap on that pass (null -> the whole split)

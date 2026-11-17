@@ -17,3 +17,19 @@ command: train
 # Resuming finds checkpoints in a stable `output` directory, so avoid timestamped (e.g., Hydra's default) directories.
 # Stale checkpoints in `output` from a previous run will be resumed, so use a new directory to start over.
 resume_from: null
+
+# Guard against numerical collapse. Skips (with a warning) any optimizer step whose training loss or gradients are
+# non-finite on any DDP rank, stops training after `max_consecutive_nonfinite` consecutive skipped steps or (16-mixed
+# only) once the GradScaler scale falls below `min_grad_scale`, and refuses to save a checkpoint with non-finite
+# weights/optimizer state or a zero GradScaler scale. Also logs `lr` every step and the pre-clip `grad_norm` (and
+# `grad_scale` under 16-mixed) every `trainer.log_every_n_steps` steps. Enabled even if this config is absent; disable
+# with `numerical_guard.enabled=false`.
+numerical_guard:
+  enabled: true
+  max_consecutive_nonfinite: 50
+  min_grad_scale: 0.00390625  # 2**-8
+  # Check every N optimizer steps. Each check costs a gradient-norm reduction and one host-device sync (plus a scalar
+  # all-reduce under DDP). N > 1 amortizes that, but a non-finite step between checks is applied rather than skipped.
+  check_every_n_steps: 1
+  check_checkpoints: true
+  log_diagnostics: true

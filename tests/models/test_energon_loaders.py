@@ -15,17 +15,26 @@ import torch
 import yaml
 
 from npsv3.constants import CHW_LAYOUT, HWC_LAYOUT, LEGACY_REAL_SUFFIX, LEGACY_SIMS_SUFFIX, REAL_SUFFIX, SIMS_SUFFIX
-from npsv3.images.example import EnergonExampleWriter
+from megatron.energon import SkipSample
+
+from npsv3.images.example import EnergonExampleWriter, energon_key
 from npsv3.images.subsets import GenotypeSubset
 from npsv3.models.energon import (
     EnergonMaskedImageDataModule,
     EnergonPackedImageDataModule,
     GroupMeta,
     PackedGroupTaskEncoder,
+    REJECT_NO_SIMULATIONS,
+    REJECT_OVER_BUDGET,
+    REJECT_TOO_MANY_GENOTYPES,
+    REJECT_UNLABELED,
     _group_accepted,
     _group_cost,
     _RestartingLoader,
     estimate_epoch_batches,
+    group_rejection,
+    max_group_cost,
+    predict_rejections,
     prepare_energon_dataset,
 )
 from npsv3.models.loaders import select_packs
@@ -315,6 +324,127 @@ def test_genotype_subset_in_loader(tmp_path):
 
 
 @pytest.mark.slow
+class TestPredictMode:
+    """`require_label=False`/`predict_unlabeled=True`, for genotyping: unlabeled groups are packed, `meta` is
+    `(key, region)`, and no group is dropped without being listed by `predict_rejections`"""
+
+    def _meta(self, **kwargs):
+        return TestTaskEncoder()._meta(**kwargs)
+
+    def test_rejection_reasons(self):
+        options = {"g_max": 36, "r_max": 2, "w_max": IMAGE_WIDTH}
+        assert group_rejection(1, 4, IMAGE_WIDTH, label=None, **options) == REJECT_UNLABELED
+        assert group_rejection(1, 4, IMAGE_WIDTH, label=None, require_label=False, **options) is None
+        assert group_rejection(0, 4, IMAGE_WIDTH, label=None, require_label=False, **options) == REJECT_NO_SIMULATIONS
+        assert group_rejection(1, 40, IMAGE_WIDTH, label=0, **options) == REJECT_TOO_MANY_GENOTYPES
+        assert group_rejection(2, 36, IMAGE_WIDTH, label=0, budget=64, **options) == REJECT_OVER_BUDGET
+        assert _group_accepted(1, 4, IMAGE_WIDTH, label=0, **options)
+
+    def test_max_group_cost(self):
+        assert max_group_cost(budget=256, g_max=36, r_max=2) == 1 + 2 * 36
+        assert max_group_cost(budget=256, g_max=36, r_max=2, w_max=2 * IMAGE_WIDTH, w_bucket=IMAGE_WIDTH) == 2 * (1 + 2 * 36)
+        with pytest.raises(ValueError, match="g_max and r_max"):
+            max_group_cost(budget=256, g_max=None, r_max=2)
+        with pytest.raises(ValueError, match="w_max"):
+            max_group_cost(budget=256, g_max=36, r_max=2, w_bucket=IMAGE_WIDTH)
+
+    def test_budget_must_fit_largest_group(self):
+        with pytest.raises(ValueError, match="largest possible group"):
+            PackedGroupTaskEncoder(budget=64, g_max=36, r_max=2, require_label=False)
+        with pytest.raises(ValueError, match="g_max and r_max"):
+            PackedGroupTaskEncoder(budget=256, require_label=False)
+        with pytest.raises(ValueError, match="single-positive"):
+            PackedGroupTaskEncoder(budget=256, g_max=36, r_max=2, require_label=False, genotype_subset=GenotypeSubset(False))
+        # The same check, up front in the data module
+        with pytest.raises(ValueError, match="largest possible group"):
+            EnergonPackedImageDataModule(train_metadataset_paths=[], batch_size=64, g_max=36, r_max=2, predict_unlabeled=True)
+        PackedGroupTaskEncoder(budget=1 + 2 * 36, g_max=36, r_max=2, require_label=False)
+
+    def test_unlabeled_groups_are_packed(self):
+        encoder = PackedGroupTaskEncoder(budget=256, w_bucket=IMAGE_WIDTH, w_max=IMAGE_WIDTH, g_max=36, r_max=2, require_label=False)
+        sample = encoder.preencode_sample(self._meta(g=4, r=2, label=None, label_rank=None))
+        assert sample.cost == 1 + 2 * 4
+        with pytest.raises(SkipSample):
+            encoder.preencode_sample(self._meta(g=4, r=0, label=None, label_rank=None))
+
+
+def _build_unlabeled_dataset(output_dir, *, num_groups=60, num_shards=2, seed=20261107, oversized=()):
+    """Write unlabeled groups (as genotyping does), with `oversized` indices given more genotypes than `g_max=36`"""
+    rng = np.random.default_rng(seed)
+    writers = [EnergonExampleWriter(shard, output_dir) for shard in range(num_shards)]
+    regions = {}
+    try:
+        for index in range(num_groups):
+            num_genotypes = 45 if index in oversized else int(rng.integers(3, 37))
+            num_replicates = 1 + index % 2
+            region = Range(f"chr1:{index * 1000 + 1}-{index * 1000 + 500}")
+            sample_name = "HG00733"
+            sims = np.full(
+                (num_replicates, num_genotypes, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), index % 251, dtype=np.uint8
+            )
+            writers[index % num_shards].write(
+                {
+                    "region": str(region),
+                    "image": np.full((IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS), index % 251, dtype=np.uint8),
+                    "sim.images": sims,
+                    "num_genotypes": num_genotypes,
+                },
+                region=region,
+                sample_name=sample_name,
+            )
+            regions[energon_key(sample_name, region)] = (str(region), num_replicates, num_genotypes, index % 251)
+    finally:
+        for writer in writers:
+            writer.close()
+    return prepare_energon_dataset(output_dir), regions
+
+
+class TestPredictUnlabeled:
+    @pytest.mark.parametrize("num_workers", [0, 2])
+    def test_every_group_is_predicted_or_rejected(self, tmp_path, num_workers):
+        oversized = {5, 17}
+        dataset, regions = _build_unlabeled_dataset(str(tmp_path / "unlabeled"), oversized=oversized)
+        dm = _make_dm(dataset, predict_unlabeled=True, num_workers=num_workers)
+
+        rejected = dm.predict_rejections()
+        assert {row["key"]: row["reason"] for row in rejected} == {
+            key: REJECT_TOO_MANY_GENOTYPES for key, (_region, _r, g, _base) in regions.items() if g > 36
+        }
+        assert all(row["region"] == regions[row["key"]][0] and row["sample"] == "HG00733" for row in rejected)
+        # The module-level scan agrees
+        assert predict_rejections(dataset, budget=256, w_bucket=IMAGE_WIDTH, w_max=IMAGE_WIDTH, g_max=36, r_max=2) == rejected
+
+        predicted = {}
+        for batch in dm.predict_dataloader():
+            assert torch.all(batch.genotype_label < 0), "Unlabeled groups have no genotype label"
+            assert torch.all(batch.labels[: int(batch.offsets[-1])] == 0), "Unlabeled groups have all-zero ranks"
+            assert batch.positive_indices().numel() == 0
+            for group, (key, region) in enumerate(batch.meta):
+                assert key not in predicted, "Each group is predicted exactly once"
+                expected_region, num_replicates, num_genotypes, base = regions[key]
+                assert region == expected_region
+                assert int(batch.num_genotypes[group]) == num_genotypes
+                start, end = int(batch.offsets[group]), int(batch.offsets[group + 1])
+                assert end - start == num_replicates * num_genotypes
+                assert torch.all(batch.images[start:end] == base), "Support pixels belong to the group named by meta"
+                predicted[key] = region
+        dm.teardown()
+
+        # No silent drops: every group is either predicted or listed as rejected
+        assert set(predicted) | {row["key"] for row in rejected} == set(regions)
+        assert not set(predicted) & {row["key"] for row in rejected}
+
+    def test_labeled_predict_is_unchanged(self, energon_dataset):
+        """Without `predict_unlabeled`, the predict split is still labeled groups with region `meta`"""
+        dm = _make_dm(energon_dataset)
+        batch = next(iter(dm.predict_dataloader()))
+        assert all(isinstance(region, str) for region in batch.meta)
+        assert torch.all(batch.genotype_label >= 0)
+        with pytest.raises(ValueError, match="predict_unlabeled"):
+            dm.predict_rejections()
+        dm.teardown()
+
+
 class TestEnergonPackedImageDataModule:
     def test_round_trip(self, energon_dataset):
         """Pixels read back through the loader match what the writer put in."""

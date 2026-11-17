@@ -27,7 +27,6 @@ from megatron.energon import (
     Cooker,
     CrudeJsonlDatasetFactory,
     FileStore,
-    FileStoreCachePool,
     Lazy,
     Sample,
     SkipSample,
@@ -58,6 +57,7 @@ from npsv3.constants import (
 )
 from npsv3.images.sequence_compare import decode_comparison_record, load_comparison_records
 from npsv3.images.subsets import GenotypeSubset, genotype_subset_from_config
+from npsv3.models.cache_pool import CachePool
 from npsv3.models.copositive import CopositiveTargets, copositive_targets_from_config
 from npsv3.models.filters import (
     ExampleFilter,
@@ -75,6 +75,7 @@ from npsv3.models.loaders import (
     ntuple,
     select_packs,
 )
+from npsv3.util import aux_io
 
 try:
     # ISA-L's inflate is ~2x faster than zlib's on the pixel members (installed on x86_64/aarch64 with xopen)
@@ -86,6 +87,10 @@ try:
     from compression import zstd  # Python 3.14+
 except ImportError:
     from backports import zstd
+
+# Cap multistorageclient's read buffer and serve aux part reads from a block cache (see `npsv3.util.aux_io`). At
+# import, so forked DataLoader workers inherit the patches.
+aux_io.install()
 
 
 @edataclass
@@ -119,6 +124,9 @@ class GroupMeta(Sample):
     #: by `PackedGroupTaskEncoder.cook_crude_sample` with `copositive` targets.
     positive_weights: list[float] | None = None
     denominator_weights: list[float] | None = None
+    #: The example's key (`energon_key`), which names its pixel members. Distinct from energon's `__key__`, which for
+    #: the jsonl metadata is just the row number.
+    key: str | None = None
 
 
 def _sample_json(sample: dict) -> dict:
@@ -168,6 +176,7 @@ def cook_group(sample: dict, imgs: FileStore, cache, **_aux: FileStore) -> Group
         channels_first=layout == CHW_LAYOUT,
         genotype_idxs=None if meta.get("genotype_idxs") is None else [int(idx) for idx in meta["genotype_idxs"]],
         num_haplotypes=None if meta.get("num_haplotypes") is None else int(meta["num_haplotypes"]),
+        key=key,
     )
 
 
@@ -179,26 +188,66 @@ def _group_cost(r: int, g: int, w: int, w_bucket: int | None) -> int:
     return slots
 
 
-def _group_accepted(
-    r: int, g: int, w: int, *, label: int | None, g_max: int | None, r_max: int | None, w_max: int | None
-) -> bool:
-    """Same reject rules as `PackedGroupTaskEncoder.preencode_sample`, without needing a `GroupMeta`."""
+#: Why `PackedGroupTaskEncoder.preencode_sample` rejects a group (see `group_rejection`)
+REJECT_NO_SIMULATIONS = "NoSimulations"
+REJECT_UNLABELED = "Unlabeled"
+REJECT_TOO_MANY_GENOTYPES = "TooManyGenotypes"
+REJECT_TOO_MANY_REPLICATES = "TooManyReplicates"
+REJECT_TOO_WIDE = "TooWide"
+REJECT_OVER_BUDGET = "OverBudget"
+
+
+def group_rejection(
+    r: int,
+    g: int,
+    w: int,
+    *,
+    label: int | None,
+    g_max: int | None,
+    r_max: int | None,
+    w_max: int | None,
+    require_label: bool = True,
+    budget: int | None = None,
+    w_bucket: int | None = None,
+) -> str | None:
+    """Why `PackedGroupTaskEncoder.preencode_sample` would reject a group (one of the `REJECT_*` reasons), None if it
+    would be packed. Metadata-only, so the same rules can be applied without a `GroupMeta` (e.g., `predict_rejections`).
+
+    Args:
+        r, g, w: Replicates, (selected) genotypes and width of the group
+        label: The group's label, None if unlabeled
+        g_max, r_max, w_max: Same meaning as on `PackedGroupTaskEncoder`
+        require_label: Reject unlabeled groups
+        budget: Also reject groups whose pack cost exceeds this
+        w_bucket: Width bucket size for the pack cost
+    """
     if g < 1 or r < 1:
         # No simulations, so nothing for the metric-learning objective to score against
-        return False
-    if label is None:
+        return REJECT_NO_SIMULATIONS
+    if require_label and label is None:
         # No resolvable truth genotype (e.g. the true haplotype wasn't found even after population
         # top-up), so `label_rank` is all zeros -- InfoNCE.forward's per-variant softmax has no positive
         # to normalize against and torch.mean over the empty positives tensor is NaN, poisoning the
         # whole batch's loss. Reject rather than packing a group that can't be scored.
-        return False
+        return REJECT_UNLABELED
     if g_max is not None and g > g_max:
-        return False
+        return REJECT_TOO_MANY_GENOTYPES
     if r_max is not None and r > r_max:
-        return False
+        return REJECT_TOO_MANY_REPLICATES
     if w_max is not None and w > w_max:
-        return False
-    return True
+        return REJECT_TOO_WIDE
+    if budget is not None and _group_cost(r, g, w, w_bucket) > budget:
+        # Never give an oversized group its own bin; it would blow the fixed pack shape
+        return REJECT_OVER_BUDGET
+    return None
+
+
+def _group_accepted(
+    r: int, g: int, w: int, *, label: int | None, g_max: int | None, r_max: int | None, w_max: int | None
+) -> bool:
+    """Same reject rules as `PackedGroupTaskEncoder.preencode_sample` (for labeled training), without needing a
+    `GroupMeta` or the pack budget."""
+    return group_rejection(r, g, w, label=label, g_max=g_max, r_max=r_max, w_max=w_max) is None
 
 
 def _select_genotypes(row: Mapping, genotype_subset: GenotypeSubset | None) -> list[int] | None:
@@ -243,6 +292,25 @@ def _fetch_image(lazy: Lazy, sample: Any, shape: tuple[int, ...], *, channels_fi
     *leading, channels, height, width = shape
     return pixels.reshape(*leading, height, width, channels).movedim(-1, -3)
 
+def max_group_cost(
+    *, budget: int, g_max: int | None, r_max: int | None, w_max: int | None = None, w_bucket: int | None = None
+) -> int:
+    """The largest pack cost of any group `PackedGroupTaskEncoder` doesn't otherwise reject, i.e., ``1 + r_max*g_max``
+    (times the width buckets of a `w_max`-wide group, if bucketed), which must be at most `budget` for every such group
+    to be packed.
+
+    Raises:
+        ValueError: If `g_max` or `r_max` is None (so there's no bound), or if bucketed (`w_bucket`) without `w_max`.
+    """
+    if g_max is None or r_max is None:
+        msg = f"g_max and r_max are required to bound the group cost by the batch size ({budget}); got {g_max=}, {r_max=}"
+        raise ValueError(msg)
+    if w_bucket and w_max is None:
+        msg = f"w_max is required to bound the group cost by the batch size ({budget}) with w_bucket={w_bucket}"
+        raise ValueError(msg)
+    return _group_cost(r_max, g_max, w_max or 0, w_bucket)
+
+
 # The base `TaskEncoder`'s `T_encoded_sample` type parameter is `Any` here rather than a concrete type:
 # `select_samples_to_pack` uses it for a flat `GroupMeta` (pre-pack metadata), while `pack_selected_samples`/`batch`
 # use it for the materialized `PackedGroupBatch` (post-pack), and no single type can honor both (packing genuinely
@@ -274,6 +342,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
         filters: Sequence[ExampleFilter] = (),
         genotype_subset: GenotypeSubset | None = None,
         copositive: CopositiveTargets | None = None,
+        require_label: bool = True,
     ):
         """
         Args:
@@ -292,8 +361,26 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
                 reflect the subset, but all of the group's simulated images are still fetched.
             copositive: Attach these co-positive aware targets to each (labeled) group for `CopositiveInfoNCE` (see
                 `npsv3.models.copositive`). None for the single-positive targets.
+            require_label: Reject unlabeled groups, as training and evaluation need. False is the predict mode used for
+                genotyping: unlabeled groups are packed with all-zero `label_rank`s and no `genotype_label` (i.e.,
+                `padding_value`), and each group's `meta` is its `(key, region)` rather than just its region. So that
+                no group is silently dropped, it requires `g_max` and `r_max` and that any group within them (and
+                `w_max`) fits in the budget (see `max_group_cost`). Groups rejected anyway (e.g., more genotypes than
+                `g_max`) can be listed with `predict_rejections`.
         """
         super().__init__()
+        if not require_label:
+            if genotype_subset is not None or copositive is not None:
+                msg = "Predict mode (`require_label=False`) packs every genotype with single-positive targets"
+                raise ValueError(msg)
+            worst = max_group_cost(budget=budget, g_max=g_max, r_max=r_max, w_max=w_max, w_bucket=w_bucket)
+            if worst > budget:
+                msg = (
+                    f"The batch size ({budget}) is less than the largest possible group's cost ({worst} image slots for "
+                    f"r_max={r_max}, g_max={g_max}, w_max={w_max}, w_bucket={w_bucket}), so groups could be dropped"
+                )
+                raise ValueError(msg)
+        self.require_label = require_label
         self.budget = budget
         self.w_bucket = w_bucket
         self.w_max = w_max
@@ -345,16 +432,36 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             self.genotype_subset,
         )
         g = sample.g if sample.selected is None else len(sample.selected)
-        if not _group_accepted(sample.r, g, sample.w, label=sample.label, g_max=self.g_max, r_max=self.r_max, w_max=self.w_max):
+        if self._rejection(sample.r, g, sample.w, sample.label) is not None:
             raise SkipSample
 
         sample.cost = _group_cost(sample.r, g, sample.w, self.w_bucket)
-        if sample.cost > self.budget:
-            # Never give an oversized group its own bin; it would blow the fixed pack shape
-            raise SkipSample
         return sample
 
+    def _rejection(self, r: int, g: int, w: int, label: int | None) -> str | None:
+        """Why this encoder would reject a group, None if it would be packed (see `group_rejection`)"""
+        return group_rejection(
+            r, g, w, label=label, g_max=self.g_max, r_max=self.r_max, w_max=self.w_max,
+            require_label=self.require_label, budget=self.budget, w_bucket=self.w_bucket,
+        )
+
     def select_samples_to_pack(self, samples: list[GroupMeta]) -> list[list[GroupMeta]]:
+        # `select_packs` fills packs next-fit in buffer order (the buffer is already shuffled), so every round ends in
+        # one partial pack and `packing_buffer_size` sets the fraction of wasted steps.
+        # TODO: Push back the under-filled remainder instead of emitting it, once energon's
+        # `PackedSamplesOutput(packs=..., pushback=...)` return from `select_samples_to_pack` is in a release (it is
+        # on `main` but not in 7.4.1; see
+        # https://github.com/NVIDIA/Megatron-Energon/blob/f3ab65fcdde06781fc58258984f7bcbc4c35eb86/src/megatron/energon/wrappers/packing_dataset.py#L476).
+        # Simulated (notebooks/loss_variability.ipynb in npsv3-experiments), pushing back any pack below ~0.98 x budget
+        # brings a 512-group buffer to within 0.4% of the ideal number of packs. Energon puts pushed-back samples first in
+        # the next buffer, so a buffer-order fill packs them first. To bound delays without relying on that ordering:
+        #   - order by pushback count (oldest first)
+        #   - never push back a pack holding a group already pushed back `max_age` (~2) times
+        #   - push back nothing when `len(samples) < packing_buffer_size` (the end-of-stream flush); otherwise energon
+        #     raises after `pre_packer_failure_tolerance` rounds
+        #   - a buffer too small to fill one pack would push everything back forever, so warn when
+        #     packing_buffer_size x mean cost isn't several times the budget
+        # Pushback would also let `packing_buffer_size` drop back toward 512.
         packs = select_packs(
             [(sample.cost, sample.w // self.w_bucket if self.w_bucket else 0) for sample in samples],
             budget=self.budget,
@@ -369,10 +476,12 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
             real = _fetch_image(sample.real, sample, image_shape, channels_first=sample.channels_first)
             sims = _fetch_image(sample.sims, sample, (sample.r, sample.g, *image_shape), channels_first=sample.channels_first)
 
-            # `preencode_sample` already rejected unlabeled groups (`_group_accepted`), so `label_rank` is
-            # always defined here.
-            assert sample.label_rank is not None, "Unlabeled group reached pack_selected_samples"
-            label_rank = torch.tensor(sample.label_rank, dtype=torch.long)
+            if sample.label_rank is not None:
+                label_rank = torch.tensor(sample.label_rank, dtype=torch.long)
+            else:
+                # Unless predicting (`require_label=False`), `preencode_sample` rejects unlabeled groups
+                assert not self.require_label, "Unlabeled group reached pack_selected_samples"
+                label_rank = torch.zeros(sample.g, dtype=torch.long)
             label = sample.label
             positive_weights = denominator_weights = None
             if sample.positive_weights is not None and sample.denominator_weights is not None:
@@ -392,7 +501,7 @@ class PackedGroupTaskEncoder(TaskEncoder[GroupMeta, Any, PackedBatch, PackedBatc
                     support=sims,
                     label_rank=label_rank,
                     genotype_label=label,
-                    meta=sample.region,
+                    meta=sample.region if self.require_label else (sample.key, sample.region),
                     positive_weights=positive_weights,
                     denominator_weights=denominator_weights,
                 )
@@ -633,7 +742,7 @@ def estimate_epoch_batches(
     g_max: int | None = None,
     r_max: int | None = None,
     world_size: int = 1,
-    occupancy: float = 0.9,
+    occupancy: float = 0.95,
     filters: Sequence[ExampleFilter] = (),
     genotype_subset: GenotypeSubset | None = None,
 ) -> int:
@@ -647,8 +756,8 @@ def estimate_epoch_batches(
     Sums each accepted group's pack cost (`_group_cost`, applying the same reject rules
     `PackedGroupTaskEncoder.preencode_sample` would via `_group_accepted`) across all given trees'
     jsonl files, divides by `budget * occupancy` -- a bin-packing lower bound corrected for the
-    sub-100% occupancy packing actually achieves in practice (see `test_occupancy`, typically >90%) --
-    then by `world_size`, since `wds.split_by_node`-style sharding gives each DDP rank about
+    sub-100% occupancy packing actually achieves in practice (~95-96% with next-fit packing and the default 4096-group
+    packing buffer) -- then by `world_size`, since `wds.split_by_node`-style sharding gives each DDP rank about
     `1/world_size` of the shards.
 
     This is an approximation, not an exact count: packing is greedy and each rank's shard slice packs
@@ -669,8 +778,10 @@ def estimate_epoch_batches(
         w_bucket, w_max, g_max, r_max: Same meaning as on `PackedGroupTaskEncoder`.
         world_size: Number of DDP ranks the estimate should be divided across. Defaults to 1 (the
             whole split, single-process).
-        occupancy: Expected fraction of each pack's budget that packing actually fills. Defaults to
-            0.9, a conservative reading of `test_occupancy`'s >0.90 sanity threshold.
+        occupancy: Expected fraction of each pack's budget that packing actually fills. Defaults to 0.95, the
+            occupancy observed with next-fit packing and the default 4096-group packing buffer (set by
+            `data.estimated_occupancy` in training). Every packing round ends in one partial pack, so a smaller
+            `packing_buffer_size` fills less (~0.72 at 512 groups and a 2048-slot budget).
         filters: Exclude the groups these filters reject, as `PackedGroupTaskEncoder` would (see
             `npsv3.models.filters`). Comparison records, if needed, are read in bulk from each tree's
             `comparisons` aux tree.
@@ -709,6 +820,67 @@ def estimate_epoch_batches(
     packs = total_cost / (budget * occupancy) / world_size
     logging.info(f"Estimated {packs:.1f} packs given {total_cost} images, a batch size of {budget}, a world size of {world_size}, and an estimated occupancy of {occupancy}")
     return max(1, math.ceil(packs))
+
+
+def predict_rejections(
+    metadataset_paths: str | Sequence[str],
+    *,
+    budget: int,
+    split_part: str = "train",
+    w_bucket: int | None = None,
+    w_max: int | None = None,
+    g_max: int | None = None,
+    r_max: int | None = None,
+) -> list[dict]:
+    """List the groups a predict-mode (`require_label=False`) `PackedGroupTaskEncoder` would reject, so that they can be
+    reported (e.g., with FILTER `Rejected`) rather than silently dropped.
+
+    Like `estimate_epoch_batches`, this streams the metadata jsonl files and applies the same rules as
+    `preencode_sample` (`group_rejection`) without touching any pixels. Every group not listed is packed.
+
+    Args:
+        metadataset_paths, split_part: As for `estimate_epoch_batches`
+        budget, w_bucket, w_max, g_max, r_max: Same meaning as on `PackedGroupTaskEncoder`
+
+    Returns:
+        One `{key, region, sample, reason}` row per rejected group, with `reason` one of the `REJECT_*` values
+    """
+    paths = [metadataset_paths] if isinstance(metadataset_paths, str) else list(metadataset_paths)
+    meta_paths = [meta_path for path in paths for meta_path, _aux in _split_leaves(path, split_part)]
+    return _jsonl_rejections(meta_paths, budget=budget, w_bucket=w_bucket, w_max=w_max, g_max=g_max, r_max=r_max)
+
+
+def _jsonl_rejections(
+    meta_paths: Sequence[Path],
+    *,
+    budget: int,
+    w_bucket: int | None,
+    w_max: int | None,
+    g_max: int | None,
+    r_max: int | None,
+) -> list[dict]:
+    """`predict_rejections` for metadata jsonl files"""
+    rejected = []
+    for meta_path in meta_paths:
+        with meta_path.open() as jsonl_file:
+            for line in jsonl_file:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                reason = group_rejection(
+                    int(row["r"]), int(row["g"]), int(row["w"]), label=row.get("label"), g_max=g_max, r_max=r_max,
+                    w_max=w_max, require_label=False, budget=budget, w_bucket=w_bucket,
+                )
+                if reason is not None:
+                    rejected.append({
+                        "key": row["key"],
+                        "region": row.get("region", row["key"]),
+                        "sample": row.get("sample"),
+                        "reason": reason,
+                    })
+    if rejected:
+        logging.warning("%d groups can't be packed for prediction and will be reported as rejected", len(rejected))
+    return rejected
 
 
 @contextlib.contextmanager
@@ -805,9 +977,21 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         batch_size (int, optional): Image-slot budget per pack. Defaults to 256.
         w_bucket (int | None, optional): Width bucket size. Defaults to None (single bucket).
         w_max / g_max / r_max (optional): Reject groups exceeding these. Defaults to None.
-        packing_buffer_size (int, optional): Groups of lookahead given to `select_packs`. Defaults to 512.
+        packing_buffer_size (int, optional): Groups of lookahead given to `select_packs`. Packs are filled next-fit in
+            (shuffled) buffer order, so every round ends in one partial pack and the buffer size sets the fraction of
+            wasted steps: at a 2048-slot budget, 512 groups fill only ~2.1 packs (~39% extra steps), while 4096 groups
+            bring that to ~4%. Each buffered group holds ~3-5 KB of metadata in RAM plus ~26 KiB of compressed pixels
+            prefetched into the node-local cache pool, i.e., ~20 MB RAM and ~106 MiB disk per DataLoader worker at
+            4096. A larger buffer also delays each worker's first pack and enlarges checkpointed restore state.
+            Defaults to 4096.
         shuffle_buffer_size (int, optional): Sample shuffle buffer. Defaults to 4096.
         max_samples_per_sequence (int | None, optional): Limit samples drawn per shard sequence. Defaults to 64.
+        parallel_shard_iters (int | None, optional): Sequences (of up to `max_samples_per_sequence` consecutive samples)
+            each train worker reads from each dataset at once, i.e., energon's `parallel_shard_iters`. A worker
+            interleaves (blended datasets) x this many sequences, which sets the aux block cache's working set (see
+            `aux_block_cache_mbytes`). Fewer mix the samples less before the shuffle buffer. Changing it changes the
+            train sample order, and so must match a checkpoint being resumed. None uses energon's default (16).
+            Defaults to None.
         num_workers (int, optional): DataLoader workers per rank. Defaults to 1.
         cache_workers (int, optional): Threads prefetching pixels into the cache pool, in *each* DataLoader
             worker (energon gives every worker its own pool after forking). Defaults to 4.
@@ -815,6 +999,20 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             that rank's DataLoader workers. Energon's pool counts its size per process, so the cap is divided
             evenly among the worker processes that can hold cache entries at once (`_cache_pool_gbytes`). The
             failure mode of an uncapped pool is a confusing ENOSPC deep inside a worker. Defaults to 64.
+        read_buffer_bytes (int | None, optional): Read buffer for binary files opened by energon/multistorageclient
+            with default buffering, instead of the filesystem's `st_blksize` (4 MiB on GPFS, which turns every
+            random-access read into a 4 MiB read). 0 keeps Python's default. None leaves the process-wide setting (the
+            `NPSV3_READ_BUFFER_BYTES` environment variable, or 64 KiB) unchanged. See `npsv3.util.aux_io`. Defaults to
+            None.
+        aux_block_bytes (int | None, optional): Block size of the aux (pixel) read cache, which serves each sample's
+            parts from aligned blocks of its (on-disk ordered) shard read with `pread`. None leaves the setting
+            (`NPSV3_AUX_BLOCK_BYTES`, or 256 KiB) unchanged. Defaults to None.
+        aux_block_cache_mbytes (float | None, optional): RAM for that cache, in MiB, in *each* process reading aux data,
+            i.e., every DataLoader worker (train and val) of every rank, on top of `max_cache_size_gbytes` (which is on
+            disk). It must hold about one block per sequence a worker reads at once, i.e., (blended datasets) x
+            `parallel_shard_iters` blocks, or it reads blocks that are evicted before they are used (see the table in
+            `npsv3.util.aux_io`). 0 disables the cache. None leaves the setting (`NPSV3_AUX_BLOCK_CACHE_MBYTES`, or 512) unchanged. Defaults to
+            None.
         watchdog_timeout_seconds (float | None, optional): Warn (with thread stack dumps) when a worker takes
             longer than this to produce a batch. None disables the watchdog. Defaults to 60.
         watchdog_initial_timeout_seconds (float | None, optional): Same, for each worker's *first* batch, which
@@ -828,6 +1026,15 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             Defaults to "train", since `prepare_energon_dataset` writes only that split.
         limit_predict_batches (int | None, optional): Cap on the prediction pass, in packed batches.
             Defaults to None, i.e. the entire split.
+        predict_unlabeled (bool, optional): Predict mode for genotyping (`PackedGroupTaskEncoder`'s
+            `require_label=False`): `predict_dataloader` packs unlabeled groups too, and each batch's `meta` is the
+            groups' `(key, region)`. It requires `g_max` and `r_max` (and `w_max` if bucketed) that fit in
+            `batch_size`, checked at construction. List the groups it rejects anyway with `predict_rejections`.
+            Only the predict split is affected. Defaults to False (labeled groups only, `meta` is the regions).
+        rank / world_size (int | None, optional): Read this rank's slice of the shards, out of `world_size`,
+            instead of the trainer's rank. For independent processes that each run their own single-device
+            `Trainer` over a slice of the data, e.g., the genotyper's one process per GPU (see
+            `npsv3.genotyping.predict`). Both or neither. Defaults to None (the trainer's rank and world size).
         pad (bool, optional): Pad packs to batch_size. Defaults to True.
         repeat (bool, optional): Repeat the train dataset indefinitely, so `limit_train_batches` defines
             a virtual epoch (see `train_dataloader`). Defaults to True; pass False for a single finite
@@ -860,18 +1067,25 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         w_max: int | None = None,
         g_max: int | None = None,
         r_max: int | None = None,
-        packing_buffer_size: int = 512,
+        packing_buffer_size: int = 4096,
         shuffle_buffer_size: int = 4096,
         max_samples_per_sequence: int | None = 64,
+        parallel_shard_iters: int | None = None,
         num_workers: int = 1,
         cache_workers: int = 4,
         max_cache_size_gbytes: float = 64,
+        read_buffer_bytes: int | None = None,
+        aux_block_bytes: int | None = None,
+        aux_block_cache_mbytes: float | None = None,
         watchdog_timeout_seconds: float | None = 60,
         watchdog_initial_timeout_seconds: float | None = None,
         limit_val_batches: int | None = 32,
         limit_test_batches: int | None = 32,
         predict_split: str = "train",
         limit_predict_batches: int | None = None,
+        predict_unlabeled: bool = False,
+        rank: int | None = None,
+        world_size: int | None = None,
         pad: bool = True,
         mean=(0.5,),
         std=(0.5,),
@@ -886,6 +1100,12 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         super().__init__()
         # Filters are objects (once instantiated by Hydra), which don't belong in checkpointed hyperparameters
         self.save_hyperparameters(ignore=["filters", "genotype_subset", "copositive"])
+        # Process-wide (and exported to the environment), so the DataLoader workers forked later inherit them
+        aux_io.configure(
+            read_buffer_bytes=read_buffer_bytes,
+            aux_block_bytes=aux_block_bytes,
+            aux_block_cache_mbytes=aux_block_cache_mbytes,
+        )
         self.train_filters = build_filters(filters)
         self.train_genotype_subset = genotype_subset_from_config(genotype_subset)
         if self.train_genotype_subset is not None:
@@ -932,6 +1152,14 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             if self.train_copositive is not None:
                 logging.info("Training with co-positive targets %s", self.train_copositive)
 
+        if (rank is None) != (world_size is None) or (rank is not None and not 0 <= rank < world_size):
+            msg = f"rank and world_size must be given together, with 0 <= rank < world_size; got {rank=}, {world_size=}"
+            raise ValueError(msg)
+
+        if predict_unlabeled:
+            # Fail at setup, rather than once the (possibly spawned) predict workers start, if any group could be dropped
+            self._task_encoder(require_label=False)
+
         # Normalization moves to the GPU (`on_after_batch_transfer`) to reduce the size of the data transferred (uint8 vs float32).
         self.transforms = transforms.Compose(
             [
@@ -944,13 +1172,15 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         # Loader state from a checkpoint, held until `train_dataloader` creates the loader (see `load_state_dict`)
         self._pending_loader_state = None
         # One pool per split (see `_make_cache_pool`)
-        self._cache_pools: dict[str, FileStoreCachePool] = {}
+        self._cache_pools: dict[str, CachePool] = {}
 
     def _task_encoder(
         self,
         filters: Sequence[ExampleFilter] = (),
         genotype_subset: GenotypeSubset | None = None,
         copositive: CopositiveTargets | None = None,
+        *,
+        require_label: bool = True,
     ) -> PackedGroupTaskEncoder:
         return PackedGroupTaskEncoder(
             budget=self.hparams["batch_size"],
@@ -962,13 +1192,33 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
             filters=filters,
             genotype_subset=genotype_subset,
             copositive=copositive,
+            require_label=require_label,
+        )
+
+    def predict_rejections(self) -> list[dict]:
+        """The groups of the predict split that `predict_dataloader` rejects (see the module-level `predict_rejections`)"""
+        if not self.hparams["predict_unlabeled"]:
+            msg = "predict_rejections lists the rejections of the predict mode, which needs predict_unlabeled=True"
+            raise ValueError(msg)
+        split = self.hparams["predict_split"]
+        if isinstance(self._metadataset, dict):
+            # `_build_metadataset`'s leaves are already absolute
+            node = self._metadataset["splits"][split]
+            meta_paths = [Path(leaf["path"]) for leaf in (node["blend"] if "blend" in node else [node])]
+        else:
+            meta_paths = [meta_path for meta_path, _aux in _split_leaves(self._metadataset, split)]
+        return _jsonl_rejections(
+            meta_paths, budget=self.hparams["batch_size"],
+            **{name: self.hparams[name] for name in ("w_bucket", "w_max", "g_max", "r_max")},
         )
 
     def _worker_config(self) -> WorkerConfig:
         # Lightning owns process-group initialization, so rank comes from the trainer rather than
         # from torch.distributed directly.
         rank, world_size = 0, 1
-        if self.trainer is not None:
+        if self.hparams["rank"] is not None:
+            rank, world_size = self.hparams["rank"], self.hparams["world_size"]
+        elif self.trainer is not None:
             rank, world_size = self.trainer.global_rank, self.trainer.world_size
         return WorkerConfig(
             rank=rank,
@@ -999,7 +1249,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
         processes = max(1, self.hparams["num_workers"]) * self._concurrent_loaders(split)
         return self.hparams["max_cache_size_gbytes"] / processes
 
-    def _make_cache_pool(self, split: str) -> FileStoreCachePool:
+    def _make_cache_pool(self, split: str) -> CachePool:
         if split not in self._cache_pools:
             cache_dir = self.hparams["cache_dir"] or tempfile.gettempdir()
             os.makedirs(cache_dir, exist_ok=True)
@@ -1008,7 +1258,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 "Energon %s cache pool in %s (capped at %.1f GB per process, %.1f GB per rank in total)",
                 split, cache_dir, gbytes, self.hparams["max_cache_size_gbytes"],
             )
-            self._cache_pools[split] = FileStoreCachePool(
+            self._cache_pools[split] = CachePool(
                 # A Path, not a str: energon joins onto it with `/`
                 parent_cache_dir=Path(cache_dir),
                 num_workers=self.hparams["cache_workers"],
@@ -1043,6 +1293,8 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 max_samples_per_sequence=self.hparams["max_samples_per_sequence"],
                 task_encoder=self._task_encoder(self.train_filters, self.train_genotype_subset, self.train_copositive),
                 repeat=self.hparams["repeat"],
+                # Only when set, so that energon's own default applies otherwise
+                **({"parallel_shard_iters": psi} if (psi := self.hparams["parallel_shard_iters"]) is not None else {}),
             )
         self._loader = self._make_loader(dataset, "train")
         if self._pending_loader_state is not None:
@@ -1089,7 +1341,7 @@ class EnergonPackedImageDataModule(L.LightningDataModule):
                 batch_size=1,
                 packing_buffer_size=self.hparams["packing_buffer_size"],
                 limit=self.hparams["limit_predict_batches"],
-                task_encoder=self._task_encoder(),
+                task_encoder=self._task_encoder(require_label=not self.hparams["predict_unlabeled"]),
             )
         return _OpaqueIterable(self._make_loader(dataset, "predict"))
 

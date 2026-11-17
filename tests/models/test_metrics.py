@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import subprocess
 import sys
@@ -81,7 +82,39 @@ class TestExponentialMovingAverage:
         values = [1.0, 5.0, 1.0, 5.0, 1.0, 5.0]
         for value in values:
             result = metric(torch.tensor(value))
-        assert 1.0 < result < 5.0
+        # Strictly inside (not equal to the last value, within float rounding), as the raw value would be
+        assert 1.5 < result < 4.5
+
+    def test_matches_hand_computed_bias_corrected_ema(self):
+        """forward() returns the running average (not the current value), skipping non-finite values"""
+        decay = 0.9
+        values = [2.0, 4.0, float("nan"), 1.0, float("inf"), 3.0]
+        metric = ExponentialMovingAverage(decay=decay)
+        average, weight = 0.0, 1.0
+        for value in values:
+            result = metric(torch.tensor(value))
+            if math.isfinite(value):
+                average = decay * average + (1 - decay) * value
+                weight *= decay
+            assert result.item() == pytest.approx(average / (1 - weight))
+            assert metric.compute().item() == pytest.approx(average / (1 - weight))
+
+        # Spot-check against the explicit weighted mean of the finite values, newest weighted most
+        finite = [2.0, 4.0, 1.0, 3.0]
+        weights = [decay ** (len(finite) - 1 - i) for i in range(len(finite))]
+        assert result.item() == pytest.approx(sum(w * v for w, v in zip(weights, finite, strict=True)) / sum(weights))
+
+    def test_differs_from_raw_value(self):
+        """Regression test: torchmetrics' default forward() returned the bias-corrected EMA of the current value alone,
+        i.e., the raw value"""
+        metric = ExponentialMovingAverage(decay=0.9)
+        metric(torch.tensor(1.0))
+        assert metric(torch.tensor(5.0)).item() == pytest.approx((0.09 * 1.0 + 0.1 * 5.0) / 0.19)
+
+    def test_only_nonfinite_values_is_nan(self):
+        metric = ExponentialMovingAverage(decay=0.9)
+        assert torch.isnan(metric(torch.tensor(float("nan"))))
+        assert metric(torch.tensor(2.0)).item() == pytest.approx(2.0)
 
     def test_rejects_out_of_range_decay(self):
         with pytest.raises(ValueError, match="decay"):

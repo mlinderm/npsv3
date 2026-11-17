@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
 
 import hydra
 import lightning as L
@@ -14,7 +15,7 @@ import torch
 from npsv3.images.example import EnergonExampleWriter
 from npsv3.models import runners
 from npsv3.models.energon import prepare_energon_dataset
-from npsv3.models.paired import RecordLossCallback
+from npsv3.models.paired import PackedVariant, RecordLossCallback
 from npsv3.util.range import Range
 
 # Pins the Hydra config groups this module's `dm`/`model` are instantiated from (see `_make_dm`/
@@ -124,6 +125,73 @@ def _standalone_compose(*overrides):
     return hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *overrides])
 
 
+class _TinyEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 4)
+
+    def no_weight_decay(self):
+        return set()
+
+
+def _configured_optimizers(model_config, estimated_stepping_batches=100):
+    """`configure_optimizers` of a `PackedVariant` built with `model_config`'s optimizer/scheduler and a tiny encoder"""
+    cfg = hydra.compose(config_name="config", overrides=[f"model={model_config}"])
+    model = PackedVariant(
+        encoder=_TinyEncoder(),
+        metric=torch.nn.CosineSimilarity(),
+        loss=torch.nn.Identity(),
+        optimizer=hydra.utils.instantiate(cfg.model.optimizer),
+        predictor=torch.nn.Identity(),
+        scheduler=hydra.utils.instantiate(cfg.model.scheduler) if "scheduler" in cfg.model else None,
+    )
+    model.trainer = types.SimpleNamespace(
+        model=model, estimated_stepping_batches=estimated_stepping_batches, current_epoch=0
+    )
+    return model, model.configure_optimizers()
+
+
+class TestPackedVariantConfigureOptimizers:
+    def test_torch_warmup_cosine_steps_per_optimizer_step(self, hydra_setup):  # noqa: ARG002
+        model, ([optimizer], [config]) = _configured_optimizers("paired_packed_inception_infonce", 200)
+        assert isinstance(optimizer, torch.optim.AdamW)
+        assert config["interval"] == "step"
+        scheduler = config["scheduler"]
+        assert isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR)
+
+        # 3% of 200 = 6 warmup steps from 0 to the 1e-3 peak, then cosine to 1% of the peak by step 200
+        lrs = []
+        for _ in range(210):
+            lrs.append(optimizer.param_groups[0]["lr"])
+            optimizer.step()
+            model.lr_scheduler_step(scheduler, None)
+        assert lrs[0] == 0.0
+        assert lrs[6] == pytest.approx(1e-3)
+        assert lrs[200:] == pytest.approx([1e-5] * 10)
+
+    def test_copositive_config_has_schedule(self, hydra_setup):  # noqa: ARG002
+        _, (_, [config]) = _configured_optimizers("paired_packed_inception_copositive_infonce")
+        assert isinstance(config["scheduler"], torch.optim.lr_scheduler.LambdaLR)
+
+    def test_rejects_unbounded_training(self, hydra_setup):  # noqa: ARG002
+        with pytest.raises(ValueError, match="finite"):
+            _configured_optimizers("paired_packed_inception_infonce", float("inf"))
+
+    def test_timm_scheduler_steps_per_epoch(self, hydra_setup):  # noqa: ARG002
+        model, ([optimizer], [config]) = _configured_optimizers("paired_packed_vit_infonce")
+        assert config["interval"] == "epoch"
+        scheduler = config["scheduler"]
+        assert not isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler)
+        # Warmup (warmup_t=5 epochs from warmup_lr_init=1e-4) is driven by the epoch passed to the timm scheduler
+        assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4)
+        model.lr_scheduler_step(scheduler, None)
+        assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4 + (1e-3 - 1e-4) / 5)
+
+    def test_without_scheduler(self, hydra_setup):  # noqa: ARG002
+        _, configured = _configured_optimizers("paired_packed_inception_contrastive")
+        assert isinstance(configured["optimizer"], torch.optim.AdamW)
+
+
 @pytest.mark.slow
 @pytest.mark.cfg_overrides(*CFG_OVERRIDES)
 class TestPackedVariantWithEnergonLoader:
@@ -221,15 +289,23 @@ class TestPackedVariantWithEnergonLoader:
                 *extra,
             ]
             cfg = hydra.compose(config_name="config", overrides=[*CFG_OVERRIDES, *overrides])
+            assert cfg.trainer.precision == "bf16-mixed", "The default (paired) trainer must train with bf16-mixed"
             return runners.train(cfg, output_dir=str(tmp_path))
 
         first = train(1)
         assert os.path.basename(first) == "epoch=0-step=2.ckpt"
         checkpoint = torch.load(first, weights_only=False, map_location="cpu")
         assert "loader" in checkpoint["EnergonPackedImageDataModule"], "The loader position must be checkpointed"
+        # The default (paired) trainer trains with bf16-mixed, which has no GradScaler state, and the warmup-cosine
+        # schedule steps every optimizer step
+        assert "MixedPrecision" not in checkpoint
+        assert checkpoint["lr_schedulers"][0]["last_epoch"] == 2
+        assert any(key.startswith("NumericalGuard") for key in checkpoint["callbacks"])
 
         resumed = train(2, "resume_from=last")
         assert os.path.basename(resumed) == "epoch=1-step=4.ckpt", "Resumed training must continue the epoch/step"
+        resumed_checkpoint = torch.load(resumed, weights_only=False, map_location="cpu")
+        assert resumed_checkpoint["lr_schedulers"][0]["last_epoch"] == 4, "The LR schedule must resume where it left off"
 
     def test_loss_records_region_losses(self, paired_energon_datasets, tmp_path):
         """`runners.predict` (the `loss` command, which defaults to the test split) must run over the energon loader and

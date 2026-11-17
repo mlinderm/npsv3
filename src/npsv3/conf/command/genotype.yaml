@@ -1,2 +1,52 @@
 # @package _global_
 command: genotype
+
+# Phased population VCF. If the sample is in it, the sample is excluded.
+population: ???
+
+# VCF of the variants to genotype, which may include variants not in the population VCF. If null, all of the population's
+# analysis variants are genotyped. Every record in the inference VCF is reported, even if it wasn't genotyped.
+inference: null
+
+# With an inference VCF, which regions to genotype: "inference" for the regions with an analysis variant with an inference
+# allele, or "all" for every region with an analysis variant (as without an inference VCF)
+region_selection: inference
+
+# Where to run the model: cpu, auto (every visible GPU, or else the CPU), a number of GPUs or a list of GPU indices
+devices: auto
+
+# Directory for the intermediate files (the graphs, images and predictions), which is always kept. If null, a temporary
+# directory.
+work_dir: null
+
+# Directory for the images, by default `images` in `work_dir`. If it has completed images, e.g., to evaluate a new model
+# without regenerating them, the input preparation, graphs and images are skipped after checking they were created from
+# the same inputs.
+images_dir: null
+
+# Graphs from an earlier run of this command, i.e., `graphs_ds/*.tar` and `unique_kmers` in its `work_dir`. Graphs can only
+# be reused for the same inputs, as the sample is excluded from them.
+graph_shards: null
+unique_kmer_path: null
+filtered_kmer_path: null
+
+# How to determine genotypes and qualities from the similarities of the real data to the simulated data
+scoring:
+  # Softmax temperature. If null, the temperature of the model's loss.
+  temperature: null
+  # How to combine each genotype's simulated replicates: mean, or max (as for the model's MaximizingPredictor)
+  aggregate: mean
+  # Maximum GQ
+  max_gq: 99
+
+# Settings for genotyping (these are also enforced, see `npsv3.genotyping.images.FORCED_SETTINGS`)
+skip_unlabeled: false
+hom_ref_downsample:
+  enabled: false
+genotype_subset:
+  enabled: false
+compare:
+  enabled: false
+# `haplotype.population_haplotype_topup` and `haplotype.add_true_haplotypes` are also forced off for genotyping, but
+# aren't set here because this is the default command, and so that would change the default for anything that composes
+# the default configuration.

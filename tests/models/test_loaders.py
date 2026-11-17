@@ -47,7 +47,39 @@ class TestSelectPacks:
         packs = select_packs(costs, budget=256)
 
         occupancy = sum(sum(costs[i] for i in pack) for pack in packs) / (len(packs) * 256)
-        assert occupancy > 0.90, f"First-fit-decreasing occupancy {occupancy:.3f} is below the 0.90 sanity threshold"
+        assert occupancy > 0.85, f"Next-fit occupancy {occupancy:.3f} is below the 0.85 sanity threshold"
+
+    def test_packs_are_consecutive_runs_of_the_input(self):
+        rng = random.Random(11)
+        costs = [1 + rng.randint(3, 36) for _ in range(500)]
+
+        packs = select_packs(costs, budget=128)
+
+        flattened = [i for pack in packs for i in pack]
+        assert flattened == list(range(len(costs))), "Next-fit must keep input order, without sorting or backfilling"
+        for pack in packs:
+            assert pack == list(range(pack[0], pack[-1] + 1)), "Each pack must be a consecutive run of the input"
+
+    def test_new_pack_starts_exactly_when_next_group_does_not_fit(self):
+        rng = random.Random(13)
+        costs = [1 + rng.randint(3, 36) for _ in range(500)]
+        budget = 128
+
+        packs = select_packs(costs, budget=budget)
+
+        for pack, next_pack in zip(packs, packs[1:]):
+            used = sum(costs[i] for i in pack)
+            assert used <= budget
+            assert used + costs[next_pack[0]] > budget, "A new pack may only start when the next group doesn't fit"
+
+    def test_exact_next_fit_assignment(self):
+        # FFD would produce [[1, 2], [0, 3], [4]]; next-fit never revisits a closed pack, even when a later group would fit
+        packs = select_packs([6, 8, 2, 4, 1], budget=10)
+        assert packs == [[0], [1, 2], [3, 4]]
+
+    def test_exact_fill_does_not_open_a_new_pack(self):
+        assert select_packs([5, 5, 5, 5], budget=10) == [[0, 1], [2, 3]]
+        assert select_packs([], budget=10) == []
 
     def test_deterministic(self):
         rng = random.Random(7)
@@ -60,11 +92,21 @@ class TestSelectPacks:
         packs = select_packs(costs, budget=256)
 
         assert len(packs) == 2, "Groups in different width buckets cannot share a pack"
-        assert sorted(packs) == [[0, 2], [1, 3]]
+        assert packs == [[0, 2], [1, 3]], "Buckets are emitted in first-appearance order"
+
+    def test_buckets_pack_next_fit_independently(self):
+        # Interleaved buckets: each bucket packs its own groups in input order, and one bucket's packs don't close the other's
+        costs = [(6, "a"), (6, "b"), (3, "a"), (5, "b"), (4, "a"), (4, "b"), (2, "a")]
+
+        packs = select_packs(costs, budget=10)
+
+        assert packs == [[0, 2], [4, 6], [1], [3, 5]]
 
     def test_oversized_group_rejected(self):
         with pytest.raises(ValueError, match="exceeds the budget"):
             select_packs([4, 400, 4], budget=256)
+        with pytest.raises(ValueError, match="exceeds the budget"):
+            select_packs([(4, "a"), (257, "b")], budget=256)
 
 
 class TestBuildPackedBatch:

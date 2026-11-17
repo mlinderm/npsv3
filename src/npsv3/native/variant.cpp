@@ -32,6 +32,9 @@ FTStatus ClassifyFT(const char* ft, int n) {
 
 // Index of the FORMAT field with the given dictionary id, or record->n_fmt if absent (or id < 0,
 // i.e. the field is not defined in the header at all).
+// Ploidy of the fully missing genotypes reported for sites-only records (which have no GT field to indicate the ploidy)
+constexpr int kSitesOnlyPloidy = 2;
+
 int FindFmtIndex(const bcf1_t* record, int id) {
   if (id < 0) return record->n_fmt;
   for (int i = 0; i < record->n_fmt; i++) {
@@ -264,9 +267,10 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id, int ft_i
   if (bcf_unpack(record_.get(), BCF_UN_ALL) < 0)
     throw std::runtime_error("Failed to unpack variant record for genotype extraction");
 
+  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   int gt_fmt_idx = FindFmtIndex(record_.get(), gt_id);
   if (gt_fmt_idx == record_->n_fmt) {
-    throw std::runtime_error("GT format field not present in variant record");
+    return std::vector<Variant::Genotype>(num_samples, Variant::Genotype::Missing(kSitesOnlyPloidy));
   }
   int ps_fmt_idx = FindFmtIndex(record_.get(), ps_id);
   int ft_fmt_idx = FindFmtIndex(record_.get(), ft_id);
@@ -279,7 +283,6 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id, int ft_i
   }
   bcf_fmt_t* ft_fmt = ft_fmt_idx < record_->n_fmt ? &record_->d.fmt[ft_fmt_idx] : nullptr;
 
-  int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   std::vector<Variant::Genotype> genotypes;
   genotypes.reserve(num_samples);
   for (int i = 0; i < num_samples; i++) {
@@ -297,9 +300,6 @@ std::vector<Variant::Genotype> Variant::Genotypes(int gt_id, int ps_id, int ft_i
 }
 
 std::vector<Variant::Genotype> Variant::Genotypes(bool filtered_as_missing) const {
-  if (!hdr_->HasGT()) {
-    throw std::runtime_error("GT format field not defined in variant file");
-  }
   return Genotypes(hdr_->GTId(), hdr_->PSId(), (filtered_as_missing && hdr_->HasFT()) ? hdr_->FTId() : -1);
 }
 
@@ -349,10 +349,6 @@ bool Variant::HasPassingGenotype() const {
 }
 
 Variant::SampleGenotype Variant::genotype(int sample_idx) const {
-  if (!hdr_->HasGT()) {
-    throw std::runtime_error("GT format field not defined in variant file");
-  }
-
   int num_samples = bcf_hdr_nsamples(hdr_->bcf_hdr());
   if (sample_idx < 0 || sample_idx >= num_samples) {
     throw std::out_of_range("Sample index out of range");
@@ -363,7 +359,7 @@ Variant::SampleGenotype Variant::genotype(int sample_idx) const {
 
   int gt_fmt_idx = FindFmtIndex(record_.get(), hdr_->GTId());
   if (gt_fmt_idx == record_->n_fmt) {
-    throw std::runtime_error("GT format field not present in variant record");
+    return SampleGenotype(Genotype::Missing(kSitesOnlyPloidy), false /* filtered */);
   }
   int ps_fmt_idx = hdr_->HasPS() ? FindFmtIndex(record_.get(), hdr_->PSId()) : record_->n_fmt;
   int ft_fmt_idx = hdr_->HasFT() ? FindFmtIndex(record_.get(), hdr_->FTId()) : record_->n_fmt;

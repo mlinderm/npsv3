@@ -182,6 +182,18 @@ class PackedGenotype {
     }
   }
 
+  // Fully missing genotype of the specified ploidy, i.e., identical to decoding "./." (if diploid)
+  static PackedGenotype Missing(int ploidy) {
+    if (ploidy < 1 || ploidy > kMaxPloidy) {
+      throw std::out_of_range("Genotype ploidy exceeds maximum supported ploidy");
+    }
+    PackedGenotype missing;
+    missing.num_alleles_ = ploidy;
+    std::fill(std::begin(missing.allele_indices_), std::begin(missing.allele_indices_) + ploidy, kMissingAllele);
+    missing.phase_ = Phase(Phase::kImplicit);
+    return missing;
+  }
+
   // Fully missing genotype with the same ploidy, i.e., identical to decoding "./." (or "." if haploid)
   PackedGenotype AsMissing() const {
     PackedGenotype missing(*this);
@@ -303,10 +315,12 @@ class Variant {
   virtual std::unique_ptr<Variant> SubsetSamples(const std::vector<int>& original_idxs) const = 0;
 
   // Genotypes for all samples. If filtered_as_missing, genotypes with a failing FT are reported as fully missing.
+  // Genotypes are reported as fully missing for all samples in sites-only records, i.e., records without a GT field.
   std::vector<Genotype> Genotypes(bool filtered_as_missing = false) const;
   bool HasPassingGenotype() const;
 
-  // Genotype and FT filter status for a single sample; sample_idx must be [0, num_samples)
+  // Genotype and FT filter status for a single sample; sample_idx must be [0, num_samples). The genotype is fully
+  // missing (and not filtered) in sites-only records, i.e., records without a GT field.
   SampleGenotype genotype(int sample_idx) const;
 
   friend std::ostream& operator<<(std::ostream&, const Variant&);

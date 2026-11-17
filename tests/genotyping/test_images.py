@@ -252,7 +252,7 @@ class TestHG00733GenotypingImages:
 
         population = create_vcf(tmp_path, HG00733_VCF, name="population.vcf.gz")
         inputs = prepare_genotyping_vcf(population, tmp_path / "work" / "inputs", sample_name=hg00733_sample.name)
-        assert inputs.excluded_sample
+        assert inputs.vcf_path == population, "Without an inference VCF, the sample stays in the population VCF"
         regions = genotyping_regions(inputs.vcf_path, flank=cfg.pileup.variant_padding, min_variant_size=50)
         assert len(regions) == 1
 
@@ -281,8 +281,7 @@ class TestHG00733GenotypingImages:
 
         store = WebdatasetFileStore(EPath(os.path.join(images.images_dir, "imgs_ds")))
         record = decode_haplotype_record(store[f"{row['key']}.{HAPLOTYPES_SUFFIX}"][0])
-        assert record["true"] == [None, None]
-        assert record["sample_paths"] == [None, None], "The excluded sample has no paths in the graph"
+        assert record["true"] == [None, None], "The sample's own paths in the graph never label the example"
         assert len(record["variant_ids"]) == 3, "Every variant in the region, not just the analysis variants"
         assert len(record["variant_alleles"]) == len(record["paths"])
         # The decoded alleles agree with the analysis variants' alleles, e.g., the haplotype at index 0 has no SV ALT alleles
@@ -332,6 +331,8 @@ class TestGenotypingImagesFailures:
         assert failure["region"] == str(region)
         assert failure["sample"] == "S1"
         assert len(failure["haplotypes"]["paths"]) == 1
+        # Every record in the region, i.e., `snv`, `del`, `snv_in_del` and `ins`. Without an inference VCF, only S1's
+        # genotypes are excluded, so its private `snv` and `del` are still candidates.
         assert failure["haplotypes"]["variant_alleles"] == [[0, 0, 0, 0]], "The reference haplotype"
         assert all(
             allele == 0 for _, allele in failure["haplotypes"]["alleles"][0]

@@ -51,6 +51,7 @@ FORCED_SETTINGS = {
     "genotype_subset.enabled": False,
     "compare.enabled": False,
     "haplotype.population_haplotype_topup": False,
+    "haplotype.add_true_haplotypes": False,
 }
 """Settings that only make sense for training, and so are forced for genotyping (see `genotyping_config`)"""
 
@@ -61,7 +62,10 @@ def genotyping_config(cfg: DictConfig, sample_name: str) -> DictConfig:
     - Unlabeled examples are kept (every example is unlabeled), and hom. ref. downsampling, genotype subsets and
       comparisons with the label are disabled.
     - Population top-up is disabled, since it adds the population's haplotypes rather than ones supported by the sample.
-    - The sample is added to `graph.population_excluded_samples`, as a guard against it informing the population prior.
+    - The sample's own ("true") haplotypes are never added to its candidate haplotypes, since its genotypes may still be
+      in the genotyping VCF (see `npsv3.genotyping.inputs.prepare_genotyping_vcf`).
+    - The sample is added to `graph.population_excluded_samples` (if not already), so its genotypes, if still in the
+      genotyping VCF, don't inform the population prior.
 
     Raises:
         ValueError: If `haplotype.strategy` isn't a `SampledHaplotypeStrategy`, e.g., `TrueHaplotypeStrategy` requires the

@@ -155,9 +155,20 @@ class PackedBatch:
 def select_packs(costs: Sequence[int | tuple[int, Hashable]], *, budget: int) -> list[list[int]]:
     """Bin pack groups into fixed-budget packs, returning the original indices assigned to each pack.
 
-    Groups are bucketed by width bucket first (so a pack never mixes geometries), then packed
-    first-fit-decreasing within each bucket. Pure and metadata-only: no pixels are touched. The
-    result is deterministic given the input order.
+    Groups are bucketed by width bucket first (so a pack never mixes geometries), then packed next-fit in input order
+    within each bucket: groups are added to the current pack until the next one doesn't fit, at which point a new pack
+    is started. Earlier packs are never backfilled and the input is never sorted. Pure and metadata-only: no pixels
+    are touched. The result is deterministic given the input order (no RNG).
+
+    Input order is preserved deliberately. The packing buffer arrives already shuffled, so filling packs in buffer
+    order is random packing, and every pack is a random sample of groups. Sorting by decreasing cost (as
+    first-fit-decreasing did) instead splits each round into packs of very different difficulty: per-group loss rises
+    steeply with the genotype count, so each round emitted one high-cost, high-loss pack, then a mostly 3-genotype
+    pack, then a small leftover, and position within the round dominated the per-batch loss. First-fit (without
+    sorting) is avoided too, since backfilling small groups into earlier packs skews the leftover toward large groups.
+    With next-fit the leftover pack is a random subset, and wasted slots come only from the one partial pack each call
+    ends in, so callers should pass enough groups to fill many packs (see `EnergonPackedImageDataModule`'s
+    `packing_buffer_size`).
 
     Args:
         costs: Per-group cost in image slots, either as a plain int or as a ``(cost, bucket)`` pair.
@@ -180,19 +191,21 @@ def select_packs(costs: Sequence[int | tuple[int, Hashable]], *, budget: int) ->
             raise ValueError(msg)
         buckets.setdefault(bucket, []).append((index, cost))
 
+    # Next-fit in input order. The under-filled final pack of each bucket is emitted as is; see the pushback TODO in
+    # `PackedGroupTaskEncoder.select_samples_to_pack` (npsv3.models.energon).
     packs: list[list[int]] = []
     for entries in buckets.values():
-        bins: list[tuple[list[int], list[int]]] = []  # ([remaining slots], [group indices])
-        # Decreasing cost, ties broken by original index so the result doesn't depend on sort stability
-        for index, cost in sorted(entries, key=lambda entry: (-entry[1], entry[0])):
-            for remaining, members in bins:
-                if remaining[0] >= cost:
-                    remaining[0] -= cost
-                    members.append(index)
-                    break
-            else:
-                bins.append(([budget - cost], [index]))
-        packs.extend(sorted(members) for _remaining, members in bins)
+        members: list[int] = []
+        remaining = budget
+        for index, cost in entries:
+            if cost > remaining:
+                packs.append(members)
+                members, remaining = [], budget
+            members.append(index)
+            remaining -= cost
+        if members:
+            packs.append(members)
+    # Indices are already ascending within each pack, since each bucket preserves input order
     return packs
 
 
@@ -272,70 +285,6 @@ def build_packed_batch(
         positive_weights=positive_weights,
         denominator_weights=denominator_weights,
     )
-
-
-def _pack_and_pad_images(
-    data: Iterable[tuple],
-    *,
-    batch_size=256,
-    image_transform=None,
-    pad=False,
-    padding_value=LABEL_PADDING_VALUE,
-    width_bucket=None,
-) -> Generator[PackedBatch, None, None]:
-    """Packs and pads real and support images into batches of <= batch_size images.
-
-    Greedy and sequential with no lookahead. See `select_packs` for the buffered alternative used by
-    the energon loader.
-
-    Args:
-        data (Iterable[tuple]): Iterable of (query, support, label_rank, genotype_label, *meta) tuples,
-            where support is replicates-major (R, G, C, H, W).
-        batch_size (int, optional): Maximum number of images in the batch. Defaults to 256.
-        image_transform (optional): Transform applied to the packed images, e.g. normalization. Applied to
-            the whole batch at once, so padding rows are transformed as the empty images they are. Defaults to None.
-        pad (bool, optional): Pad batches to maximum size. Images are zero padded, labels with padding_value.
-        padding_value (int, optional): Value to use for padding labels. Defaults to -100.
-        width_bucket (int | None, optional): Width to pad images out to. Defaults to the widest group in the batch.
-
-    Yields:
-        Generator[PackedBatch, None, None]: Packed batches. Offsets record the start of each group's support images.
-    """
-
-    def finish(groups: list[ImageGroup]) -> PackedBatch:
-        batch = build_packed_batch(
-            groups, budget=batch_size, pad=pad, width_bucket=width_bucket, padding_value=padding_value
-        )
-        if image_transform is not None:
-            batch.images = image_transform(batch.images)
-        return batch
-
-    groups: list[ImageGroup] = []
-    num_images = 0  # Number of images in the current batch (must be <= batch_size)
-    for sample in data:
-        query, support, label_rank, genotype_label, *addl = sample
-        group = ImageGroup(
-            query=query,
-            support=support,
-            label_rank=label_rank,
-            genotype_label=genotype_label,
-            meta=(addl[0] if len(addl) == 1 else tuple(addl)) if addl else None,
-        )
-        cost = group.cost(width_bucket=width_bucket)
-
-        if groups and num_images + cost > batch_size:
-            # If the current sample doesn't fit, yield the current batch and reset
-            final = finish(groups)
-            groups = []
-            num_images = 0
-            yield final
-
-        groups.append(group)
-        num_images += cost
-
-    # If there are any remaining images, yield the final batch
-    if groups:
-        yield finish(groups)
 
 
 def group_to_image(cfg, batch: PackedBatch, group: int = 0, out_path: PathType | None = None, **kwargs):

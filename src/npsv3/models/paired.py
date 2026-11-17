@@ -1,3 +1,4 @@
+import inspect
 import logging
 import math
 from collections.abc import Callable
@@ -577,17 +578,38 @@ class PackedVariant(L.LightningModule):
         return self(batch)
 
     def configure_optimizers(self):
+        # timm's `create_optimizer_v2` takes the model (to apply `no_weight_decay`), while torch optimizers take the
+        # parameters
+        optimizer_factory = self.hparams.optimizer
+        if getattr(getattr(optimizer_factory, "func", optimizer_factory), "__module__", "").startswith("timm."):
+            optimizer = optimizer_factory(self.trainer.model)
+        else:
+            optimizer = optimizer_factory(params=self.trainer.model.parameters())
+
         if self.hparams.scheduler is None:
-            optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-            return { "optimizer": optimizer }
+            return {"optimizer": optimizer}
 
         # Based on https://lightning.ai/docs/pytorch/stable/common/optimization.html#bring-your-own-custom-learning-rate-schedulers
-        optimizer = self.hparams.optimizer(self.trainer.model)
-        scheduler= self.hparams.scheduler(optimizer=optimizer)
+        scheduler_factory = self.hparams.scheduler
+        scheduler_kwargs = {}
+        if "total_steps" in inspect.signature(scheduler_factory).parameters:
+            # A step-based schedule (e.g., `schedulers.warmup_cosine`) needs the run's total optimizer steps, which
+            # accounts for max_epochs/max_steps, the (virtual) epoch length set via `limit_train_batches`, gradient
+            # accumulation and the number of DDP ranks
+            total_steps = self.trainer.estimated_stepping_batches
+            if not math.isfinite(total_steps):
+                raise ValueError("A step-based LR schedule requires a finite trainer max_epochs or max_steps")
+            scheduler_kwargs["total_steps"] = int(total_steps)
+        scheduler = scheduler_factory(optimizer=optimizer, **scheduler_kwargs)
+
+        if isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler):
+            # torch schedulers are stepped once per optimizer step
+            return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+        # timm schedulers are stepped once per epoch (see `lr_scheduler_step`)
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
     def lr_scheduler_step(self, scheduler, metric):
-        if self.hparams.scheduler is None:
+        if isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler):
             super().lr_scheduler_step(scheduler, metric)
         else:
             # timm's schedulers appear to need the "next" epoch at each step

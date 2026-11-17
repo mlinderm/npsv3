@@ -441,11 +441,12 @@ def prepare_genotyping_haplotypes(
     sample_name: str,
     ploidy: int = 2,
     exact_reference: bool = False,
+    add_true_haplotypes: bool = True,
 ) -> tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]:
     """Extend and reorder sampled haplotypes so they are suitable for genotyping.
 
     The returned haplotypes are guaranteed to include the reference haplotype (at index 0) and, for
-    any "true" haplotype path present in the graph for `sample_name`, that haplotype as well. Haplotypes
+    any "true" haplotype path present in the graph for `sample_name` (if `add_true_haplotypes`), that haplotype as well. Haplotypes
     already present among `haplotypes` are reused (and reordered as needed); the same true haplotype
     repeated across ploidy indices (e.g. a homozygous genotype) is only added once.
 
@@ -464,6 +465,9 @@ def prepare_genotyping_haplotypes(
             graph's `contig` path (i.e., the reference sequence). By default, index 0 is any haplotype
             with only reference alleles for `analysis_variants`, which may differ from the reference path
             elsewhere (e.g., at non-analysis variants). Defaults to False.
+        add_true_haplotypes (bool, optional): If False, the sample's "true" haplotype paths are ignored (e.g., when
+            genotyping, the sample's own paths must not inform its candidate haplotypes), and so `true_haplotype_idxs`
+            is empty. Defaults to True.
 
     Returns:
         tuple[list[Sequence[int]], list[set[tuple[str, int]]], list[int | None]]: A tuple of:
@@ -471,7 +475,8 @@ def prepare_genotyping_haplotypes(
             - alleles: List of sets of (variant_id, allele) tuples for each haplotype, parallel to `haplotypes`.
             - true_haplotype_idxs: The sample's genotype as indices into `haplotypes`/`alleles`, one per
               ploidy index (in ploidy order), with `None` for any ploidy index whose path isn't present in
-              the graph. Empty if none of the sample's "true" haplotype paths are present in the graph.
+              the graph. Empty if none of the sample's "true" haplotype paths are present in the graph (or
+              `add_true_haplotypes` is False).
     """
     haplotypes = list(haplotypes) # Make copy of haplotypes so we can modify it without affecting the caller
     # Resolved once here so every identity comparison below is a plain set equality against already-resolved sets.
@@ -502,6 +507,9 @@ def prepare_genotyping_haplotypes(
                 # Exact reference already sampled with identical alleles, so drop the inexact index 0 duplicate
                 haplotypes[0] = haplotypes.pop(existing_idx)
                 alleles.pop(existing_idx)
+
+    if not add_true_haplotypes:
+        return haplotypes, alleles, []
 
     # For each ploidy index with a fully resolved "true" path in the graph, ensure that haplotype is
     # present in the haplotype list and report its index (i.e., the sample's genotype).

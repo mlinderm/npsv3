@@ -284,7 +284,8 @@ class HaplotypeStrategy(abc.ABC):
 
 class SampledHaplotypeStrategy(HaplotypeStrategy):
     """Sample haplotypes from the graph using sample-specific k-mer counts, adding the reference and any "true"
-    haplotypes present in the graph, and optionally "topping-up" with population haplotypes."""
+    haplotypes present in the graph (unless `haplotype.add_true_haplotypes` is false), and optionally "topping-up" with
+    population haplotypes."""
 
     def __call__(
         self,
@@ -311,7 +312,7 @@ class SampledHaplotypeStrategy(HaplotypeStrategy):
         # in the graph, are included with the reference haplotype guaranteed to be at index 0.
         haplotypes, alleles, true_haplotype_idxs = prepare_genotyping_haplotypes(
             graph, sampler, haplotypes, analysis_variants, region.contig, sample.name, ploidy=ploidy,
-            exact_reference=exact_reference,
+            exact_reference=exact_reference, add_true_haplotypes=cfg.haplotype.get("add_true_haplotypes", True),
         )
         if len(haplotypes) < 2 and cfg.haplotype.population_haplotype_topup:  # noqa: PLR2004
             # Only attempt "top-up" from the population if the sampler did not produce any haplotype diversity (and if
